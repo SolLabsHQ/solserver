@@ -9,6 +9,7 @@ export type Transmission = {
   id: string;
   packetType: "chat";
   threadId: string;
+  clientRequestId?: string;
   message: string;
   modeDecision: ModeDecision;
   createdAt: string;
@@ -33,11 +34,19 @@ export type UsageRecord = {
   createdAt: string;
 };
 
+export type ChatResult = {
+  transmissionId: string;
+  assistant: string;
+  createdAt: string;
+};
+
 export interface ControlPlaneStore {
   createTransmission(args: {
     packet: PacketInput;
     modeDecision: ModeDecision;
   }): Promise<Transmission>;
+
+  getTransmissionByClientRequestId(clientRequestId: string): Promise<Transmission | null>;
 
   updateTransmissionStatus(args: {
     transmissionId: string;
@@ -62,22 +71,30 @@ export interface ControlPlaneStore {
   getTransmission(transmissionId: string): Promise<Transmission | null>;
   getDeliveryAttempts(transmissionId: string): Promise<DeliveryAttempt[]>;
   getUsage(transmissionId: string): Promise<UsageRecord[]>;
+
+  getChatResult(transmissionId: string): Promise<ChatResult | null>;
+  setChatResult(args: { transmissionId: string; assistant: string }): Promise<ChatResult>;
 }
 
 export class MemoryControlPlaneStore implements ControlPlaneStore {
   private transmissions = new Map<string, Transmission>();
   private attempts = new Map<string, DeliveryAttempt[]>();
   private usage = new Map<string, UsageRecord[]>();
+  private clientRequestIndex = new Map<string, string>(); // clientRequestId -> transmissionId
+  private chatResults = new Map<string, ChatResult>(); // transmissionId -> cached result
 
   async createTransmission(args: {
     packet: PacketInput;
     modeDecision: ModeDecision;
   }): Promise<Transmission> {
     const id = randomUUID();
+    const clientRequestId = (args.packet as any).clientRequestId as string | undefined;
+
     const t: Transmission = {
       id,
       packetType: "chat",
       threadId: args.packet.threadId,
+      clientRequestId,
       message: args.packet.message,
       modeDecision: args.modeDecision,
       createdAt: new Date().toISOString(),
@@ -85,7 +102,18 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     };
 
     this.transmissions.set(id, t);
+
+    if (t.clientRequestId) {
+      this.clientRequestIndex.set(t.clientRequestId, id);
+    }
+
     return t;
+  }
+
+  async getTransmissionByClientRequestId(clientRequestId: string): Promise<Transmission | null> {
+    const id = this.clientRequestIndex.get(clientRequestId);
+    if (!id) return null;
+    return this.transmissions.get(id) ?? null;
   }
 
   async updateTransmissionStatus(args: {
@@ -149,5 +177,19 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
 
   async getUsage(transmissionId: string): Promise<UsageRecord[]> {
     return this.usage.get(transmissionId) ?? [];
+  }
+
+  async getChatResult(transmissionId: string): Promise<ChatResult | null> {
+    return this.chatResults.get(transmissionId) ?? null;
+  }
+
+  async setChatResult(args: { transmissionId: string; assistant: string }): Promise<ChatResult> {
+    const r: ChatResult = {
+      transmissionId: args.transmissionId,
+      assistant: args.assistant,
+      createdAt: new Date().toISOString(),
+    };
+    this.chatResults.set(args.transmissionId, r);
+    return r;
   }
 }
