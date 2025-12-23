@@ -16,6 +16,20 @@ export async function chatRoutes(
   // Explicit OPTIONS handler for predictable CORS preflight behavior.
   app.options("/chat", async (_req, reply) => reply.code(204).send());
 
+  // Debug endpoint: inspect a transmission and its associated attempts/usage.
+  app.get("/transmissions/:id", async (req, reply) => {
+    const id = (req.params as any).id as string;
+    const transmission = await store.getTransmission(id);
+    if (!transmission) {
+      return reply.code(404).send({ error: "not_found" });
+    }
+
+    const attempts = await store.getDeliveryAttempts(id);
+    const usage = await store.getUsage(id);
+
+    return { ok: true, transmission, attempts, usage };
+  });
+ 
   app.post("/chat", async (req, reply) => {
     const parsed = PacketInput.safeParse(req.body);
     if (!parsed.success) {

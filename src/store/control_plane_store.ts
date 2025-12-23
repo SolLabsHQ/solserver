@@ -1,5 +1,3 @@
-
-
 import { randomUUID } from "node:crypto";
 
 import type { PacketInput, ModeDecision } from "../contracts/chat";
@@ -62,6 +60,8 @@ export interface ControlPlaneStore {
 
   // Optional read helpers (handy for debugging)
   getTransmission(transmissionId: string): Promise<Transmission | null>;
+  getDeliveryAttempts(transmissionId: string): Promise<DeliveryAttempt[]>;
+  getUsage(transmissionId: string): Promise<UsageRecord[]>;
 }
 
 export class MemoryControlPlaneStore implements ControlPlaneStore {
@@ -141,5 +141,13 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
 
   async getTransmission(transmissionId: string): Promise<Transmission | null> {
     return this.transmissions.get(transmissionId) ?? null;
+  }
+
+  async getDeliveryAttempts(transmissionId: string): Promise<DeliveryAttempt[]> {
+    return this.attempts.get(transmissionId) ?? [];
+  }
+
+  async getUsage(transmissionId: string): Promise<UsageRecord[]> {
+    return this.usage.get(transmissionId) ?? [];
   }
 }
