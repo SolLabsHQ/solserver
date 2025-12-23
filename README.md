@@ -58,8 +58,8 @@ SolServer sits between:
 - **Inference Providers (LLMs)**  
   Treated as stateless reasoning engines
 
-- **Memory Store (Fly Postgres)**  
-  Stores only explicit memory objects
+- **Control Plane Store (SQLite → Turso)**  
+  Stores only explicit memory objects + minimal audit/usage metadata
 
 SolServer enforces trust boundaries and policy across these systems.
 
@@ -68,6 +68,9 @@ SolServer enforces trust boundaries and policy across these systems.
 ## API Surface (v0)
 
 SolServer exposes a minimal API:
+
+- `GET /healthz`  
+  Returns service status for SolMobile connectivity tests
 
 - `POST /v1/chat`  
   Performs bounded inference with optional retrieval summaries
@@ -100,7 +103,8 @@ SolServer does not accumulate implicit state.
 ## Hosting and Runtime
 
 - Containerized service
-- Hosted on Fly.io
+- Local-first for v0 development (no paid services required to start)
+- Hosted on Fly.io for deployment (later)
 - Stateless by default
 - Persistent writes limited to:
   - explicit memory objects
@@ -127,6 +131,50 @@ The current focus is correctness, clarity, and constraint enforcement rather tha
 
 ---
 
+## Repository Layout (v0)
+
+Planned directory structure (we will create these as we build):
+
+- `docs/` — design docs, ADR references, flow packs
+- `src/` — server code
+  - `src/index.ts` — Fastify app entry
+  - `src/routes/` — HTTP routes (v0 minimal)
+  - `src/contracts/` — Zod schemas + types
+  - `src/control-plane/` — Packet/Transmission pipeline + mode routing
+  - `src/gates/` — Rigor gate + governance lint (skeleton first)
+  - `src/providers/` — fake model provider now; OpenAI provider later
+  - `src/store/` — SQLite store (local file) now; Turso later
+- `test/` or `src/**/*.test.ts` — Vitest tests
+
+## Local Development (v0)
+
+We start locally (free) and only deploy once SolMobile can complete the end-to-end handshake.
+
+### Quick start
+```bash
+npm init -y
+npm i fastify zod pino-pretty
+npm i -D typescript tsx @types/node vitest supertest
+npx tsc --init
+mkdir -p src/routes src/contracts src/control-plane src/gates src/providers src/store
+```
+
+Run:
+```bash
+npm run dev
+```
+
+Test:
+```bash
+curl http://localhost:3333/healthz
+```
+
+### Provider toggle (planned)
+- Default provider is a **fake model** for pipeline testing.
+- OpenAI wiring is added later behind an environment flag.
+
+---
+
 ## Related Documentation
 
 - `infra-docs/architecture/context.md`
@@ -134,3 +182,4 @@ The current focus is correctness, clarity, and constraint enforcement rather tha
 - `infra-docs/decisions/ADR-003-explicit-memory.md`
 - `infra-docs/decisions/ADR-004-fly-io-hosting.md`
 - `infra-docs/schemas/v0/api-contracts.md`
+- `docs/design/solserver-v0-control-plane-flow-process-pack.md`
