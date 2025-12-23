@@ -1,0 +1,24 @@
+{
+  "name": "solserver",
+  "version": "1.0.0",
+  "description": "SolServer is the backend runtime for SolMobile v0.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SolLabsHQ/solserver.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/SolLabsHQ/solserver/issues"
+  },
+  "homepage": "https://github.com/SolLabsHQ/solserver#readme"
+}
