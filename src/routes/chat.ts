@@ -136,6 +136,18 @@ export async function chatRoutes(
       });
     }
 
+    // Dev/testing hook: simulate an accepted-but-pending response (202).
+    // This lets SolMobile validate "pending" behavior before we implement async delivery.
+    if (simulate === "202") {
+      return reply.code(202).send({
+        ok: true,
+        transmissionId: transmission.id,
+        status: "created",
+        pending: true,
+        simulated: true,
+      });
+    }
+
     let assistant: string;
 
     try {
