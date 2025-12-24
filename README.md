@@ -135,16 +135,16 @@ The current focus is correctness, clarity, and constraint enforcement rather tha
 
 Planned directory structure (we will create these as we build):
 
-- `docs/` — design docs, ADR references, flow packs
-- `src/` — server code
-  - `src/index.ts` — Fastify app entry
-  - `src/routes/` — HTTP routes (v0 minimal)
-  - `src/contracts/` — Zod schemas + types
-  - `src/control-plane/` — Packet/Transmission pipeline + mode routing
-  - `src/gates/` — Rigor gate + governance lint (skeleton first)
-  - `src/providers/` — fake model provider now; OpenAI provider later
-  - `src/store/` — SQLite store (local file) now; Turso later
-- `test/` or `src/**/*.test.ts` — Vitest tests
+- `docs/` - design docs, ADR references, flow packs
+- `src/` - server code
+  - `src/index.ts` - Fastify app entry
+  - `src/routes/` - HTTP routes (v0 minimal)
+  - `src/contracts/` - Zod schemas + types
+  - `src/control-plane/` - Packet/Transmission pipeline + mode routing
+  - `src/gates/` - Rigor gate + governance lint (skeleton first)
+  - `src/providers/` - fake model provider now; OpenAI provider later
+  - `src/store/` - SQLite store (local file) now; Turso later
+- `test/` or `src/**/*.test.ts` - Vitest tests
 
 ## Local Development (v0)
 
@@ -168,6 +168,38 @@ Test:
 ```bash
 curl http://localhost:3333/healthz
 ```
+
+### Simulate status codes (dev)
+
+Use the header `x-sol-simulate-status`.
+
+#### Simulate 500
+```bash
+CID="c500-$(date +%s)"
+curl -i -s -X POST http://127.0.0.1:3333/v1/chat \
+  -H 'content-type: application/json' \
+  -H 'x-sol-simulate-status: 500' \
+  -d "{\"threadId\":\"t1\",\"clientRequestId\":\"$CID\",\"message\":\"hello\"}" | head -n 20
+```
+
+#### Simulate 202 (accepted, completes later)
+SolServer returns 202 immediately, then completes the transmission shortly after.
+Poll `GET /v1/transmissions/:id` to fetch completion and assistant.
+
+```bash
+CID="c202-$(date +%s)"
+RESP=$(curl -s -X POST http://127.0.0.1:3333/v1/chat \
+  -H 'content-type: application/json' \
+  -H 'x-sol-simulate-status: 202' \
+  -d "{\"threadId\":\"t1\",\"clientRequestId\":\"$CID\",\"message\":\"hello 202\"}")
+
+echo "$RESP" | jq
+TID=$(echo "$RESP" | jq -r '.transmissionId')
+
+curl -s http://127.0.0.1:3333/v1/transmissions/$TID | jq
+```
+
+Note: SolMobile v0 can resolve 202 via polling, but we are not running an automatic poll loop yet. Manual pumping (leave and return to the thread view) is acceptable for now.
 
 ### Provider toggle (planned)
 - Default provider is a **fake model** for pipeline testing.
