@@ -114,8 +114,29 @@ export async function chatRoutes(
       transmission = await store.createTransmission({ packet, modeDecision });
     }
 
+    // Attach transmissionId for HTTP summary logs (onResponse hook reads this header).
+    reply.header("x-sol-transmission-id", transmission.id);
+
+    // Route-scoped logger for control-plane tracing (keeps logs searchable).
+    const log = req.log.child({
+      plane: "chat",
+      transmissionId: transmission.id,
+      threadId: packet.threadId,
+      clientRequestId: packet.clientRequestId ?? undefined,
+      modeLabel: modeDecision?.modeLabel ?? undefined,
+    });
+
+    log.debug({
+      idempotency: Boolean(packet.clientRequestId),
+      status: transmission.status,
+      domainFlags: modeDecision?.domainFlags ?? [],
+    }, "control_plane.transmission_ready");
+
     // Dev/testing hook: force a 500 when requested.
     const simulate = String((req.headers as any)["x-sol-simulate-status"] ?? "");
+    if (simulate) {
+      log.info({ simulate }, "simulate_status");
+    }
     if (simulate === "500") {
       await store.appendDeliveryAttempt({
         transmissionId: transmission.id,
@@ -170,6 +191,8 @@ export async function chatRoutes(
           status: "failed",
         });
 
+        log.warn({ error: lint.error }, "gate.post_lint_failed");
+
         return reply.code(500).send({
           error: "post_lint_failed",
           details: lint.error,
@@ -189,6 +212,8 @@ export async function chatRoutes(
         transmissionId: transmission.id,
         status: "failed",
       });
+
+      log.error({ error: String(err?.message ?? err) }, "provider.failed");
 
       return reply.code(500).send({
         error: "provider_failed",
@@ -216,6 +241,11 @@ export async function chatRoutes(
     });
 
     await store.setChatResult({ transmissionId: transmission.id, assistant });
+
+    log.info({
+      status: "completed",
+      outputChars: assistant.length,
+    }, "delivery.completed");
 
     return {
       ok: true,
