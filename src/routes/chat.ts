@@ -40,10 +40,101 @@ export async function chatRoutes(
     }
 
     const packet = parsed.data;
-    const modeDecision = routeMode(packet);
 
-    // Create a control-plane Transmission record up front.
-    const transmission = await store.createTransmission({ packet, modeDecision });
+    // --- Idempotency + retry semantics ---
+    // If clientRequestId is provided, we dedupe retries. Behavior by stored status:
+    // - completed: replay cached assistant (200)
+    // - created: in-flight/pending (202)
+    // - failed: allow retry (re-run provider) using SAME transmission id
+    let transmission: any | null = null;
+    let modeDecision: any;
+
+    if (packet.clientRequestId) {
+      const existing = await store.getTransmissionByClientRequestId(packet.clientRequestId);
+
+      if (existing) {
+        // Guard: same idempotency key must not be reused for a different payload.
+        if (existing.threadId !== packet.threadId || existing.message !== packet.message) {
+          return reply.code(409).send({
+            error: "idempotency_conflict",
+            transmissionId: existing.id,
+          });
+        }
+
+        // Completed: replay cached assistant.
+        if (existing.status === "completed") {
+          const cached = await store.getChatResult(existing.id);
+          if (cached) {
+            return {
+              ok: true,
+              transmissionId: existing.id,
+              modeDecision: existing.modeDecision,
+              assistant: cached.assistant,
+              idempotentReplay: true,
+            };
+          }
+
+          // Completed but no cached assistant (shouldn't happen) => treat as pending.
+          return reply.code(202).send({
+            ok: true,
+            transmissionId: existing.id,
+            status: existing.status,
+            pending: true,
+            idempotentReplay: true,
+          });
+        }
+
+        // Created: treat as in-flight/pending.
+        if (existing.status === "created") {
+          return reply.code(202).send({
+            ok: true,
+            transmissionId: existing.id,
+            status: existing.status,
+            pending: true,
+            idempotentReplay: true,
+          });
+        }
+
+        // Failed: allow retry. Reuse the existing transmission id + modeDecision.
+        if (existing.status === "failed") {
+          transmission = existing;
+          modeDecision = existing.modeDecision;
+          await store.updateTransmissionStatus({
+            transmissionId: transmission.id,
+            status: "created",
+          });
+        }
+      }
+    }
+
+    // First attempt path (no existing transmission found)
+    if (!transmission) {
+      modeDecision = routeMode(packet);
+      // Create a control-plane Transmission record up front.
+      transmission = await store.createTransmission({ packet, modeDecision });
+    }
+
+    // Dev/testing hook: force a 500 when requested.
+    const simulate = String((req.headers as any)["x-sol-simulate-status"] ?? "");
+    if (simulate === "500") {
+      await store.appendDeliveryAttempt({
+        transmissionId: transmission.id,
+        provider: "fake",
+        status: "failed",
+        error: "simulated_500",
+      });
+
+      await store.updateTransmissionStatus({
+        transmissionId: transmission.id,
+        status: "failed",
+      });
+
+      return reply.code(500).send({
+        error: "simulated_failure",
+        transmissionId: transmission.id,
+        retryable: true,
+      });
+    }
 
     let assistant: string;
 
@@ -67,7 +158,12 @@ export async function chatRoutes(
           status: "failed",
         });
 
-        return reply.code(500).send({ error: "post_lint_failed", details: lint.error });
+        return reply.code(500).send({
+          error: "post_lint_failed",
+          details: lint.error,
+          transmissionId: transmission.id,
+          retryable: false,
+        });
       }
     } catch (err: any) {
       await store.appendDeliveryAttempt({
@@ -82,7 +178,11 @@ export async function chatRoutes(
         status: "failed",
       });
 
-      return reply.code(500).send({ error: "provider_failed" });
+      return reply.code(500).send({
+        error: "provider_failed",
+        transmissionId: transmission.id,
+        retryable: true,
+      });
     }
 
     await store.appendDeliveryAttempt({
@@ -102,6 +202,8 @@ export async function chatRoutes(
       transmissionId: transmission.id,
       status: "completed",
     });
+
+    await store.setChatResult({ transmissionId: transmission.id, assistant });
 
     return {
       ok: true,
