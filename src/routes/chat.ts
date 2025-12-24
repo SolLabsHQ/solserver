@@ -1,0 +1,370 @@
+import type { FastifyInstance } from "fastify";
+
+import { PacketInput } from "../contracts/chat";
+import { routeMode } from "../control-plane/router";
+import { postOutputLinter } from "../gates/post_linter";
+import { fakeModelReply } from "../providers/fake_model";
+import type { ControlPlaneStore } from "../store/control_plane_store";
+import { MemoryControlPlaneStore } from "../store/control_plane_store";
+
+export async function chatRoutes(
+  app: FastifyInstance,
+  opts: { store?: ControlPlaneStore } = {}
+) {
+  const store = opts.store ?? new MemoryControlPlaneStore();
+
+  // Dev-only async completion guard for simulated 202 (prevents duplicate background timers per transmission).
+  const pendingCompletions = new Set<string>();
+
+  // Explicit OPTIONS handler for predictable CORS preflight behavior.
+  app.options("/chat", async (_req, reply) => reply.code(204).send());
+
+  // Debug endpoint: inspect a transmission and its associated attempts/usage/result.
+  app.get("/transmissions/:id", async (req, reply) => {
+    const id = (req.params as any).id as string;
+    const transmission = await store.getTransmission(id);
+    if (!transmission) {
+      return reply.code(404).send({ error: "not_found" });
+    }
+
+    const attempts = await store.getDeliveryAttempts(id);
+    const usage = await store.getUsage(id);
+    const result = await store.getChatResult(id);
+
+    return {
+      ok: true,
+      transmission,
+      pending: transmission.status === "created",
+      assistant: result?.assistant ?? null,
+      attempts,
+      usage,
+    };
+  });
+ 
+  app.post("/chat", async (req, reply) => {
+    const parsed = PacketInput.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        details: parsed.error.flatten(),
+      });
+    }
+
+    const packet = parsed.data;
+
+    // --- Idempotency + retry semantics ---
+    // If clientRequestId is provided, we dedupe retries. Behavior by stored status:
+    // - completed: replay cached assistant (200)
+    // - created: in-flight/pending (202)
+    // - failed: allow retry (re-run provider) using SAME transmission id
+    let transmission: any | null = null;
+    let modeDecision: any;
+
+    if (packet.clientRequestId) {
+      const existing = await store.getTransmissionByClientRequestId(packet.clientRequestId);
+
+      if (existing) {
+        // Guard: same idempotency key must not be reused for a different payload.
+        if (existing.threadId !== packet.threadId || existing.message !== packet.message) {
+          return reply.code(409).send({
+            error: "idempotency_conflict",
+            transmissionId: existing.id,
+          });
+        }
+
+        // Completed: replay cached assistant.
+        if (existing.status === "completed") {
+          const cached = await store.getChatResult(existing.id);
+          if (cached) {
+            return {
+              ok: true,
+              transmissionId: existing.id,
+              modeDecision: existing.modeDecision,
+              assistant: cached.assistant,
+              idempotentReplay: true,
+            };
+          }
+
+          // Completed but no cached assistant (shouldn't happen) => treat as pending.
+          return reply.code(202).send({
+            ok: true,
+            transmissionId: existing.id,
+            status: existing.status,
+            pending: true,
+            idempotentReplay: true,
+          });
+        }
+
+        // Created: treat as in-flight/pending.
+        if (existing.status === "created") {
+          return reply.code(202).send({
+            ok: true,
+            transmissionId: existing.id,
+            status: existing.status,
+            pending: true,
+            idempotentReplay: true,
+          });
+        }
+
+        // Failed: allow retry. Reuse the existing transmission id + modeDecision.
+        if (existing.status === "failed") {
+          transmission = existing;
+          modeDecision = existing.modeDecision;
+          await store.updateTransmissionStatus({
+            transmissionId: transmission.id,
+            status: "created",
+          });
+        }
+      }
+    }
+
+    // First attempt path (no existing transmission found)
+    if (!transmission) {
+      modeDecision = routeMode(packet);
+      // Create a control-plane Transmission record up front.
+      transmission = await store.createTransmission({ packet, modeDecision });
+    }
+
+    // Attach transmissionId for HTTP summary logs (onResponse hook reads this header).
+    reply.header("x-sol-transmission-id", transmission.id);
+
+    // Route-scoped logger for control-plane tracing (keeps logs searchable).
+    const log = req.log.child({
+      plane: "chat",
+      transmissionId: transmission.id,
+      threadId: packet.threadId,
+      clientRequestId: packet.clientRequestId ?? undefined,
+      modeLabel: modeDecision?.modeLabel ?? undefined,
+    });
+
+    log.debug({
+      idempotency: Boolean(packet.clientRequestId),
+      status: transmission.status,
+      domainFlags: modeDecision?.domainFlags ?? [],
+    }, "control_plane.transmission_ready");
+
+    // Dev/testing hook: force a 500 when requested.
+    const simulate = String((req.headers as any)["x-sol-simulate-status"] ?? "");
+    if (simulate) {
+      log.info({ simulate }, "simulate_status");
+    }
+    if (simulate === "500") {
+      await store.appendDeliveryAttempt({
+        transmissionId: transmission.id,
+        provider: "fake",
+        status: "failed",
+        error: "simulated_500",
+      });
+
+      await store.updateTransmissionStatus({
+        transmissionId: transmission.id,
+        status: "failed",
+      });
+
+      return reply.code(500).send({
+        error: "simulated_failure",
+        transmissionId: transmission.id,
+        retryable: true,
+      });
+    }
+
+    // Dev/testing hook: simulate an accepted-but-pending response (202) that COMPLETES shortly after.
+    // SolMobile can poll GET /transmissions/:id to observe created -> completed and fetch assistant.
+    if (simulate === "202") {
+      const transmissionId = transmission.id;
+
+      if (!pendingCompletions.has(transmissionId)) {
+        pendingCompletions.add(transmissionId);
+
+        const bgLog = app.log.child({
+          plane: "chat",
+          transmissionId,
+          threadId: packet.threadId,
+          clientRequestId: packet.clientRequestId ?? undefined,
+          modeLabel: modeDecision?.modeLabel ?? undefined,
+          async: true,
+        });
+
+        // Small fixed delay is enough for v0 testing. We'll replace with real async provider later.
+        const delayMs = 750;
+
+        setTimeout(async () => {
+          try {
+            const current = await store.getTransmission(transmissionId);
+            if (!current) {
+              bgLog.warn({ status: "missing" }, "delivery.async.skip");
+              return;
+            }
+
+            // If already terminal, don't double-complete.
+            if (current.status !== "created") {
+              bgLog.info({ status: current.status }, "delivery.async.skip");
+              return;
+            }
+
+            const assistant = await fakeModelReply({
+              userText: packet.message,
+              modeLabel: modeDecision.modeLabel,
+            });
+
+            const lint = postOutputLinter({
+              modeLabel: modeDecision.modeLabel,
+              content: assistant,
+            });
+
+            if (!lint.ok) {
+              await store.appendDeliveryAttempt({
+                transmissionId,
+                provider: "fake",
+                status: "failed",
+                error: lint.error,
+              });
+
+              await store.updateTransmissionStatus({
+                transmissionId,
+                status: "failed",
+              });
+
+              bgLog.warn({ error: lint.error }, "gate.post_lint_failed_async");
+              return;
+            }
+
+            await store.appendDeliveryAttempt({
+              transmissionId,
+              provider: "fake",
+              status: "succeeded",
+              outputChars: assistant.length,
+            });
+
+            await store.recordUsage({
+              transmissionId,
+              inputChars: packet.message.length,
+              outputChars: assistant.length,
+            });
+
+            await store.updateTransmissionStatus({
+              transmissionId,
+              status: "completed",
+            });
+
+            await store.setChatResult({ transmissionId, assistant });
+
+            bgLog.info({ status: "completed", outputChars: assistant.length }, "delivery.completed_async");
+          } catch (err: any) {
+            const msg = String(err?.message ?? err);
+
+            await store.appendDeliveryAttempt({
+              transmissionId,
+              provider: "fake",
+              status: "failed",
+              error: msg,
+            });
+
+            await store.updateTransmissionStatus({
+              transmissionId,
+              status: "failed",
+            });
+
+            bgLog.error({ error: msg }, "provider.failed_async");
+          } finally {
+            pendingCompletions.delete(transmissionId);
+          }
+        }, delayMs);
+      }
+
+      return reply.code(202).send({
+        ok: true,
+        transmissionId,
+        status: "created",
+        pending: true,
+        simulated: true,
+        checkAfterMs: 750,
+      });
+    }
+
+    let assistant: string;
+
+    try {
+      assistant = await fakeModelReply({
+        userText: packet.message,
+        modeLabel: modeDecision.modeLabel,
+      });
+
+      const lint = postOutputLinter({ modeLabel: modeDecision.modeLabel, content: assistant });
+      if (!lint.ok) {
+        await store.appendDeliveryAttempt({
+          transmissionId: transmission.id,
+          provider: "fake",
+          status: "failed",
+          error: lint.error,
+        });
+
+        await store.updateTransmissionStatus({
+          transmissionId: transmission.id,
+          status: "failed",
+        });
+
+        log.warn({ error: lint.error }, "gate.post_lint_failed");
+
+        return reply.code(500).send({
+          error: "post_lint_failed",
+          details: lint.error,
+          transmissionId: transmission.id,
+          retryable: false,
+        });
+      }
+    } catch (err: any) {
+      await store.appendDeliveryAttempt({
+        transmissionId: transmission.id,
+        provider: "fake",
+        status: "failed",
+        error: String(err?.message ?? err),
+      });
+
+      await store.updateTransmissionStatus({
+        transmissionId: transmission.id,
+        status: "failed",
+      });
+
+      log.error({ error: String(err?.message ?? err) }, "provider.failed");
+
+      return reply.code(500).send({
+        error: "provider_failed",
+        transmissionId: transmission.id,
+        retryable: true,
+      });
+    }
+
+    await store.appendDeliveryAttempt({
+      transmissionId: transmission.id,
+      provider: "fake",
+      status: "succeeded",
+      outputChars: assistant.length,
+    });
+
+    await store.recordUsage({
+      transmissionId: transmission.id,
+      inputChars: packet.message.length,
+      outputChars: assistant.length,
+    });
+
+    await store.updateTransmissionStatus({
+      transmissionId: transmission.id,
+      status: "completed",
+    });
+
+    await store.setChatResult({ transmissionId: transmission.id, assistant });
+
+    log.info({
+      status: "completed",
+      outputChars: assistant.length,
+    }, "delivery.completed");
+
+    return {
+      ok: true,
+      transmissionId: transmission.id,
+      modeDecision,
+      assistant,
+    };
+  });
+}
