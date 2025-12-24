@@ -13,10 +13,13 @@ export async function chatRoutes(
 ) {
   const store = opts.store ?? new MemoryControlPlaneStore();
 
+  // Dev-only async completion guard for simulated 202 (prevents duplicate background timers per transmission).
+  const pendingCompletions = new Set<string>();
+
   // Explicit OPTIONS handler for predictable CORS preflight behavior.
   app.options("/chat", async (_req, reply) => reply.code(204).send());
 
-  // Debug endpoint: inspect a transmission and its associated attempts/usage.
+  // Debug endpoint: inspect a transmission and its associated attempts/usage/result.
   app.get("/transmissions/:id", async (req, reply) => {
     const id = (req.params as any).id as string;
     const transmission = await store.getTransmission(id);
@@ -26,8 +29,16 @@ export async function chatRoutes(
 
     const attempts = await store.getDeliveryAttempts(id);
     const usage = await store.getUsage(id);
+    const result = await store.getChatResult(id);
 
-    return { ok: true, transmission, attempts, usage };
+    return {
+      ok: true,
+      transmission,
+      pending: transmission.status === "created",
+      assistant: result?.assistant ?? null,
+      attempts,
+      usage,
+    };
   });
  
   app.post("/chat", async (req, reply) => {
@@ -157,15 +168,117 @@ export async function chatRoutes(
       });
     }
 
-    // Dev/testing hook: simulate an accepted-but-pending response (202).
-    // This lets SolMobile validate "pending" behavior before we implement async delivery.
+    // Dev/testing hook: simulate an accepted-but-pending response (202) that COMPLETES shortly after.
+    // SolMobile can poll GET /transmissions/:id to observe created -> completed and fetch assistant.
     if (simulate === "202") {
+      const transmissionId = transmission.id;
+
+      if (!pendingCompletions.has(transmissionId)) {
+        pendingCompletions.add(transmissionId);
+
+        const bgLog = app.log.child({
+          plane: "chat",
+          transmissionId,
+          threadId: packet.threadId,
+          clientRequestId: packet.clientRequestId ?? undefined,
+          modeLabel: modeDecision?.modeLabel ?? undefined,
+          async: true,
+        });
+
+        // Small fixed delay is enough for v0 testing. We'll replace with real async provider later.
+        const delayMs = 750;
+
+        setTimeout(async () => {
+          try {
+            const current = await store.getTransmission(transmissionId);
+            if (!current) {
+              bgLog.warn({ status: "missing" }, "delivery.async.skip");
+              return;
+            }
+
+            // If already terminal, don't double-complete.
+            if (current.status !== "created") {
+              bgLog.info({ status: current.status }, "delivery.async.skip");
+              return;
+            }
+
+            const assistant = await fakeModelReply({
+              userText: packet.message,
+              modeLabel: modeDecision.modeLabel,
+            });
+
+            const lint = postOutputLinter({
+              modeLabel: modeDecision.modeLabel,
+              content: assistant,
+            });
+
+            if (!lint.ok) {
+              await store.appendDeliveryAttempt({
+                transmissionId,
+                provider: "fake",
+                status: "failed",
+                error: lint.error,
+              });
+
+              await store.updateTransmissionStatus({
+                transmissionId,
+                status: "failed",
+              });
+
+              bgLog.warn({ error: lint.error }, "gate.post_lint_failed_async");
+              return;
+            }
+
+            await store.appendDeliveryAttempt({
+              transmissionId,
+              provider: "fake",
+              status: "succeeded",
+              outputChars: assistant.length,
+            });
+
+            await store.recordUsage({
+              transmissionId,
+              inputChars: packet.message.length,
+              outputChars: assistant.length,
+            });
+
+            await store.updateTransmissionStatus({
+              transmissionId,
+              status: "completed",
+            });
+
+            await store.setChatResult({ transmissionId, assistant });
+
+            bgLog.info({ status: "completed", outputChars: assistant.length }, "delivery.completed_async");
+          } catch (err: any) {
+            const msg = String(err?.message ?? err);
+
+            await store.appendDeliveryAttempt({
+              transmissionId,
+              provider: "fake",
+              status: "failed",
+              error: msg,
+            });
+
+            await store.updateTransmissionStatus({
+              transmissionId,
+              status: "failed",
+            });
+
+            bgLog.error({ error: msg }, "provider.failed_async");
+          } finally {
+            pendingCompletions.delete(transmissionId);
+          }
+        }, delayMs);
+      }
+
       return reply.code(202).send({
         ok: true,
-        transmissionId: transmission.id,
+        transmissionId,
         status: "created",
         pending: true,
         simulated: true,
+        checkAfterMs: 750,
       });
     }
 
