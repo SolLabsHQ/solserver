@@ -1,15 +1,18 @@
 ## Coach — SolServer v0 Local Dev Setup + Build Plan (Comfort Stack)
 
-**Goal:** get a local SolServer running that SolMobile can call, validate the Control Plane flow (Packet → Transmission → ModeDecision → prompt assembly), and only later turn on paid services (OpenAI, Fly, Turso).
+**Goal:** get a local SolServer running that SolMobile can call, validate the Control Plane flow end to end (Packet - Transmission - ModeDecision - prompt assembly - delivery semantics), and only later turn on paid services (OpenAI, Fly, Turso).
 
 ### North Star sequence (matches this pack)
-1) **Local HTTP API** (health + echo + basic Packet/Transmission endpoints)
-2) **Control plane stub** (Step 0/1 router + ModeDecision JSON)
-3) **Gates skeleton** (rigor + governance lint placeholders)
-4) **Provider stub** (fake “model” response; no OpenAI)
-5) **SolMobile integration** (call `/healthz`, then `/v1/chat`)
-6) **Real provider toggle** (OpenAI on/off via env flag)
-7) **Deploy later** (Fly Machines + Turso) — *not needed to start*
+1) **Local HTTP API** (health + basic endpoints)
+2) **Control plane stub** (Packet - Transmission - ModeDecision JSON)
+3) **Delivery semantics** (idempotency + simulate 500 and 202 + transmission read polling)
+4) **Prompt assembly stub** (mounted law + retrieval slots + deterministic packing)
+5) **Gates skeleton** (post-output lint placeholders first)
+6) **Provider stub** (fake model response, no OpenAI)
+7) **SolMobile integration** (Settings base URL, call `/healthz`, then `/v1/chat`, then poll transmissions)
+8) **Tool orchestration skeleton** (ToolCall and ToolResult contracts, breakpoint handshake for writes)
+9) **Real provider toggle** (OpenAI on or off via env flag)
+10) **Deploy later** (Fly Machines + Turso), not needed to start
 
 ### Comfort v0 stack (what we’re building toward)
 - Runtime: **Node.js + TypeScript**
@@ -307,17 +310,101 @@ Notes:
 
 ---
 
-## Step 6 — Later: “Real provider” toggle (OpenAI on/off)
+## Step 5.5 - Delivery semantics and polling (v0)
+
+We treat delivery as a first-class part of the Control Plane. This lets SolMobile be correct before we pay for a real provider.
+
+### Semantics
+- **200** - completed inline, response includes assistant text
+- **202** - accepted, completes later. SolServer returns a `transmissionId`. SolMobile can poll `GET /v1/transmissions/:id` to fetch completion and assistant.
+- **500** - simulated failure, used to validate Retry and idempotency
+
+### Dev simulation header
+SolServer accepts `x-sol-simulate-status` for development.
+
+Examples:
+```bash
+CID="c500-$(date +%s)"
+curl -i -s -X POST http://127.0.0.1:3333/v1/chat \
+  -H 'content-type: application/json' \
+  -H 'x-sol-simulate-status: 500' \
+  -d "{\"threadId\":\"t1\",\"clientRequestId\":\"$CID\",\"message\":\"hello\"}" | head -n 20
+
+CID="c202-$(date +%s)"
+RESP=$(curl -s -X POST http://127.0.0.1:3333/v1/chat \
+  -H 'content-type: application/json' \
+  -H 'x-sol-simulate-status: 202' \
+  -d "{\"threadId\":\"t1\",\"clientRequestId\":\"$CID\",\"message\":\"hello 202\"}")
+
+echo "$RESP" | jq
+TID=$(echo "$RESP" | jq -r '.transmissionId')
+
+curl -s http://127.0.0.1:3333/v1/transmissions/$TID | jq
+```
+
+### SolMobile note (v0)
+We are not running an automatic poll loop yet. Manual pumping (leave and return to the thread view) is acceptable for now, and it is obvious in logs.
+
+---
+
+## Step 6 - Prompt assembly stub (mounted law + retrieval slots)
+
+Now that delivery semantics are stable, we build the prompt spine. Even with the fake provider, we want the same assembly steps we will use later with OpenAI.
+
+v0 goals:
+- Create a `PromptPack` builder that takes: Packet, ModeDecision, mounted law text, and retrieval results.
+- Output deterministic sections (so debugging is easy):
+  - System rules (mounted law)
+  - Retrieved context (CFB summaries, bookmarks, or other allowed items)
+  - User message
+  - Output contract reminder (OutputEnvelope later)
+
+Start with retrieval returning an empty list. Wire it in anyway.
+
+---
+
+## Step 7 - OutputEnvelope and gates (v0)
+
+Make the control plane debuggable by standardizing what the provider returns.
+
+v0 goals:
+- Define an `OutputEnvelope` shape that includes:
+  - `assistant_text`
+  - `assumptions` and `unknowns`
+  - `used_context_ids` (what retrieval items were used)
+- Add a post-output linter gate that validates the envelope and enforces basic invariants.
+- On gate failure, allow a single regen attempt with a tighter instruction delta (still bounded).
+
+The fake provider can return a minimal deterministic OutputEnvelope first.
+
+---
+
+## Step 8 - Tool orchestration skeleton (v0.1)
+
+Before we add real tools, define the contracts and the write safety handshake.
+
+v0.1 goals:
+- Define `ToolCall` and `ToolResult` contracts.
+- Implement a breakpoint handshake for write operations:
+  - Server proposes a write with a summary.
+  - Client confirms.
+  - Server executes.
+
+Keep the initial tool set empty or read-only. The point is the seam and the safety pattern.
+---
+
+## Step 9 - Later: Real provider toggle (OpenAI on or off)
 
 We’ll add an env flag:
 - `PROVIDER=fake` (default)
 - `PROVIDER=openai` (only when ready)
 
 Then we swap `fakeModelReply` → `openaiReply` inside `providers/`.
+Do not turn this on until Step 6 and Step 7 are stable locally.
 
 ---
 
-## Step 7 — Later: push-to-production flow (not now)
+## Step 10 - Later: push-to-production flow (not now)
 
 When local works end-to-end:
 - Deploy to **Fly.io** (API + worker)

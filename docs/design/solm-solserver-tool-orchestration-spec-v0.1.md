@@ -1,13 +1,13 @@
 # SolM + SolServer Tool Orchestration Spec v0.1
-Status: Draft  
-Audience: SolM / SolServer implementers  
-Decision: **Option A — SolServer as Single Orchestrator (selected)**  
-Scope: Tool-call orchestration for “model wants info” across local (SolM) and server (SolServer) execution.
+Status: Draft
+Audience: SolM / SolServer implementers
+Decision: **Option A - SolServer as Single Orchestrator (selected)**
+Scope: Tool-call orchestration for "model wants info" across local (SolM) and server (SolServer) execution.
 
 ---
 
 ## 1. Summary
-SolM + SolServer treats “GPT wants info” as a **tool-call contract**. The model proposes tool calls; the system decides **where** each tool executes (device vs server) based on:
+SolM + SolServer treats "GPT wants info" as a **tool-call contract**. The model proposes tool calls; the system decides **where** each tool executes (device vs server) based on:
 - **trust** (OS as source of truth),
 - **offline capability**,
 - **secrets** (keys/PII governance),
@@ -15,20 +15,40 @@ SolM + SolServer treats “GPT wants info” as a **tool-call contract**. The mo
 
 This design keeps SolM **local-first** and SolServer **governed**, while allowing both to act as tool executors under one shared envelope.
 
+### Draft and truth note
+This spec is a design intent for v0.1. It is not authoritative by itself.
+- The API contracts and Control Plane flow pack are the source of truth for fields and endpoints.
+- This doc explains where tool orchestration belongs in the runtime and what invariants we must preserve.
+
 ---
 
 ## 2. Shape
 - **Core flow:** model proposes tool calls → SolServer executes (or delegates to SolM local tools) → results return → model answers.
-- **Two tool lanes:**  
-  - **Local Tools (SolM)** for OS-truth + offline  
+- **Two tool lanes:**
+  - **Local Tools (SolM)** for OS-truth + offline
   - **Server Tools (SolServer)** for secrets, network, governance, audit
 - **One contract:** a single `ToolCall` / `ToolResult` envelope so SolM and SolServer can both be executors.
-- **Guardrails:** consent + minimization + idempotency + audit — especially for writes.
+- **Guardrails:** consent + minimization + idempotency + audit, especially for writes.
 - **4B budgets:** Bounds/Buffer/Breakpoints/Beat applied to tool execution so it can’t sprawl.
 
 ---
 
 ## 3. Canonical Flow (Who Does What)
+
+### 3.0 Where this fits in the Control Plane
+Tool orchestration is a phase inside a single Transmission attempt.
+Order (conceptual):
+- Packet accepted and stored
+- Transmission created (idempotent)
+- ModeDecision computed
+- Prompt assembly (mounted law + retrieval slots)
+- Tool phase (optional): model proposes ToolCall list
+- Execution phase: SolServer executes server tools or delegates local tools to SolM
+- ToolResult list returned to model
+- Model emits final OutputEnvelope
+- Gates validate OutputEnvelope. On failure, one bounded regen attempt is allowed
+
+This means tool calls and tool results should be logged and attributable to a transmissionId and attemptId.
 
 ### 3.1 Model Constraint
 The **model never calls your services directly**. It emits tool-call intents like:
@@ -47,9 +67,9 @@ SolServer (or SolM, depending on tool lane) actually executes the work.
    - **Server tool** → call internal service / DB / third party
    - **Local tool** → ask SolM to execute locally (EventKit/FTS5/etc.) and return sanitized result
 5. **SolServer → Model:** tool results
-6. **Model → SolServer → SolM:** final response + any “proposed actions” requiring confirmation
+6. **Model → SolServer → SolM:** final response + any "proposed actions" requiring confirmation
 
-**Outcome:** secrets + governance live in SolServer while still honoring “OS as source of truth.”
+**Outcome:** secrets + governance live in SolServer while still honoring "OS as source of truth."
 
 ---
 
@@ -82,7 +102,7 @@ Use when you need **secrets**, **network**, or **governance**:
 ## 5. One Envelope Contract (Both Lanes)
 
 ### 5.1 Design Goal
-A single shared shape lets SolM and SolServer both act as “tool executors” with uniform logging, retries, audits, and error handling.
+A single shared shape lets SolM and SolServer both act as "tool executors" with uniform logging, retries, audits, and error handling.
 
 ### 5.2 `ToolCall`
 ```json
@@ -120,7 +140,7 @@ A single shared shape lets SolM and SolServer both act as “tool executors” w
 ```
 
 ### 5.4 Key Rule
-Tool results must be **data-first**, not prose.  
+Tool results must be **data-first**, not prose.
 The model does narration; tools return structured facts.
 
 ---
@@ -132,10 +152,10 @@ For any tool that **changes state** (create reminder, send message, post calenda
 
 ### 6.2 Pattern
 - Model may propose: `os.reminders.create {...}`
-- SolServer responds to SolM: **“Proposed action: create reminder X. Approve?”**
+- SolServer responds to SolM: **"Proposed action: create reminder X. Approve?"**
 - Only after user confirmation does SolM execute the write.
 
-**Outcome:** prevents “oops it edited my life” and preserves user agency.
+**Outcome:** prevents "oops it edited my life" and preserves user agency.
 
 ---
 
@@ -160,12 +180,12 @@ Consent gates for:
 - sharing data off-device
 
 ### 7.4 Beat
-Retry cadence:
+Retry beat:
 - 0 retries for writes
 - 1 retry for reads (optional)
 - exponential backoff for transient network issues
 
-**Outcome:** deterministic governor even when the model gets “curious.”
+**Outcome:** deterministic governor even when the model gets "curious."
 
 ---
 
@@ -184,9 +204,14 @@ Retry cadence:
 
 Everything else can wait until the loop is proven.
 
+### v0.1 scope guard
+For v0.1, it is acceptable to define the ToolCall and ToolResult contracts and log shapes without implementing full server-to-device delegation.
+- Local tools can be stubbed or kept read-only.
+- Write tools must require a Breakpoint confirmation before execution.
+
 ---
 
-## 9. Selected Architecture: Option A — SolServer as Single Orchestrator
+## 9. Selected Architecture: Option A - SolServer as Single Orchestrator
 SolServer runs the model and routes all tool calls. SolM:
 - executes local tools when delegated,
 - renders Breakpoints (confirmations),
@@ -199,12 +224,12 @@ SolServer runs the model and routes all tool calls. SolM:
 
 ### Cons / Implications
 - Model-driven workflows require SolServer availability
-- Offline behavior should degrade to deterministic local features (capture/search/OS actions) without “model orchestration”
+- Offline behavior should degrade to deterministic local features (capture/search/OS actions) without "model orchestration"
 
 ---
 
 ## 10. Mini Re-anchor
-- **Arc:** “How GPT gets info” → tool calls with SolServer/SolM executing
+- **Arc:** "How GPT gets info" → tool calls with SolServer/SolM executing
 - **Active:** two-lane tools + shared ToolCall/ToolResult + Breakpoints for writes
 - **Parked:** MCP vs custom tool gateway; exact security/audit fields; error UX patterns
 - **Decisions:** Option A selected
