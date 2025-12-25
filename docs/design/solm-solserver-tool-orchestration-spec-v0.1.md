@@ -95,7 +95,42 @@ Use when you need **secrets**, **network**, or **governance**:
 - `solserver.transcribe_cloud` (cloud fallback STT)
 - any integration w/ third-party APIs
 
+
 **Why:** keys stay server-side; you can rate-limit, audit, and enforce policy.
+
+### 4.3 Tool Registry (Source of Truth for the Tool Catalog)
+The **tool catalog** given to the model MUST be generated from a **Tool Registry** (a single source-of-truth list of tools + metadata), not assembled ad-hoc in prompts.
+
+**Why:**
+- Prevents prompt drift (“tool names in prose” becoming the API).
+- Makes lane routing and Breakpoint enforcement deterministic.
+- Keeps SolM and SolServer aligned on what exists and what is allowed.
+
+**Minimum registry fields (v0.1):**
+- `name`: stable identifier used in `ToolCall.name`
+- `lane`: `local | server`
+- `op`: `read | write`
+- `breakpoint_required`: `true|false` (always `true` for `write` unless explicitly exempted)
+- `privacy_tier`: `low|medium|high`
+- `offline_ok`: `true|false`
+
+**Example registry entry (draft):**
+```json
+{
+  "name": "os.calendar.query",
+  "lane": "local",
+  "op": "read",
+  "breakpoint_required": false,
+  "privacy_tier": "medium",
+  "offline_ok": true,
+  "args_schema_ref": "CalendarQueryArgs_v1",
+  "result_schema_ref": "CalendarQueryResult_v1"
+}
+```
+
+Notes:
+- `args_schema_ref` / `result_schema_ref` are optional in v0.1 but recommended to avoid silent shape drift.
+- The registry is a config artifact (e.g., JSON/YAML) shared by SolServer and SolM; it is not a runtime “new object model.”
 
 ---
 
