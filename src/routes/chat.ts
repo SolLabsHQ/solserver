@@ -2,6 +2,12 @@ import type { FastifyInstance } from "fastify";
 
 import { PacketInput } from "../contracts/chat";
 import { routeMode } from "../control-plane/router";
+import {
+  buildPromptPack,
+  promptPackLogShape,
+  toSinglePromptText,
+} from "../control-plane/prompt_pack";
+import { retrieveContext, retrievalLogShape } from "../control-plane/retrieval";
 import { postOutputLinter } from "../gates/post_linter";
 import { fakeModelReply } from "../providers/fake_model";
 import type { ControlPlaneStore } from "../store/control_plane_store";
@@ -168,6 +174,28 @@ export async function chatRoutes(
       });
     }
 
+    // --- Step 6: Prompt assembly stub (mounted law + retrieval slot) ---
+    // We build the PromptPack even when using the fake provider so OpenAI wiring is a swap, not a rewrite.
+    const retrievalItems = await retrieveContext({
+      threadId: packet.threadId,
+      packetType: packet.packetType,
+      message: packet.message,
+    });
+
+    log.debug(retrievalLogShape(retrievalItems), "control_plane.retrieval");
+
+    const promptPack = buildPromptPack({
+      packet,
+      modeDecision,
+      retrievalItems,
+    });
+
+    log.debug(promptPackLogShape(promptPack), "control_plane.prompt_pack");
+
+    // Provider input for v0: one stable string with headers.
+    // We do not log the content here.
+    const providerInputText = toSinglePromptText(promptPack);
+
     // Dev/testing hook: simulate an accepted-but-pending response (202) that COMPLETES shortly after.
     // SolMobile can poll GET /transmissions/:id to observe created -> completed and fetch assistant.
     if (simulate === "202") {
@@ -203,7 +231,7 @@ export async function chatRoutes(
             }
 
             const assistant = await fakeModelReply({
-              userText: packet.message,
+              userText: providerInputText,
               modeLabel: modeDecision.modeLabel,
             });
 
@@ -286,7 +314,7 @@ export async function chatRoutes(
 
     try {
       assistant = await fakeModelReply({
-        userText: packet.message,
+        userText: providerInputText,
         modeLabel: modeDecision.modeLabel,
       });
 
