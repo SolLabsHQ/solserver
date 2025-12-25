@@ -33,6 +33,14 @@ import type { RetrievalItem } from "./prompt_pack";
  * - Later we will persist this (store / DB) and add governance (auth, writes, audits).
  * - Later we will chain mementos (prevMementoId) for deterministic replay and debugging.
  */
+// v0.1: in-process ThreadMemento registry.
+// - Keyed by threadId.
+// - Draft is what the model proposes (returned to the client for review).
+// - Accepted is what the user canonizes (safe to use in retrieval).
+// Later: move into ControlPlaneStore + persistence + chaining.
+const mementoDraftByThreadId = new Map<string, ThreadMementoSnapshot>();
+const mementoAcceptedByThreadId = new Map<string, ThreadMementoSnapshot>();
+
 export type ThreadMementoSnapshot = {
   id: string;
   threadId: string;
@@ -45,12 +53,6 @@ export type ThreadMementoSnapshot = {
   decisions: string[];
   next: string[];
 };
-
-// v0.1: in-process ThreadMemento registry.
-// - Keyed by threadId.
-// - Stores only the latest memento per thread.
-// Later: move into ControlPlaneStore + persistence + chaining.
-const mementoByThreadId = new Map<string, ThreadMementoSnapshot>();
 
 function formatMementoSummary(m: ThreadMementoSnapshot): string {
   // Keep this stable and human-readable.
@@ -67,10 +69,12 @@ function formatMementoSummary(m: ThreadMementoSnapshot): string {
 }
 
 /**
- * Store/replace the latest ThreadMemento for a thread.
+ * Store/replace the latest DRAFT ThreadMemento for a thread.
  *
- * v0.1: This is the only write surface for ThreadMemento in SolServer.
- * In practice, SolMobile will be the producer (it decides the memento and posts it to SolServer).
+ * v0.1 behavior:
+ * - The model can propose a draft ThreadMemento.
+ * - The client can show it and decide Accept or Decline.
+ * - Only Accepted mementos are allowed to enter retrieval.
  */
 export function putThreadMemento(args: {
   threadId: string;
@@ -92,15 +96,65 @@ export function putThreadMemento(args: {
     next: args.next,
   };
 
-  mementoByThreadId.set(args.threadId, record);
+  mementoDraftByThreadId.set(args.threadId, record);
   return record;
 }
 
 /**
- * Read the latest ThreadMemento for a thread.
+ * Accept a draft ThreadMemento.
+ *
+ * v0.1: accept is an in-process promotion.
+ * Later: persistence, audit trail, and chaining.
  */
-export function getLatestThreadMemento(threadId: string): ThreadMementoSnapshot | null {
-  return mementoByThreadId.get(threadId) ?? null;
+export function acceptThreadMemento(args: {
+  threadId: string;
+  mementoId: string;
+}): ThreadMementoSnapshot | null {
+  const draft = mementoDraftByThreadId.get(args.threadId);
+  if (!draft) return null;
+  if (draft.id !== args.mementoId) return null;
+
+  mementoAcceptedByThreadId.set(args.threadId, draft);
+  mementoDraftByThreadId.delete(args.threadId);
+  return draft;
+}
+
+/**
+ * Decline a draft ThreadMemento.
+ *
+ * v0.1: decline discards the latest draft.
+ */
+export function declineThreadMemento(args: {
+  threadId: string;
+  mementoId: string;
+}): null {
+  const draft = mementoDraftByThreadId.get(args.threadId);
+  if (!draft) return null;
+  if (draft.id !== args.mementoId) return null;
+
+  mementoDraftByThreadId.delete(args.threadId);
+  return null;
+}
+
+/**
+ * Read the latest ThreadMemento for a thread.
+ *
+ * v0.1 semantics:
+ * - Default (no opts): returns Accepted only.
+ * - includeDraft: returns Draft if present, else falls back to Accepted.
+ */
+export function getLatestThreadMemento(
+  threadId: string,
+  opts?: { includeDraft?: boolean }
+): ThreadMementoSnapshot | null {
+  const accepted = mementoAcceptedByThreadId.get(threadId) ?? null;
+
+  if (opts?.includeDraft) {
+    const draft = mementoDraftByThreadId.get(threadId) ?? null;
+    return draft ?? accepted;
+  }
+
+  return accepted;
 }
 
 /**
@@ -109,7 +163,8 @@ export function getLatestThreadMemento(threadId: string): ThreadMementoSnapshot 
  * Do not call this from production code.
  */
 export function __dangerous_clearThreadMementosForTestOnly(): void {
-  mementoByThreadId.clear();
+  mementoDraftByThreadId.clear();
+  mementoAcceptedByThreadId.clear();
 }
 
 /**

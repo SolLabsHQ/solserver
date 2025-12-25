@@ -12,6 +12,8 @@ import {
 import {
   getLatestThreadMemento,
   putThreadMemento,
+  acceptThreadMemento,
+  declineThreadMemento,
   retrieveContext,
   retrievalLogShape,
 } from "../control-plane/retrieval";
@@ -35,6 +37,9 @@ export async function chatRoutes(
   // Preferred endpoint name (anti-drift): /memento.
   app.options("/memento", async (_req, reply) => reply.code(204).send());
 
+  // Client decision endpoint: Accept / Decline a draft memento.
+  app.options("/memento/decision", async (_req, reply) => reply.code(204).send());
+
   // Back-compat alias: /cfb (historically used for "Conversation Fact Block").
   // NOTE: "CFB" is now reserved for Context Fact Block elsewhere in the design.
   app.options("/cfb", async (_req, reply) => reply.code(204).send());
@@ -51,7 +56,7 @@ export async function chatRoutes(
     const usage = await store.getUsage(id);
     const result = await store.getChatResult(id);
 
-    const threadMemento = getLatestThreadMemento(transmission.threadId);
+    const threadMemento = getLatestThreadMemento(transmission.threadId, { includeDraft: true });
 
     return {
       ok: true,
@@ -88,6 +93,42 @@ export async function chatRoutes(
     decisions: z.array(z.string()).default([]),
     next: z.array(z.string()).default([]),
   });
+
+  const ThreadMementoDecisionInput = z.object({
+    threadId: z.string().min(1),
+    mementoId: z.string().min(1),
+    decision: z.enum(["accept", "decline"]),
+  });
+
+  async function handleMementoDecision(req: any, reply: any) {
+    const parsed = ThreadMementoDecisionInput.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        details: parsed.error.flatten(),
+      });
+    }
+
+    const { threadId, mementoId, decision } = parsed.data;
+
+    const applied =
+      decision === "accept"
+        ? acceptThreadMemento({ threadId, mementoId })
+        : declineThreadMemento({ threadId, mementoId });
+
+    req.log.info(
+      {
+        plane: "memento",
+        threadId,
+        mementoId,
+        decision,
+        applied: Boolean(applied),
+      },
+      "control_plane.memento_decision"
+    );
+
+    return { ok: true, decision, applied: Boolean(applied), memento: applied ?? null };
+  }
 
   async function handlePutMemento(req: any, reply: any) {
     const parsed = ThreadMementoInput.safeParse(req.body);
@@ -132,7 +173,10 @@ export async function chatRoutes(
       return reply.code(400).send({ error: "invalid_request", details: { threadId: "required" } });
     }
 
-    const memento = getLatestThreadMemento(threadId);
+    const includeDraftRaw = String((req.query as any)?.includeDraft ?? "").toLowerCase();
+    const includeDraft = includeDraftRaw === "1" || includeDraftRaw === "true";
+
+    const memento = getLatestThreadMemento(threadId, { includeDraft });
 
     req.log.debug(
       {
@@ -152,6 +196,9 @@ export async function chatRoutes(
 
   // Back-compat alias.
   app.post("/cfb", handlePutMemento);
+
+  // Client decision endpoint: Accept / Decline the latest draft memento.
+  app.post("/memento/decision", handleMementoDecision);
  
   app.post("/chat", async (req, reply) => {
     const parsed = PacketInput.safeParse(req.body);
@@ -194,7 +241,7 @@ export async function chatRoutes(
               modeDecision: existing.modeDecision,
               assistant: cached.assistant,
               idempotentReplay: true,
-              threadMemento: getLatestThreadMemento(existing.threadId),
+              threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
             };
           }
 
@@ -205,7 +252,7 @@ export async function chatRoutes(
             status: existing.status,
             pending: true,
             idempotentReplay: true,
-            threadMemento: getLatestThreadMemento(existing.threadId),
+            threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
           });
         }
 
@@ -217,7 +264,7 @@ export async function chatRoutes(
             status: existing.status,
             pending: true,
             idempotentReplay: true,
-            threadMemento: getLatestThreadMemento(existing.threadId),
+            threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
           });
         }
 
@@ -442,7 +489,7 @@ export async function chatRoutes(
         pending: true,
         simulated: true,
         checkAfterMs: 750,
-        threadMemento: getLatestThreadMemento(packet.threadId),
+        threadMemento: getLatestThreadMemento(packet.threadId, { includeDraft: true }),
       });
     }
 

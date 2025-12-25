@@ -4,6 +4,9 @@ import { buildPromptPack, toSinglePromptText } from "../control-plane/prompt_pac
 import {
   __dangerous_clearThreadMementosForTestOnly,
   putThreadMemento,
+  acceptThreadMemento,
+  declineThreadMemento,
+  getLatestThreadMemento,
   retrieveContext,
 } from "../control-plane/retrieval";
 
@@ -96,8 +99,8 @@ describe("Step 6 - retrieval seam", () => {
     expect(items).toEqual([]);
   });
 
-  it("retrieveContext returns a single memento item when a ThreadMemento exists", async () => {
-    putThreadMemento({
+  it("retrieveContext uses accepted-only memento (draft is ignored)", async () => {
+    const draft = putThreadMemento({
       threadId: "t1",
       arc: "SolServer v0 build",
       active: ["Wire ThreadMemento"],
@@ -105,6 +108,21 @@ describe("Step 6 - retrieval seam", () => {
       decisions: ["Option 1"],
       next: ["Return threadMemento in /chat"],
     });
+
+    // Draft should be visible only when includeDraft=true.
+    expect(getLatestThreadMemento("t1", { includeDraft: true })?.id).toBe(draft.id);
+
+    // Retrieval MUST ignore draft until the user accepts.
+    const before = await retrieveContext({
+      threadId: "t1",
+      packetType: "chat",
+      message: "hello",
+    });
+    expect(before).toEqual([]);
+
+    // Accept promotes draft -> accepted.
+    const accepted = acceptThreadMemento({ threadId: "t1", mementoId: draft.id });
+    expect(accepted?.id).toBe(draft.id);
 
     const items = await retrieveContext({
       threadId: "t1",
@@ -121,5 +139,56 @@ describe("Step 6 - retrieval seam", () => {
     expect(items[0].summary).toContain("Parked:");
     expect(items[0].summary).toContain("Decisions:");
     expect(items[0].summary).toContain("Next:");
+  });
+
+  it("decline discards draft and retrieval remains empty", async () => {
+    const draft = putThreadMemento({
+      threadId: "t1",
+      arc: "SolServer v0 build",
+      active: ["Draft only"],
+      parked: [],
+      decisions: [],
+      next: [],
+    });
+
+    // Decline removes the draft.
+    const declined = declineThreadMemento({ threadId: "t1", mementoId: draft.id });
+    expect(declined).toBeNull();
+
+    // No draft, no accepted.
+    expect(getLatestThreadMemento("t1", { includeDraft: true })).toBeNull();
+    expect(getLatestThreadMemento("t1")).toBeNull();
+
+    const items = await retrieveContext({
+      threadId: "t1",
+      packetType: "chat",
+      message: "hello",
+    });
+
+    expect(items).toEqual([]);
+  });
+
+  it("accept requires mementoId to match the latest draft", async () => {
+    const draft = putThreadMemento({
+      threadId: "t1",
+      arc: "SolServer v0 build",
+      active: ["Draft"],
+      parked: [],
+      decisions: [],
+      next: [],
+    });
+
+    const wrong = acceptThreadMemento({ threadId: "t1", mementoId: "not-the-id" });
+    expect(wrong).toBeNull();
+
+    // Draft still exists.
+    expect(getLatestThreadMemento("t1", { includeDraft: true })?.id).toBe(draft.id);
+
+    const items = await retrieveContext({
+      threadId: "t1",
+      packetType: "chat",
+      message: "hello",
+    });
+    expect(items).toEqual([]);
   });
 });
