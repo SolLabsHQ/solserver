@@ -1,5 +1,7 @@
 import type { FastifyInstance } from "fastify";
 
+import { z } from "zod";
+
 import { PacketInput } from "../contracts/chat";
 import { routeMode } from "../control-plane/router";
 import {
@@ -7,9 +9,14 @@ import {
   promptPackLogShape,
   toSinglePromptText,
 } from "../control-plane/prompt_pack";
-import { retrieveContext, retrievalLogShape } from "../control-plane/retrieval";
+import {
+  getLatestThreadMemento,
+  putThreadMemento,
+  retrieveContext,
+  retrievalLogShape,
+} from "../control-plane/retrieval";
 import { postOutputLinter } from "../gates/post_linter";
-import { fakeModelReply } from "../providers/fake_model";
+import { fakeModelReplyWithMeta } from "../providers/fake_model";
 import type { ControlPlaneStore } from "../store/control_plane_store";
 import { MemoryControlPlaneStore } from "../store/control_plane_store";
 
@@ -25,6 +32,13 @@ export async function chatRoutes(
   // Explicit OPTIONS handler for predictable CORS preflight behavior.
   app.options("/chat", async (_req, reply) => reply.code(204).send());
 
+  // Preferred endpoint name (anti-drift): /memento.
+  app.options("/memento", async (_req, reply) => reply.code(204).send());
+
+  // Back-compat alias: /cfb (historically used for "Conversation Fact Block").
+  // NOTE: "CFB" is now reserved for Context Fact Block elsewhere in the design.
+  app.options("/cfb", async (_req, reply) => reply.code(204).send());
+
   // Debug endpoint: inspect a transmission and its associated attempts/usage/result.
   app.get("/transmissions/:id", async (req, reply) => {
     const id = (req.params as any).id as string;
@@ -37,6 +51,8 @@ export async function chatRoutes(
     const usage = await store.getUsage(id);
     const result = await store.getChatResult(id);
 
+    const threadMemento = getLatestThreadMemento(transmission.threadId);
+
     return {
       ok: true,
       transmission,
@@ -44,8 +60,98 @@ export async function chatRoutes(
       assistant: result?.assistant ?? null,
       attempts,
       usage,
+      threadMemento,
     };
   });
+
+  /**
+   * ThreadMemento
+   *
+   * Anti-drift glossary:
+   * - Context Fact Block (CFB): durable knowledge objects (authoritative | heuristic | umbra).
+   * - ThreadMemento: lightweight thread navigation snapshot (arc/active/parked/decisions/next).
+   *
+   * v0.1 / v0.2:
+   * - We store only the latest memento per thread (in memory).
+   * - Retrieval attaches the latest memento summary into the PromptPack.
+   *
+   * Planned (v0.2+ hardening):
+   * - Chain mementos via prevMementoId for deterministic replay and debugging.
+   * - Persist to a real store instead of process memory.
+   * - Add governance (auth, write audit, limits).
+   */
+  const ThreadMementoInput = z.object({
+    threadId: z.string().min(1),
+    arc: z.string().min(1),
+    active: z.array(z.string()).default([]),
+    parked: z.array(z.string()).default([]),
+    decisions: z.array(z.string()).default([]),
+    next: z.array(z.string()).default([]),
+  });
+
+  async function handlePutMemento(req: any, reply: any) {
+    const parsed = ThreadMementoInput.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        details: parsed.error.flatten(),
+      });
+    }
+
+    const data = parsed.data;
+
+    // v0.1: in-process write (latest wins). This is enough to validate retrieval wiring.
+    // Later: this becomes an authenticated control-plane write that persists.
+    const memento = putThreadMemento({
+      threadId: data.threadId,
+      arc: data.arc,
+      active: data.active,
+      parked: data.parked,
+      decisions: data.decisions,
+      next: data.next,
+    });
+
+    req.log.info(
+      {
+        plane: "memento",
+        threadId: data.threadId,
+        mementoId: memento.id,
+        version: memento.version,
+      },
+      "control_plane.memento_put"
+    );
+
+    return { ok: true, memento };
+  }
+
+  // Read the latest memento for a thread.
+  // Usage: GET /v1/memento?threadId=t1
+  app.get("/memento", async (req, reply) => {
+    const threadId = String((req.query as any)?.threadId ?? "");
+    if (!threadId) {
+      return reply.code(400).send({ error: "invalid_request", details: { threadId: "required" } });
+    }
+
+    const memento = getLatestThreadMemento(threadId);
+
+    req.log.debug(
+      {
+        plane: "memento",
+        threadId,
+        mementoId: memento?.id ?? null,
+        found: Boolean(memento),
+      },
+      "control_plane.memento_get"
+    );
+
+    return { ok: true, memento };
+  });
+
+  // Preferred endpoint name.
+  app.post("/memento", handlePutMemento);
+
+  // Back-compat alias.
+  app.post("/cfb", handlePutMemento);
  
   app.post("/chat", async (req, reply) => {
     const parsed = PacketInput.safeParse(req.body);
@@ -88,6 +194,7 @@ export async function chatRoutes(
               modeDecision: existing.modeDecision,
               assistant: cached.assistant,
               idempotentReplay: true,
+              threadMemento: getLatestThreadMemento(existing.threadId),
             };
           }
 
@@ -98,6 +205,7 @@ export async function chatRoutes(
             status: existing.status,
             pending: true,
             idempotentReplay: true,
+            threadMemento: getLatestThreadMemento(existing.threadId),
           });
         }
 
@@ -109,6 +217,7 @@ export async function chatRoutes(
             status: existing.status,
             pending: true,
             idempotentReplay: true,
+            threadMemento: getLatestThreadMemento(existing.threadId),
           });
         }
 
@@ -230,10 +339,12 @@ export async function chatRoutes(
               return;
             }
 
-            const assistant = await fakeModelReply({
+            const meta = await fakeModelReplyWithMeta({
               userText: providerInputText,
               modeLabel: modeDecision.modeLabel,
             });
+
+            const assistant = meta.assistant;
 
             const lint = postOutputLinter({
               modeLabel: modeDecision.modeLabel,
@@ -255,6 +366,30 @@ export async function chatRoutes(
 
               bgLog.warn({ error: lint.error }, "gate.post_lint_failed_async");
               return;
+            }
+
+            // Option 1: model-proposed ThreadMemento draft.
+            // We store it temporarily (in-memory) as a navigation artifact.
+            // Client may display this and offer Undo.
+            if (meta.mementoDraft) {
+              const m = putThreadMemento({
+                threadId: packet.threadId,
+                arc: meta.mementoDraft.arc || "Untitled",
+                active: meta.mementoDraft.active ?? [],
+                parked: meta.mementoDraft.parked ?? [],
+                decisions: meta.mementoDraft.decisions ?? [],
+                next: meta.mementoDraft.next ?? [],
+              });
+
+              bgLog.info(
+                {
+                  plane: "memento",
+                  threadId: packet.threadId,
+                  mementoId: m.id,
+                  source: "model",
+                },
+                "control_plane.memento_auto_put"
+              );
             }
 
             await store.appendDeliveryAttempt({
@@ -307,16 +442,20 @@ export async function chatRoutes(
         pending: true,
         simulated: true,
         checkAfterMs: 750,
+        threadMemento: getLatestThreadMemento(packet.threadId),
       });
     }
 
     let assistant: string;
+    let threadMemento: any = null;
 
     try {
-      assistant = await fakeModelReply({
+      const meta = await fakeModelReplyWithMeta({
         userText: providerInputText,
         modeLabel: modeDecision.modeLabel,
       });
+
+      assistant = meta.assistant;
 
       const lint = postOutputLinter({ modeLabel: modeDecision.modeLabel, content: assistant });
       if (!lint.ok) {
@@ -340,6 +479,32 @@ export async function chatRoutes(
           transmissionId: transmission.id,
           retryable: false,
         });
+      }
+
+      // Option 1: model-proposed ThreadMemento draft.
+      // We store it temporarily (in-memory) as a navigation artifact.
+      // Client may display this and offer Undo.
+      if (meta.mementoDraft) {
+        const m = putThreadMemento({
+          threadId: packet.threadId,
+          arc: meta.mementoDraft.arc || "Untitled",
+          active: meta.mementoDraft.active ?? [],
+          parked: meta.mementoDraft.parked ?? [],
+          decisions: meta.mementoDraft.decisions ?? [],
+          next: meta.mementoDraft.next ?? [],
+        });
+
+        threadMemento = m;
+
+        log.info(
+          {
+            plane: "memento",
+            threadId: packet.threadId,
+            mementoId: m.id,
+            source: "model",
+          },
+          "control_plane.memento_auto_put"
+        );
       }
     } catch (err: any) {
       await store.appendDeliveryAttempt({
@@ -393,6 +558,7 @@ export async function chatRoutes(
       transmissionId: transmission.id,
       modeDecision,
       assistant,
+      threadMemento,
     };
   });
 }

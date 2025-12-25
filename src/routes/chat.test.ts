@@ -1,9 +1,11 @@
-
-
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 
 import { buildPromptPack, toSinglePromptText } from "../control-plane/prompt_pack";
-import { retrieveContext } from "../control-plane/retrieval";
+import {
+  __dangerous_clearThreadMementosForTestOnly,
+  putThreadMemento,
+  retrieveContext,
+} from "../control-plane/retrieval";
 
 import type { PacketInput, ModeDecision } from "../contracts/chat";
 
@@ -80,7 +82,11 @@ describe("Step 6 - PromptPack", () => {
 });
 
 describe("Step 6 - retrieval seam", () => {
-  it("retrieveContext returns an empty list in v0", async () => {
+  beforeEach(() => {
+    __dangerous_clearThreadMementosForTestOnly();
+  });
+
+  it("retrieveContext returns an empty list when no ThreadMemento exists", async () => {
     const items = await retrieveContext({
       threadId: "t1",
       packetType: "chat",
@@ -88,5 +94,32 @@ describe("Step 6 - retrieval seam", () => {
     });
 
     expect(items).toEqual([]);
+  });
+
+  it("retrieveContext returns a single memento item when a ThreadMemento exists", async () => {
+    putThreadMemento({
+      threadId: "t1",
+      arc: "SolServer v0 build",
+      active: ["Wire ThreadMemento"],
+      parked: ["UI polish"],
+      decisions: ["Option 1"],
+      next: ["Return threadMemento in /chat"],
+    });
+
+    const items = await retrieveContext({
+      threadId: "t1",
+      packetType: "chat",
+      message: "hello",
+    });
+
+    expect(items).toHaveLength(1);
+    expect(items[0].kind).toBe("memento");
+
+    // Summary format should stay stable and human-readable.
+    expect(items[0].summary).toContain("Arc:");
+    expect(items[0].summary).toContain("Active:");
+    expect(items[0].summary).toContain("Parked:");
+    expect(items[0].summary).toContain("Decisions:");
+    expect(items[0].summary).toContain("Next:");
   });
 });

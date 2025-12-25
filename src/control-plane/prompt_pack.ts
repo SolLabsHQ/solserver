@@ -11,7 +11,7 @@ export type PromptRole = "system" | "user";
 
 export type PromptSectionId = "law" | "retrieval" | "user_message";
 
-export type RetrievalItemKind = "cfb" | "bookmark" | "memory";
+export type RetrievalItemKind = "memento" | "bookmark" | "memory";
 
 export type RetrievalItem = {
   id: string;

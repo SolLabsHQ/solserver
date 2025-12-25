@@ -35,6 +35,10 @@ describe("/v1/chat idempotency", () => {
     const firstJson = first.json();
     expect(firstJson.ok).toBe(true);
     expect(firstJson.transmissionId).toBeTruthy();
+    expect(firstJson.threadMemento).toBeTruthy();
+    expect(firstJson.threadMemento.threadId).toBe("t1");
+    expect(firstJson.threadMemento.arc).toBeTruthy();
+    expect(firstJson.threadMemento.version).toBe("memento-v0");
 
     const second = await app.inject({
       method: "POST",
@@ -46,6 +50,9 @@ describe("/v1/chat idempotency", () => {
     const secondJson = second.json();
     expect(secondJson.transmissionId).toBe(firstJson.transmissionId);
     expect(secondJson.idempotentReplay).toBe(true);
+    expect(secondJson.threadMemento).toBeTruthy();
+    // Replay should return the same latest ThreadMemento snapshot.
+    expect(secondJson.threadMemento.id).toBe(firstJson.threadMemento.id);
   });
 
   it("returns 409 if the same clientRequestId is reused for a different payload", async () => {
@@ -81,6 +88,7 @@ describe("/v1/chat idempotency", () => {
     const failJson = fail.json();
     expect(failJson.transmissionId).toBeTruthy();
     expect(failJson.retryable).toBe(true);
+    expect(failJson.threadMemento ?? null).toBeNull();
 
     const ok = await app.inject({
       method: "POST",
@@ -91,6 +99,8 @@ describe("/v1/chat idempotency", () => {
     expect(ok.statusCode).toBe(200);
     const okJson = ok.json();
     expect(okJson.ok).toBe(true);
+    expect(okJson.threadMemento).toBeTruthy();
+    expect(okJson.threadMemento.threadId).toBe("t1");
     // Critical: retry reuses SAME transmission id
     expect(okJson.transmissionId).toBe(failJson.transmissionId);
   });
