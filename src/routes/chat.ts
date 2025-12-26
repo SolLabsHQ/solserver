@@ -14,6 +14,7 @@ import {
   putThreadMemento,
   acceptThreadMemento,
   declineThreadMemento,
+  revokeThreadMemento,
   retrieveContext,
   retrievalLogShape,
 } from "../control-plane/retrieval";
@@ -37,7 +38,7 @@ export async function chatRoutes(
   // Preferred endpoint name (anti-drift): /memento.
   app.options("/memento", async (_req, reply) => reply.code(204).send());
 
-  // Client decision endpoint: Accept / Decline a draft memento.
+  // Client decision endpoint: Accept / Decline / Revoke a draft memento.
   app.options("/memento/decision", async (_req, reply) => reply.code(204).send());
 
   // Back-compat alias: /cfb (historically used for "Conversation Fact Block").
@@ -97,7 +98,7 @@ export async function chatRoutes(
   const ThreadMementoDecisionInput = z.object({
     threadId: z.string().min(1),
     mementoId: z.string().min(1),
-    decision: z.enum(["accept", "decline"]),
+    decision: z.enum(["accept", "decline", "revoke"]),
   });
 
   async function handleMementoDecision(req: any, reply: any) {
@@ -124,16 +125,19 @@ export async function chatRoutes(
       "control_plane.memento_decision_input"
     );
 
-    // Apply decision against the latest draft.
+    // Apply decision against the current memento state.
     // Idempotency behavior:
-    // - accept: if the memento is already accepted (or current), return it with applied=false
-    // - decline: if the memento is already accepted (or current), do NOT delete it; return applied=false with reason
+    // - accept: if already accepted/current, return it with applied=false
+    // - decline: discards the latest *draft*; does not touch an accepted memento
+    // - revoke: removes the currently accepted memento (undo). If already revoked, applied=false
     // - for missing/unknown ids, return applied=false and memento=null
 
     const appliedResult =
       decision === "accept"
         ? acceptThreadMemento({ threadId, mementoId })
-        : declineThreadMemento({ threadId, mementoId });
+        : decision === "decline"
+          ? declineThreadMemento({ threadId, mementoId })
+          : revokeThreadMemento({ threadId, mementoId });
 
     const applied = Boolean(appliedResult);
 
@@ -141,11 +145,19 @@ export async function chatRoutes(
       | "applied"
       | "already_accepted"
       | "already_accepted_not_declined"
+      | "already_revoked"
       | "not_found" = "applied";
 
-    // For accept, return the accepted/current memento when applied.
-    // For decline, we intentionally return null even when decline was applied (draft discarded).
-    let memento = decision === "accept" ? (appliedResult ?? null) : null;
+    // Response shape by decision:
+    // - accept: return the accepted/current memento
+    // - decline: return null when a draft is discarded
+    // - revoke: return the revoked (previously accepted) memento so the client can render what was undone
+    let memento =
+      decision === "accept"
+        ? (appliedResult ?? null)
+        : decision === "revoke"
+          ? (appliedResult ?? null)
+          : null;
 
     if (!applied) {
       // If not applied, check whether this is an idempotent replay.
@@ -171,9 +183,13 @@ export async function chatRoutes(
         if (decision === "accept") {
           reason = "already_accepted";
           memento = latestAny;
-        } else {
+        } else if (decision === "decline") {
           // Decline does not override a current/accepted memento.
           reason = "already_accepted_not_declined";
+          memento = latestAny;
+        } else {
+          // Revoke against an already-revoked/nonexistent accepted memento is a no-op.
+          reason = "already_revoked";
           memento = latestAny;
         }
       } else {

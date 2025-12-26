@@ -6,6 +6,7 @@ import {
   putThreadMemento,
   acceptThreadMemento,
   declineThreadMemento,
+  revokeThreadMemento,
   getLatestThreadMemento,
   retrieveContext,
 } from "../control-plane/retrieval";
@@ -191,5 +192,47 @@ describe("Step 6 - retrieval seam", () => {
       message: "hello",
     });
     expect(items).toEqual([]);
+  });
+
+  it("revoke removes accepted memento and retrieval returns empty", async () => {
+    const draft = putThreadMemento({
+      threadId: "t1",
+      arc: "SolServer v0 build",
+      active: ["Revoke me"],
+      parked: [],
+      decisions: [],
+      next: [],
+    });
+
+    // Accept promotes draft -> accepted.
+    const accepted = acceptThreadMemento({ threadId: "t1", mementoId: draft.id });
+    expect(accepted?.id).toBe(draft.id);
+
+    // Retrieval should now include the accepted memento.
+    const before = await retrieveContext({
+      threadId: "t1",
+      packetType: "chat",
+      message: "hello",
+    });
+    expect(before).toHaveLength(1);
+    expect(before[0].kind).toBe("memento");
+
+    // Revoke removes the accepted memento.
+    const revoked = revokeThreadMemento({ threadId: "t1", mementoId: draft.id });
+    expect(revoked?.id).toBe(draft.id);
+
+    const after = await retrieveContext({
+      threadId: "t1",
+      packetType: "chat",
+      message: "hello",
+    });
+
+    expect(after).toEqual([]);
+    expect(getLatestThreadMemento("t1")).toBeNull();
+  });
+
+  it("revoke is a no-op when nothing is accepted", () => {
+    const revoked = revokeThreadMemento({ threadId: "t1", mementoId: "does-not-exist" });
+    expect(revoked).toBeNull();
   });
 });

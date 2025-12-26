@@ -37,6 +37,7 @@ import type { RetrievalItem } from "./prompt_pack";
 // - Keyed by threadId.
 // - Draft is what the model proposes (returned to the client for review).
 // - Accepted is what the user canonizes (safe to use in retrieval).
+// - Revoke clears the accepted snapshot so retrieval stops using it.
 // Later: move into ControlPlaneStore + persistence + chaining.
 const mementoDraftByThreadId = new Map<string, ThreadMementoSnapshot>();
 const mementoAcceptedByThreadId = new Map<string, ThreadMementoSnapshot>();
@@ -138,10 +139,29 @@ export function declineThreadMemento(args: {
 }
 
 /**
+ * Revoke the currently accepted ThreadMemento.
+ *
+ * v0.1: revoke is an in-process demotion.
+ * - Clears the accepted snapshot so retrieval stops using it.
+ * - Requires mementoId to match the currently-accepted id (to prevent stale UI actions).
+ */
+export function revokeThreadMemento(args: {
+  threadId: string;
+  mementoId: string;
+}): ThreadMementoSnapshot | null {
+  const accepted = mementoAcceptedByThreadId.get(args.threadId);
+  if (!accepted) return null;
+  if (accepted.id !== args.mementoId) return null;
+
+  mementoAcceptedByThreadId.delete(args.threadId);
+  return accepted;
+}
+
+/**
  * Read the latest ThreadMemento for a thread.
  *
  * v0.1 semantics:
- * - Default (no opts): returns Accepted only.
+ * - Default (no opts): returns Accepted only (unless it has been revoked).
  * - includeDraft: returns Draft if present, else falls back to Accepted.
  */
 export function getLatestThreadMemento(
