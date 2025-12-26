@@ -153,7 +153,8 @@ describe("Step 6 - retrieval seam", () => {
 
     // Decline removes the draft.
     const declined = declineThreadMemento({ threadId: "t1", mementoId: draft.id });
-    expect(declined).toBeNull();
+    expect(declined).not.toBeNull();
+    expect(declined!.id).toBe(draft.id);
 
     // No draft, no accepted.
     expect(getLatestThreadMemento("t1", { includeDraft: true })).toBeNull();

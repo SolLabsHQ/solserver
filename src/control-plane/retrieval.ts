@@ -127,13 +127,14 @@ export function acceptThreadMemento(args: {
 export function declineThreadMemento(args: {
   threadId: string;
   mementoId: string;
-}): null {
+}): ThreadMementoSnapshot | null {
   const draft = mementoDraftByThreadId.get(args.threadId);
   if (!draft) return null;
   if (draft.id !== args.mementoId) return null;
 
   mementoDraftByThreadId.delete(args.threadId);
-  return null;
+  // Return the declined draft so callers can treat this as applied=true.
+  return draft;
 }
 
 /**

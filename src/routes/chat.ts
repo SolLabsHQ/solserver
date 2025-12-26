@@ -111,10 +111,75 @@ export async function chatRoutes(
 
     const { threadId, mementoId, decision } = parsed.data;
 
-    const applied =
+    // Debug: verify body parsing and ids. Avoid logging any content.
+    req.log.debug(
+      {
+        plane: "memento",
+        decision,
+        threadId,
+        mementoId,
+        hasMementoId: Boolean(mementoId),
+        bodyKeys: req?.body && typeof req.body === "object" ? Object.keys(req.body) : [],
+      },
+      "control_plane.memento_decision_input"
+    );
+
+    // Apply decision against the latest draft.
+    // Idempotency behavior:
+    // - accept: if the memento is already accepted (or current), return it with applied=false
+    // - decline: if the memento is already accepted (or current), do NOT delete it; return applied=false with reason
+    // - for missing/unknown ids, return applied=false and memento=null
+
+    const appliedResult =
       decision === "accept"
         ? acceptThreadMemento({ threadId, mementoId })
         : declineThreadMemento({ threadId, mementoId });
+
+    const applied = Boolean(appliedResult);
+
+    let reason:
+      | "applied"
+      | "already_accepted"
+      | "already_accepted_not_declined"
+      | "not_found" = "applied";
+
+    // For accept, return the accepted/current memento when applied.
+    // For decline, we intentionally return null even when decline was applied (draft discarded).
+    let memento = decision === "accept" ? (appliedResult ?? null) : null;
+
+    if (!applied) {
+      // If not applied, check whether this is an idempotent replay.
+      // NOTE: v0 uses in-memory storage; depending on current implementation,
+      // the "latest" memento may still be considered a draft.
+      // We includeDraft here to support safe replay semantics.
+      const latestAny = getLatestThreadMemento(threadId, { includeDraft: true });
+
+      req.log.debug(
+        {
+          plane: "memento",
+          threadId,
+          requestedMementoId: mementoId,
+          latestAnyId: latestAny?.id ?? null,
+          foundLatestAny: Boolean(latestAny),
+          // Best-effort: some implementations may include `isDraft`.
+          latestAnyIsDraft: (latestAny as any)?.isDraft ?? null,
+        },
+        "control_plane.memento_decision_lookup"
+      );
+
+      if (latestAny && latestAny.id === mementoId) {
+        if (decision === "accept") {
+          reason = "already_accepted";
+          memento = latestAny;
+        } else {
+          // Decline does not override a current/accepted memento.
+          reason = "already_accepted_not_declined";
+          memento = latestAny;
+        }
+      } else {
+        reason = "not_found";
+      }
+    }
 
     req.log.info(
       {
@@ -122,12 +187,13 @@ export async function chatRoutes(
         threadId,
         mementoId,
         decision,
-        applied: Boolean(applied),
+        applied,
+        reason,
       },
       "control_plane.memento_decision"
     );
 
-    return { ok: true, decision, applied: Boolean(applied), memento: applied ?? null };
+    return { ok: true, decision, applied, reason, memento };
   }
 
   async function handlePutMemento(req: any, reply: any) {
