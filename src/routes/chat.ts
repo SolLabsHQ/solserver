@@ -12,6 +12,9 @@ import {
 import {
   getLatestThreadMemento,
   putThreadMemento,
+  acceptThreadMemento,
+  declineThreadMemento,
+  revokeThreadMemento,
   retrieveContext,
   retrievalLogShape,
 } from "../control-plane/retrieval";
@@ -35,6 +38,9 @@ export async function chatRoutes(
   // Preferred endpoint name (anti-drift): /memento.
   app.options("/memento", async (_req, reply) => reply.code(204).send());
 
+  // Client decision endpoint: Accept / Decline / Revoke a draft memento.
+  app.options("/memento/decision", async (_req, reply) => reply.code(204).send());
+
   // Back-compat alias: /cfb (historically used for "Conversation Fact Block").
   // NOTE: "CFB" is now reserved for Context Fact Block elsewhere in the design.
   app.options("/cfb", async (_req, reply) => reply.code(204).send());
@@ -51,7 +57,7 @@ export async function chatRoutes(
     const usage = await store.getUsage(id);
     const result = await store.getChatResult(id);
 
-    const threadMemento = getLatestThreadMemento(transmission.threadId);
+    const threadMemento = getLatestThreadMemento(transmission.threadId, { includeDraft: true });
 
     return {
       ok: true,
@@ -88,6 +94,123 @@ export async function chatRoutes(
     decisions: z.array(z.string()).default([]),
     next: z.array(z.string()).default([]),
   });
+
+  const ThreadMementoDecisionInput = z.object({
+    threadId: z.string().min(1),
+    mementoId: z.string().min(1),
+    decision: z.enum(["accept", "decline", "revoke"]),
+  });
+
+  async function handleMementoDecision(req: any, reply: any) {
+    const parsed = ThreadMementoDecisionInput.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        details: parsed.error.flatten(),
+      });
+    }
+
+    const { threadId, mementoId, decision } = parsed.data;
+
+    // Debug: verify body parsing and ids. Avoid logging any content.
+    req.log.debug(
+      {
+        plane: "memento",
+        decision,
+        threadId,
+        mementoId,
+        hasMementoId: Boolean(mementoId),
+        bodyKeys: req?.body && typeof req.body === "object" ? Object.keys(req.body) : [],
+      },
+      "control_plane.memento_decision_input"
+    );
+
+    // Apply decision against the current memento state.
+    // Idempotency behavior:
+    // - accept: if already accepted/current, return it with applied=false
+    // - decline: discards the latest *draft*; does not touch an accepted memento
+    // - revoke: removes the currently accepted memento (undo). If already revoked, applied=false
+    // - for missing/unknown ids, return applied=false and memento=null
+
+    const appliedResult =
+      decision === "accept"
+        ? acceptThreadMemento({ threadId, mementoId })
+        : decision === "decline"
+          ? declineThreadMemento({ threadId, mementoId })
+          : revokeThreadMemento({ threadId, mementoId });
+
+    const applied = Boolean(appliedResult);
+
+    let reason:
+      | "applied"
+      | "already_accepted"
+      | "already_accepted_not_declined"
+      | "already_revoked"
+      | "not_found" = "applied";
+
+    // Response shape by decision:
+    // - accept: return the accepted/current memento
+    // - decline: return null when a draft is discarded
+    // - revoke: return the revoked (previously accepted) memento so the client can render what was undone
+    let memento =
+      decision === "accept"
+        ? (appliedResult ?? null)
+        : decision === "revoke"
+          ? (appliedResult ?? null)
+          : null;
+
+    if (!applied) {
+      // If not applied, check whether this is an idempotent replay.
+      // NOTE: v0 uses in-memory storage; depending on current implementation,
+      // the "latest" memento may still be considered a draft.
+      // We includeDraft here to support safe replay semantics.
+      const latestAny = getLatestThreadMemento(threadId, { includeDraft: true });
+
+      req.log.debug(
+        {
+          plane: "memento",
+          threadId,
+          requestedMementoId: mementoId,
+          latestAnyId: latestAny?.id ?? null,
+          foundLatestAny: Boolean(latestAny),
+          // Best-effort: some implementations may include `isDraft`.
+          latestAnyIsDraft: (latestAny as any)?.isDraft ?? null,
+        },
+        "control_plane.memento_decision_lookup"
+      );
+
+      if (latestAny && latestAny.id === mementoId) {
+        if (decision === "accept") {
+          reason = "already_accepted";
+          memento = latestAny;
+        } else if (decision === "decline") {
+          // Decline does not override a current/accepted memento.
+          reason = "already_accepted_not_declined";
+          memento = latestAny;
+        } else {
+          // Revoke against an already-revoked/nonexistent accepted memento is a no-op.
+          reason = "already_revoked";
+          memento = latestAny;
+        }
+      } else {
+        reason = "not_found";
+      }
+    }
+
+    req.log.info(
+      {
+        plane: "memento",
+        threadId,
+        mementoId,
+        decision,
+        applied,
+        reason,
+      },
+      "control_plane.memento_decision"
+    );
+
+    return { ok: true, decision, applied, reason, memento };
+  }
 
   async function handlePutMemento(req: any, reply: any) {
     const parsed = ThreadMementoInput.safeParse(req.body);
@@ -132,7 +255,10 @@ export async function chatRoutes(
       return reply.code(400).send({ error: "invalid_request", details: { threadId: "required" } });
     }
 
-    const memento = getLatestThreadMemento(threadId);
+    const includeDraftRaw = String((req.query as any)?.includeDraft ?? "").toLowerCase();
+    const includeDraft = includeDraftRaw === "1" || includeDraftRaw === "true";
+
+    const memento = getLatestThreadMemento(threadId, { includeDraft });
 
     req.log.debug(
       {
@@ -152,6 +278,9 @@ export async function chatRoutes(
 
   // Back-compat alias.
   app.post("/cfb", handlePutMemento);
+
+  // Client decision endpoint: Accept / Decline the latest draft memento.
+  app.post("/memento/decision", handleMementoDecision);
  
   app.post("/chat", async (req, reply) => {
     const parsed = PacketInput.safeParse(req.body);
@@ -194,7 +323,7 @@ export async function chatRoutes(
               modeDecision: existing.modeDecision,
               assistant: cached.assistant,
               idempotentReplay: true,
-              threadMemento: getLatestThreadMemento(existing.threadId),
+              threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
             };
           }
 
@@ -205,7 +334,7 @@ export async function chatRoutes(
             status: existing.status,
             pending: true,
             idempotentReplay: true,
-            threadMemento: getLatestThreadMemento(existing.threadId),
+            threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
           });
         }
 
@@ -217,7 +346,7 @@ export async function chatRoutes(
             status: existing.status,
             pending: true,
             idempotentReplay: true,
-            threadMemento: getLatestThreadMemento(existing.threadId),
+            threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
           });
         }
 
@@ -442,7 +571,7 @@ export async function chatRoutes(
         pending: true,
         simulated: true,
         checkAfterMs: 750,
-        threadMemento: getLatestThreadMemento(packet.threadId),
+        threadMemento: getLatestThreadMemento(packet.threadId, { includeDraft: true }),
       });
     }
 
