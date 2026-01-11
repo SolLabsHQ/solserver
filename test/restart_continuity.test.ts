@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { setTimeout } from "node:timers/promises";
 import { existsSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
+import { connect } from "node:net";
 
 /**
  * Restart Continuity Test
@@ -21,46 +22,90 @@ import { resolve } from "node:path";
 
 const TEST_DB_PATH = resolve(__dirname, "../data/test_restart.db");
 const SERVER_PORT = 3334;
-const SERVER_URL = `http://localhost:${SERVER_PORT}`;
+const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
+const HEALTH_URL = `${SERVER_URL}/health`;
 
 describe.skipIf(process.env.CI)("Restart Continuity", () => {
   let serverProcess: ChildProcess | null = null;
 
+  const waitForHealth = async (timeoutMs = 8000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetch(HEALTH_URL);
+        if (response.ok) return;
+      } catch (err) {
+        // ignore until timeout
+      }
+      await setTimeout(200);
+    }
+    throw new Error("Server health endpoint did not become ready.");
+  };
+
+  const waitForPort = async (timeoutMs = 4000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const socket = connect(SERVER_PORT, "127.0.0.1");
+          socket.once("connect", () => {
+            socket.end();
+            resolve();
+          });
+          socket.once("error", (error) => {
+            socket.destroy();
+            reject(error);
+          });
+        });
+        return;
+      } catch (err) {
+        // ignore until timeout
+      }
+      await setTimeout(200);
+    }
+    throw new Error("Server port did not open within timeout.");
+  };
+
+  const waitForReady = async (): Promise<void> => {
+    try {
+      await waitForHealth();
+    } catch (err) {
+      await waitForPort();
+    }
+  };
+
   const startServer = async (): Promise<void> => {
     return new Promise((resolve, reject) => {
-      serverProcess = spawn("pnpm", ["tsx", "src/index.ts"], {
+      serverProcess = spawn("npm", ["run", "dev"], {
         cwd: resolve(__dirname, ".."),
         env: {
           ...process.env,
           PORT: String(SERVER_PORT),
-          DB_PATH: TEST_DB_PATH,
+          CONTROL_PLANE_DB_PATH: TEST_DB_PATH,
           NODE_ENV: "test",
         },
         stdio: ["ignore", "pipe", "pipe"],
       });
 
-      let resolved = false;
-      let output = "";
-      serverProcess.stdout?.on("data", (data) => {
-        output += data.toString();
-        if (!resolved && output.includes("Server listening")) {
-          resolved = true;
-          resolve();
-        }
-      });
+      const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+        reject(new Error(`Server exited before ready (code ${code}, signal ${signal})`));
+      };
 
+      serverProcess.once("exit", onExit);
+      serverProcess.on("error", reject);
       serverProcess.stderr?.on("data", (data) => {
         console.error("Server stderr:", data.toString());
       });
 
-      serverProcess.on("error", reject);
-
-      // Timeout after 10 seconds
-      setTimeout(10000).then(() => {
-        if (!resolved) {
-          reject(new Error("Server failed to start within timeout. Output: " + output));
-        }
-      });
+      waitForReady()
+        .then(() => {
+          serverProcess?.off("exit", onExit);
+          resolve();
+        })
+        .catch((err) => {
+          serverProcess?.off("exit", onExit);
+          reject(err);
+        });
     });
   };
 

@@ -164,6 +164,14 @@ Run:
 npm run dev
 ```
 
+Optional local DB path:
+```bash
+# Default: ./data/control_plane.db
+export CONTROL_PLANE_DB_PATH=./data/control_plane.db
+```
+SolServer will auto-create the parent directory (e.g., `./data/`) if it is missing.
+`DB_PATH` is supported as a temporary alias.
+
 Test:
 ```bash
 curl http://localhost:3333/healthz

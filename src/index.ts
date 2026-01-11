@@ -62,7 +62,9 @@ import { healthRoutes } from "./routes/healthz";
 import { chatRoutes } from "./routes/chat";
 import { SqliteControlPlaneStore } from "./store/sqlite_control_plane_store";
 
-const store = new SqliteControlPlaneStore(process.env.DB_PATH);
+const dbPath =
+  process.env.CONTROL_PLANE_DB_PATH ?? process.env.DB_PATH ?? "./data/control_plane.db";
+const store = new SqliteControlPlaneStore(dbPath);
 
 async function main() {
   // CORS (v0/dev): permissive. Tighten before prod.

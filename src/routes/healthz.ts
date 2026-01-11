@@ -1,9 +1,12 @@
 import type { FastifyInstance } from "fastify";
 
 export async function healthRoutes(app: FastifyInstance) {
-  app.get("/healthz", async () => ({
+  const payload = () => ({
     ok: true,
     service: "solserver",
     ts: new Date().toISOString(),
-  }));
+  });
+
+  app.get("/healthz", async () => payload());
+  app.get("/health", async () => payload());
 }

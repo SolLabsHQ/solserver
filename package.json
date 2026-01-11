@@ -17,6 +17,9 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=20"
+  },
   "bugs": {
     "url": "https://github.com/SolLabsHQ/solserver/issues"
   },

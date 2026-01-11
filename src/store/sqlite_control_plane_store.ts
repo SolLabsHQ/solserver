@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import Database from "better-sqlite3";
 
 import type {
@@ -16,6 +18,10 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
   private db: Database.Database;
 
   constructor(dbPath: string = "./data/control_plane.db") {
+    if (dbPath !== ":memory:") {
+      const dir = dirname(dbPath);
+      mkdirSync(dir, { recursive: true });
+    }
     this.db = new Database(dbPath);
     this.initSchema();
   }
@@ -33,7 +39,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         status TEXT NOT NULL
       );
 
-      CREATE INDEX IF NOT EXISTS idx_client_request_id ON transmissions(client_request_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_client_request_id ON transmissions(client_request_id);
 
       CREATE TABLE IF NOT EXISTS delivery_attempts (
         id TEXT PRIMARY KEY,
@@ -91,16 +97,27 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    stmt.run(
-      t.id,
-      t.packetType,
-      t.threadId,
-      t.clientRequestId ?? null,
-      t.message,
-      JSON.stringify(t.modeDecision),
-      t.createdAt,
-      t.status
-    );
+    try {
+      stmt.run(
+        t.id,
+        t.packetType,
+        t.threadId,
+        t.clientRequestId ?? null,
+        t.message,
+        JSON.stringify(t.modeDecision),
+        t.createdAt,
+        t.status
+      );
+    } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      if (code === "SQLITE_CONSTRAINT_UNIQUE" && t.clientRequestId) {
+        const existing = await this.getTransmissionByClientRequestId(t.clientRequestId);
+        if (existing) {
+          return existing;
+        }
+      }
+      throw err;
+    }
 
     return t;
   }
