@@ -372,6 +372,16 @@ export async function chatRoutes(
     // Attach transmissionId for HTTP summary logs (onResponse hook reads this header).
     reply.header("x-sol-transmission-id", transmission.id);
 
+    // --- Trace: Always-on (v0) ---
+    // Create trace run for this transmission. Level defaults to "info", client may request "debug".
+    const traceLevel = packet.traceConfig?.level ?? "info";
+    const traceRun = await store.createTraceRun({
+      transmissionId: transmission.id,
+      level: traceLevel,
+    });
+
+    reply.header("x-sol-trace-run-id", traceRun.id);
+
     // Route-scoped logger for control-plane tracing (keeps logs searchable).
     const log = req.log.child({
       plane: "chat",
@@ -379,6 +389,7 @@ export async function chatRoutes(
       threadId: packet.threadId,
       clientRequestId: packet.clientRequestId ?? undefined,
       modeLabel: modeDecision?.modeLabel ?? undefined,
+      traceRunId: traceRun.id,
     });
 
     log.debug({
@@ -386,6 +397,21 @@ export async function chatRoutes(
       status: transmission.status,
       domainFlags: modeDecision?.domainFlags ?? [],
     }, "control_plane.transmission_ready");
+
+    // Trace event: Policy engine (mode routing)
+    await store.appendTraceEvent({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "policy_engine",
+      status: "completed",
+      summary: `Mode routed: ${modeDecision.modeLabel}`,
+      metadata: {
+        modeLabel: modeDecision.modeLabel,
+        domainFlags: modeDecision.domainFlags,
+        confidence: modeDecision.confidence,
+      },
+    });
 
     // Dev/testing hook: force a 500 when requested.
     const simulate = String((req.headers as any)["x-sol-simulate-status"] ?? "");
@@ -414,6 +440,15 @@ export async function chatRoutes(
 
     // --- Step 6: Prompt assembly stub (mounted law + retrieval slot) ---
     // We build the PromptPack even when using the fake provider so OpenAI wiring is a swap, not a rewrite.
+    await store.appendTraceEvent({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "enrichment_lattice",
+      status: "started",
+      summary: "Retrieving context",
+    });
+
     const retrievalItems = await retrieveContext({
       threadId: packet.threadId,
       packetType: packet.packetType,
@@ -421,6 +456,25 @@ export async function chatRoutes(
     });
 
     log.debug(retrievalLogShape(retrievalItems), "control_plane.retrieval");
+
+    await store.appendTraceEvent({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "enrichment_lattice",
+      status: "completed",
+      summary: `Retrieved ${retrievalItems.length} context items`,
+      metadata: { itemCount: retrievalItems.length },
+    });
+
+    await store.appendTraceEvent({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "compose_request",
+      status: "started",
+      summary: "Building prompt pack",
+    });
 
     const promptPack = buildPromptPack({
       packet,
@@ -433,6 +487,18 @@ export async function chatRoutes(
     // Provider input for v0: one stable string with headers.
     // We do not log the content here.
     const providerInputText = toSinglePromptText(promptPack);
+
+    await store.appendTraceEvent({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "compose_request",
+      status: "completed",
+      summary: "Prompt pack assembled",
+      metadata: {
+        inputLength: providerInputText.length,
+      },
+    });
 
     // Dev/testing hook: simulate an accepted-but-pending response (202) that COMPLETES shortly after.
     // SolMobile can poll GET /transmissions/:id to observe created -> completed and fetch assistant.
@@ -579,6 +645,15 @@ export async function chatRoutes(
     let threadMemento: any = null;
 
     try {
+      await store.appendTraceEvent({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "model",
+        phase: "model_call",
+        status: "started",
+        summary: "Calling model provider",
+      });
+
       const meta = await fakeModelReplyWithMeta({
         userText: providerInputText,
         modeLabel: modeDecision.modeLabel,
@@ -586,7 +661,39 @@ export async function chatRoutes(
 
       assistant = meta.assistant;
 
+      await store.appendTraceEvent({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "model",
+        phase: "model_call",
+        status: "completed",
+        summary: "Model response received",
+        metadata: {
+          outputLength: assistant.length,
+        },
+      });
+
+      await store.appendTraceEvent({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: "started",
+        summary: "Running output linter",
+      });
+
       const lint = postOutputLinter({ modeLabel: modeDecision.modeLabel, content: assistant });
+
+      await store.appendTraceEvent({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: lint.ok ? "completed" : "failed",
+        summary: lint.ok ? "Output linter passed" : `Output linter failed: ${lint.error}`,
+        metadata: { lintOk: lint.ok, error: lint.error },
+      });
+
       if (!lint.ok) {
         await store.appendDeliveryAttempt({
           transmissionId: transmission.id,
@@ -682,12 +789,22 @@ export async function chatRoutes(
       outputChars: assistant.length,
     }, "delivery.completed");
 
+    // Fetch trace events for response (bounded by level)
+    const traceEventLimit = traceLevel === "debug" ? 50 : 0; // debug: return up to 50 events, info: no events
+    const traceEvents = await store.getTraceEvents(traceRun.id, { limit: traceEventLimit });
+
     return {
       ok: true,
       transmissionId: transmission.id,
       modeDecision,
       assistant,
       threadMemento,
+      trace: {
+        traceRunId: traceRun.id,
+        level: traceLevel,
+        eventCount: traceEvents.length,
+        ...(traceLevel === "debug" ? { events: traceEvents } : {}),
+      },
     };
   });
 }
