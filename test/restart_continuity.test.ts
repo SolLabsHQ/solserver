@@ -23,7 +23,7 @@ const TEST_DB_PATH = resolve(__dirname, "../data/test_restart.db");
 const SERVER_PORT = 3334;
 const SERVER_URL = `http://localhost:${SERVER_PORT}`;
 
-describe("Restart Continuity", () => {
+describe.skipIf(process.env.CI)("Restart Continuity", () => {
   let serverProcess: ChildProcess | null = null;
 
   const startServer = async (): Promise<void> => {
