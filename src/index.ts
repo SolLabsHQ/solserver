@@ -60,9 +60,11 @@ app.addHook("onResponse", async (req, reply) => {
 
 import { healthRoutes } from "./routes/healthz";
 import { chatRoutes } from "./routes/chat";
-import { MemoryControlPlaneStore } from "./store/control_plane_store";
+import { SqliteControlPlaneStore } from "./store/sqlite_control_plane_store";
 
-const store = new MemoryControlPlaneStore();
+const dbPath =
+  process.env.CONTROL_PLANE_DB_PATH ?? process.env.DB_PATH ?? "./data/control_plane.db";
+const store = new SqliteControlPlaneStore(dbPath);
 
 async function main() {
   // CORS (v0/dev): permissive. Tighten before prod.
