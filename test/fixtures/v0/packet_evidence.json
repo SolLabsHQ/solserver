@@ -1,0 +1,65 @@
+{
+  "request_id": "test-request-002",
+  "user_id": "test-user-001",
+  "thread_id": "test-thread-001",
+  "user_message_id": "test-message-002",
+  "packet": {
+    "packet_id": "test-packet-002",
+    "packet_type": "chat",
+    "message_ids": ["test-message-002"],
+    "pinned_context_ref": {
+      "id": "default-context",
+      "version": "1.0.0",
+      "hash": "abc123"
+    },
+    "driver_block_mode": "custom",
+    "driver_block_refs": [
+      {
+        "id": "system-default-001",
+        "version": "1.0.0"
+      }
+    ],
+    "driver_block_inline": [
+      {
+        "id": "user-block-001",
+        "version": "1.0.0",
+        "definition": "Always provide sources for factual claims."
+      }
+    ],
+    "trace_config": {
+      "level": "debug"
+    },
+    "retrieval_config": {
+      "domain_scope": "thread",
+      "max_items": 5,
+      "per_item_max_summary_tokens": 100
+    },
+    "evidence": {
+      "claim_map": [
+        {
+          "claim_id": "claim-001",
+          "claim_text": "The author argues for evidence-based AI.",
+          "support": [
+            {
+              "support_id": "support-001",
+              "source_type": "url",
+              "source_uri": "https://example.com/article",
+              "excerpt": "Evidence-based AI is crucial for trust.",
+              "capture_id": "capture-001"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "context": {
+    "capsule_summary": "Test conversation with evidence binding.",
+    "history": []
+  },
+  "input_text": "Summarize the author's argument from the captured URL.",
+  "budgets": {
+    "max_input_tokens": 1000,
+    "max_output_tokens": 500,
+    "max_regenerations": 1
+  }
+}

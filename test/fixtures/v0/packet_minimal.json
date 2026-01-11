@@ -1,0 +1,37 @@
+{
+  "request_id": "test-request-001",
+  "user_id": "test-user-001",
+  "thread_id": "test-thread-001",
+  "user_message_id": "test-message-001",
+  "packet": {
+    "packet_id": "test-packet-001",
+    "packet_type": "chat",
+    "message_ids": ["test-message-001"],
+    "pinned_context_ref": {
+      "id": "default-context",
+      "version": "1.0.0",
+      "hash": "abc123"
+    },
+    "driver_block_mode": "default",
+    "driver_block_refs": [],
+    "driver_block_inline": [],
+    "trace_config": {
+      "level": "info"
+    },
+    "retrieval_config": {
+      "domain_scope": "thread",
+      "max_items": 5,
+      "per_item_max_summary_tokens": 100
+    }
+  },
+  "context": {
+    "capsule_summary": "Test conversation about v0 implementation.",
+    "history": []
+  },
+  "input_text": "Hello, this is a test message.",
+  "budgets": {
+    "max_input_tokens": 1000,
+    "max_output_tokens": 500,
+    "max_regenerations": 1
+  }
+}
