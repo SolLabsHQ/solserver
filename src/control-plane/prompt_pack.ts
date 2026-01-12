@@ -1,6 +1,7 @@
 
 
 import type { PacketInput, ModeDecision } from "../contracts/chat";
+import { assembleDriverBlocks, formatDriverBlocksForPrompt, type AssembledDriverBlock, type DriverBlockEnforcementResult } from "./driver_blocks";
 
 /**
  * PromptPack is the deterministic "spine" for provider calls.
@@ -34,15 +35,26 @@ export type PromptPack = {
   modeDecision: ModeDecision;
   packet: PacketInput;
   sections: PromptSection[];
+  driverBlocks: AssembledDriverBlock[]; // Driver Blocks in strict order
+  driverBlockEnforcement: DriverBlockEnforcementResult; // Enforcement results (dropped/trimmed)
 };
 
 /**
  * Minimal mounted law for v0.
  * Later this will be loaded from a file and will include the full constraint manifest.
+ * Driver Blocks are prepended to the law section.
  */
-function buildMountedLaw(modeDecision: ModeDecision): string {
+function buildMountedLaw(modeDecision: ModeDecision, driverBlocksText: string): string {
   const lines: string[] = [];
 
+  // Driver Blocks first (if present)
+  if (driverBlocksText) {
+    lines.push("# Driver Blocks (Policy)");
+    lines.push(driverBlocksText);
+    lines.push("");
+  }
+
+  lines.push("# System Instructions");
   lines.push("You are SolServer running the Sol control plane.");
   lines.push("Follow the system constraints and keep outputs bounded.");
   lines.push("If you do not know something, say so plainly.");
@@ -92,7 +104,11 @@ export function buildPromptPack(args: {
 }): PromptPack {
   const { packet, modeDecision, retrievalItems } = args;
 
-  const law = buildMountedLaw(modeDecision);
+  // Assemble Driver Blocks with enforcement
+  const driverBlockEnforcement = assembleDriverBlocks(packet);
+  const driverBlocksText = formatDriverBlocksForPrompt(driverBlockEnforcement.accepted);
+
+  const law = buildMountedLaw(modeDecision, driverBlocksText);
   const retrieval = formatRetrievalSection(retrievalItems);
 
   const sections: PromptSection[] = [
@@ -121,7 +137,9 @@ export function buildPromptPack(args: {
     version: "prompt-pack-v0",
     modeDecision,
     packet,
-    sections
+    sections,
+    driverBlocks: driverBlockEnforcement.accepted,
+    driverBlockEnforcement,
   };
 }
 
