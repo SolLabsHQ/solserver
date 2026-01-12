@@ -371,7 +371,28 @@ describe("Driver Blocks (v0)", () => {
   });
 
   describe("Baseline-Always Behavior", () => {
-    it("should accept client blocks when provided (additive)", () => {
+    it("should always include baseline blocks even when packet provides no refs/inline", () => {
+      const packet: PacketInput = {
+        packetType: "chat",
+        threadId: "thread-baseline-001",
+        message: "Test",
+        // No driverBlockRefs or driverBlockInline
+      };
+
+      const result = assembleDriverBlocks(packet);
+
+      // Should have 5 baseline blocks (DB-001 through DB-005)
+      expect(result.accepted.length).toBe(5);
+      expect(result.accepted.every(b => b.source === "system_baseline")).toBe(true);
+      expect(result.accepted[0].id).toBe("DB-001");
+      expect(result.accepted[1].id).toBe("DB-002");
+      expect(result.accepted[2].id).toBe("DB-003");
+      expect(result.accepted[3].id).toBe("DB-004");
+      expect(result.accepted[4].id).toBe("DB-005");
+      expect(result.dropped.length).toBe(0);
+    });
+
+    it("should accept client blocks when provided (additive to baseline)", () => {
       const packet: PacketInput = {
         packetType: "chat",
         threadId: "thread-additive-001",
@@ -392,34 +413,28 @@ describe("Driver Blocks (v0)", () => {
 
       const result = assembleDriverBlocks(packet);
 
-      // Should accept both system ref and user inline (additive)
-      expect(result.accepted.length).toBe(2);
-      expect(result.accepted[0].source).toBe("system_ref");
-      expect(result.accepted[1].source).toBe("user_inline");
+      // Should have: 5 baseline + 1 ref + 1 inline = 7 total
+      expect(result.accepted.length).toBe(7);
+      
+      // First 5 should be baseline
+      expect(result.accepted.slice(0, 5).every(b => b.source === "system_baseline")).toBe(true);
+      
+      // Then system ref
+      expect(result.accepted[5].source).toBe("system_ref");
+      expect(result.accepted[5].id).toBe("DB-001");
+      
+      // Then user inline (LAST)
+      expect(result.accepted[6].source).toBe("user_inline");
+      expect(result.accepted[6].id).toBe("user-block-001");
 
       // Should not drop any blocks
       expect(result.dropped.length).toBe(0);
     });
 
-    it("should work when no client blocks provided", () => {
+    it("should maintain strict ordering (baseline → refs → inline)", () => {
       const packet: PacketInput = {
         packetType: "chat",
-        threadId: "thread-additive-002",
-        message: "Test",
-        // No driverBlockRefs or driverBlockInline
-      };
-
-      const result = assembleDriverBlocks(packet);
-
-      // Should accept no blocks (no baseline defined yet, no client blocks)
-      expect(result.accepted.length).toBe(0);
-      expect(result.dropped.length).toBe(0);
-    });
-
-    it("should maintain strict ordering (system refs before user inline)", () => {
-      const packet: PacketInput = {
-        packetType: "chat",
-        threadId: "thread-additive-003",
+        threadId: "thread-ordering-001",
         message: "Test",
         driverBlockRefs: [
           { id: "DB-001", version: "1.0" },
@@ -440,23 +455,64 @@ describe("Driver Blocks (v0)", () => {
 
       const result = assembleDriverBlocks(packet);
 
-      // Should have 3 blocks total
-      expect(result.accepted.length).toBe(3);
+      // Should have: 5 baseline + 2 refs + 1 inline = 8 total
+      expect(result.accepted.length).toBe(8);
 
-      // System refs should come first
-      expect(result.accepted[0].source).toBe("system_ref");
-      expect(result.accepted[0].id).toBe("DB-001");
-      expect(result.accepted[1].source).toBe("system_ref");
-      expect(result.accepted[1].id).toBe("DB-002");
+      // First 5 should be baseline (system_baseline)
+      expect(result.accepted.slice(0, 5).every(b => b.source === "system_baseline")).toBe(true);
+
+      // Next 2 should be system refs
+      expect(result.accepted[5].source).toBe("system_ref");
+      expect(result.accepted[5].id).toBe("DB-001");
+      expect(result.accepted[6].source).toBe("system_ref");
+      expect(result.accepted[6].id).toBe("DB-002");
 
       // User inline should come last
-      expect(result.accepted[2].source).toBe("user_inline");
-      expect(result.accepted[2].id).toBe("user-block-001");
+      expect(result.accepted[7].source).toBe("user_inline");
+      expect(result.accepted[7].id).toBe("user-block-001");
 
       // Order field should be sequential
       expect(result.accepted[0].order).toBe(0);
       expect(result.accepted[1].order).toBe(1);
-      expect(result.accepted[2].order).toBe(2);
+      expect(result.accepted[7].order).toBe(7);
+    });
+
+    it("should never drop baseline blocks even when limits exceeded", () => {
+      const packet: PacketInput = {
+        packetType: "chat",
+        threadId: "thread-enforcement-001",
+        message: "Test",
+        // Send 15 refs (exceeds MAX_REFS=10)
+        driverBlockRefs: Array.from({ length: 15 }, (_, i) => ({
+          id: `DB-${String(i + 1).padStart(3, "0")}`,
+          version: "1.0",
+        })),
+        // Send 10 inline blocks (exceeds MAX_INLINE=5)
+        driverBlockInline: Array.from({ length: 10 }, (_, i) => ({
+          id: `user-block-${String(i + 1).padStart(3, "0")}`,
+          version: "1",
+          title: `User Block ${i + 1}`,
+          scope: "thread" as const,
+          definition: `User policy ${i + 1}`,
+          source: "user_created" as const,
+          approvedAt: "2026-01-11T00:00:00Z",
+        })),
+      };
+
+      const result = assembleDriverBlocks(packet);
+
+      // Baseline blocks (5) should always be present
+      const baselineBlocks = result.accepted.filter(b => b.source === "system_baseline");
+      expect(baselineBlocks.length).toBe(5);
+
+      // User inline blocks should be dropped first (5 kept, 5 dropped)
+      expect(result.dropped.some(d => d.id.startsWith("user-block"))).toBe(true);
+
+      // Excess refs should also be dropped (10 kept, 5 dropped)
+      expect(result.dropped.some(d => d.id.startsWith("DB-"))).toBe(true);
+
+      // But NO baseline blocks should ever be in the dropped list
+      expect(result.dropped.some(d => ["DB-001", "DB-002", "DB-003", "DB-004", "DB-005"].includes(d.id))).toBe(false);
     });
   });
 

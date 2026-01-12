@@ -1,4 +1,5 @@
-import type { PacketInput, DriverBlockRef, DriverBlockInline } from "../contracts/chat";
+import type { PacketInput, DriverBlockRef, DriverBlockInline } from "../contracts/chat.js";
+import { SYSTEM_BASELINE_BLOCKS } from "./driver_block_registry.js";
 
 /**
  * Driver Blocks are user-owned micro-protocols that reduce cognitive carry
@@ -11,7 +12,7 @@ import type { PacketInput, DriverBlockRef, DriverBlockInline } from "../contract
  * 4. User inline (LAST - applied after all system blocks)
  */
 
-export type DriverBlockSource = "system_ref" | "system_mounted_law" | "system_derived" | "user_inline";
+export type DriverBlockSource = "system_baseline" | "system_ref" | "system_mounted_law" | "system_derived" | "user_inline";
 
 export type AssembledDriverBlock = {
   id: string;
@@ -77,15 +78,14 @@ export const DRIVER_BLOCK_BOUNDS = {
 
 /**
  * Assemble Driver Blocks from packet in strict order:
- * 1. Baseline system blocks (always applied)
+ * 1. Baseline system blocks (server-owned, always applied)
  * 2. System refs (from packet.driverBlockRefs)
  * 3. System mounted law (future: pinned context)
  * 4. System derived (future: dynamic policy)
  * 5. User inline (from packet.driverBlockInline) - LAST
  *
- * Driver Blocks are always additive:
- * - Baseline system blocks always apply
- * - Client refs/inline are added with strict ordering and bounds enforcement
+ * Baseline system blocks are always applied; refs/inline are additive.
+ * No client-controlled mode exists; server contract is deterministic.
  */
 export function assembleDriverBlocks(packet: PacketInput): DriverBlockEnforcementResult {
   const systemBlocks: AssembledDriverBlock[] = [];
@@ -95,15 +95,25 @@ export function assembleDriverBlocks(packet: PacketInput): DriverBlockEnforcemen
 
   let order = 0;
 
-  // Step 0: Baseline system blocks (always applied)
-  // TODO: Add baseline system blocks here when defined
-  // For now, baseline blocks are referenced via packet.driverBlockRefs
+  // Step 0: Baseline system blocks (server-owned, always applied, never dropped)
+  for (const baselineBlock of SYSTEM_BASELINE_BLOCKS) {
+    systemBlocks.push({
+      id: baselineBlock.id,
+      version: baselineBlock.version,
+      title: baselineBlock.title,
+      definition: baselineBlock.definition,
+      source: "system_baseline",
+      order: order++,
+    });
+  }
 
   // Step 1: System refs (from packet.driverBlockRefs)
+  // Note: Baseline blocks are already added and are never subject to bounds enforcement.
+  // Only client-provided refs and inline blocks are subject to limits.
   if (packet.driverBlockRefs && packet.driverBlockRefs.length > 0) {
     const refs = packet.driverBlockRefs.slice(0, DRIVER_BLOCK_BOUNDS.MAX_REFS);
     
-    // Drop excess refs
+    // Drop excess refs (baseline blocks are never dropped)
     if (packet.driverBlockRefs.length > DRIVER_BLOCK_BOUNDS.MAX_REFS) {
       for (let i = DRIVER_BLOCK_BOUNDS.MAX_REFS; i < packet.driverBlockRefs.length; i++) {
         dropped.push({
@@ -140,10 +150,14 @@ export function assembleDriverBlocks(packet: PacketInput): DriverBlockEnforcemen
   // Placeholder for v0
 
   // Step 4: User inline blocks (LAST - applied after all system blocks)
+  // Enforcement priority when limits exceeded:
+  // 1. Drop user inline blocks first (these are dropped here)
+  // 2. Drop extra refs (dropped in Step 1)
+  // 3. Baseline blocks are NEVER dropped
   if (packet.driverBlockInline && packet.driverBlockInline.length > 0) {
     const inline = packet.driverBlockInline.slice(0, DRIVER_BLOCK_BOUNDS.MAX_INLINE);
 
-    // Drop excess inline blocks
+    // Drop excess inline blocks (user blocks drop first when limits exceeded)
     if (packet.driverBlockInline.length > DRIVER_BLOCK_BOUNDS.MAX_INLINE) {
       for (let i = DRIVER_BLOCK_BOUNDS.MAX_INLINE; i < packet.driverBlockInline.length; i++) {
         dropped.push({
