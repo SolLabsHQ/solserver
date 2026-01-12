@@ -64,7 +64,7 @@ export type TraceEventPhase =
   | "breakpoint"
   | "export"
   | "error";
-export type TraceEventStatus = "started" | "completed" | "paused" | "blocked" | "failed";
+export type TraceEventStatus = "started" | "completed" | "paused" | "blocked" | "failed" | "warning";
 
 export type TraceEvent = {
   id: string;
