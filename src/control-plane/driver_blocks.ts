@@ -26,6 +26,11 @@ export type DriverBlockEnforcementResult = {
   accepted: AssembledDriverBlock[];
   dropped: Array<{ id: string; reason: string }>;
   trimmed: Array<{ id: string; originalLength: number; trimmedLength: number }>;
+  mismatch: boolean; // True if mode="default" but custom blocks were present
+  mismatchDetails?: { // Only present if mismatch=true
+    droppedRefsCount: number;
+    droppedInlineCount: number;
+  };
 };
 
 /**
@@ -81,14 +86,64 @@ export const DRIVER_BLOCK_BOUNDS = {
  * 2. System mounted law (future: pinned context)
  * 3. System derived (future: dynamic policy)
  * 4. User inline (from packet.driverBlockInline) - LAST
+ *
+ * driver_block_mode semantics:
+ * - "default" (or omitted): Apply system baseline only, ignore custom blocks
+ * - "custom": Apply system baseline + custom blocks with strict ordering
  */
 export function assembleDriverBlocks(packet: PacketInput): DriverBlockEnforcementResult {
   const systemBlocks: AssembledDriverBlock[] = [];
   const userBlocks: AssembledDriverBlock[] = [];
   const dropped: Array<{ id: string; reason: string }> = [];
   const trimmed: Array<{ id: string; originalLength: number; trimmedLength: number }> = [];
+  let mismatch = false;
+  let mismatchDetails: { droppedRefsCount: number; droppedInlineCount: number } | undefined;
 
   let order = 0;
+
+  // Determine effective mode (default to "default" if omitted)
+  const mode = packet.driverBlockMode ?? "default";
+
+  // Check for mismatch: mode="default" but custom blocks present
+  if (mode === "default") {
+    const hasCustomRefs = packet.driverBlockRefs && packet.driverBlockRefs.length > 0;
+    const hasCustomInline = packet.driverBlockInline && packet.driverBlockInline.length > 0;
+    
+    if (hasCustomRefs || hasCustomInline) {
+      mismatch = true;
+      mismatchDetails = {
+        droppedRefsCount: packet.driverBlockRefs?.length ?? 0,
+        droppedInlineCount: packet.driverBlockInline?.length ?? 0,
+      };
+      
+      // Drop all custom blocks with mismatch reason
+      if (hasCustomRefs) {
+        for (const ref of packet.driverBlockRefs!) {
+          dropped.push({
+            id: ref.id,
+            reason: `driver_block_mode="default" but custom refs present (client mismatch)`,
+          });
+        }
+      }
+      if (hasCustomInline) {
+        for (const block of packet.driverBlockInline!) {
+          dropped.push({
+            id: block.id,
+            reason: `driver_block_mode="default" but custom inline blocks present (client mismatch)`,
+          });
+        }
+      }
+      
+      // Return early with no custom blocks applied
+      return {
+        accepted: [],
+        dropped,
+        trimmed,
+        mismatch,
+        mismatchDetails,
+      };
+    }
+  }
 
   // Step 1: System refs (from packet.driverBlockRefs)
   if (packet.driverBlockRefs && packet.driverBlockRefs.length > 0) {
@@ -186,6 +241,8 @@ export function assembleDriverBlocks(packet: PacketInput): DriverBlockEnforcemen
     accepted: [...systemBlocks, ...userBlocks],
     dropped,
     trimmed,
+    mismatch,
+    mismatchDetails,
   };
 }
 

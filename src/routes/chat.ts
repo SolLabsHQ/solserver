@@ -505,14 +505,20 @@ export async function chatRoutes(
 
     // Trace event: Driver Blocks enforcement (if any blocks were dropped or trimmed)
     if (promptPack.driverBlockEnforcement.dropped.length > 0 || promptPack.driverBlockEnforcement.trimmed.length > 0) {
+      const summary = promptPack.driverBlockEnforcement.mismatch
+        ? `Driver Blocks mismatch: mode="default" but custom blocks present (${promptPack.driverBlockEnforcement.mismatchDetails?.droppedRefsCount ?? 0} refs, ${promptPack.driverBlockEnforcement.mismatchDetails?.droppedInlineCount ?? 0} inline dropped)`
+        : `Driver Blocks enforcement: ${promptPack.driverBlockEnforcement.dropped.length} dropped, ${promptPack.driverBlockEnforcement.trimmed.length} trimmed`;
+      
       await store.appendTraceEvent({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "solserver",
         phase: "compose_request",
         status: "warning",
-        summary: `Driver Blocks enforcement: ${promptPack.driverBlockEnforcement.dropped.length} dropped, ${promptPack.driverBlockEnforcement.trimmed.length} trimmed`,
+        summary,
         metadata: {
+          mismatch: promptPack.driverBlockEnforcement.mismatch,
+          mismatchDetails: promptPack.driverBlockEnforcement.mismatchDetails,
           dropped: promptPack.driverBlockEnforcement.dropped,
           trimmed: promptPack.driverBlockEnforcement.trimmed,
         },
