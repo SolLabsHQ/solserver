@@ -176,7 +176,7 @@ describe("Driver Blocks (v0)", () => {
       expect(userBlock?.definition.length).toBe(DRIVER_BLOCK_BOUNDS.MAX_DEFINITION_LENGTH);
     });
 
-    it("should enforce MAX_TOTAL_BLOCKS limit", () => {
+    it("should keep non-baseline blocks within MAX_TOTAL_BLOCKS", () => {
       const packet: PacketInput = {
         packetType: "chat",
         threadId: "thread-bounds-004",
@@ -198,11 +198,12 @@ describe("Driver Blocks (v0)", () => {
 
       const result = assembleDriverBlocks(packet);
 
-      // Total accepted should not exceed MAX_TOTAL_BLOCKS (15)
-      expect(result.accepted.length).toBeLessThanOrEqual(DRIVER_BLOCK_BOUNDS.MAX_TOTAL_BLOCKS);
+      // Non-baseline accepted should not exceed MAX_TOTAL_BLOCKS (15)
+      const nonBaselineAccepted = result.accepted.filter((b) => b.source !== "system_baseline");
+      expect(nonBaselineAccepted.length).toBeLessThanOrEqual(DRIVER_BLOCK_BOUNDS.MAX_TOTAL_BLOCKS);
 
-      // Should drop excess blocks
-      expect(result.dropped.length).toBeGreaterThan(0);
+      // Excess inline blocks should be dropped by MAX_INLINE enforcement
+      expect(result.dropped.some((d) => d.reason.includes("MAX_INLINE"))).toBe(true);
     });
   });
 
@@ -295,6 +296,8 @@ describe("Driver Blocks (v0)", () => {
 
       // Should have trace events
       expect(body.trace.events).toBeDefined();
+      expect(body.driverBlocks.droppedCount).toBeGreaterThan(0);
+      expect(body.driverBlocks.trimmedCount).toBeGreaterThanOrEqual(0);
 
       // Should have a warning event for dropped blocks
       const warningEvent = body.trace.events.find(
@@ -367,6 +370,27 @@ describe("Driver Blocks (v0)", () => {
       expect(composeEvent.metadata.driverBlocksAccepted).toBeDefined();
       expect(composeEvent.metadata.driverBlocksDropped).toBeDefined();
       expect(composeEvent.metadata.driverBlocksTrimmed).toBeDefined();
+    });
+  });
+
+  describe("Strictness", () => {
+    it("should reject unknown keys with bounded error response", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat",
+        payload: {
+          packetType: "chat",
+          threadId: "thread-strict-001",
+          message: "Test",
+          driverBlockMode: "custom",
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      const body = JSON.parse(response.body);
+      expect(body.error).toBe("invalid_request");
+      expect(body.message).toBe("Unrecognized keys in request");
+      expect(body.unrecognizedKeys).toContain("driverBlockMode");
     });
   });
 
@@ -514,6 +538,33 @@ describe("Driver Blocks (v0)", () => {
       // But NO baseline blocks should ever be in the dropped list
       expect(result.dropped.some(d => ["DB-001", "DB-002", "DB-003", "DB-004", "DB-005"].includes(d.id))).toBe(false);
     });
+
+    it("should not count baseline blocks toward MAX_TOTAL_BLOCKS", () => {
+      const packet: PacketInput = {
+        packetType: "chat",
+        threadId: "thread-baseline-total-001",
+        message: "Test",
+        driverBlockRefs: Array.from({ length: 10 }, (_, i) => ({
+          id: `DB-00${(i % 5) + 1}`,
+          version: "1.0",
+        })),
+        driverBlockInline: Array.from({ length: 5 }, (_, i) => ({
+          id: `user-block-${i + 1}`,
+          version: "1",
+          title: `Block ${i + 1}`,
+          scope: "thread" as const,
+          definition: "Custom policy",
+          source: "user_created" as const,
+          approvedAt: "2026-01-11T00:00:00Z",
+        })),
+      };
+
+      const result = assembleDriverBlocks(packet);
+
+      // 5 baseline + 10 refs + 5 inline = 20 total accepted
+      expect(result.accepted.length).toBe(20);
+      expect(result.dropped.length).toBe(0);
+    });
   });
 
   describe("End-to-End Smoke Test", () => {
@@ -526,7 +577,6 @@ describe("Driver Blocks (v0)", () => {
           threadId: "thread-e2e-001",
           clientRequestId: "req-e2e-001",
           message: "Help me make a decision",
-          driverBlockMode: "custom",
           driverBlockRefs: [
             { id: "DB-001", version: "1.0" }, // NoAuthorityDrift
             { id: "DB-003", version: "1.0" }, // DecisionClosure
@@ -553,6 +603,7 @@ describe("Driver Blocks (v0)", () => {
       // Verify response structure
       expect(body.transmissionId).toBeDefined();
       expect(body.assistant).toBeDefined();
+      expect(body.driverBlocks.acceptedCount).toBeGreaterThan(0);
       expect(body.trace).toBeDefined();
       expect(body.trace.traceRunId).toBeDefined();
 

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const TraceConfig = z.object({
   level: z.enum(["info", "debug"]).default("info"),
-});
+}).strict();
 
 export type TraceConfig = z.infer<typeof TraceConfig>;
 
@@ -10,7 +10,7 @@ export type TraceConfig = z.infer<typeof TraceConfig>;
 export const DriverBlockRef = z.object({
   id: z.string().min(1),
   version: z.string().min(1),
-});
+}).strict();
 
 export type DriverBlockRef = z.infer<typeof DriverBlockRef>;
 
@@ -25,7 +25,7 @@ export const DriverBlockInline = z.object({
   approvedAt: z.string().datetime(),
   threadId: z.string().optional(),
   notes: z.string().optional(),
-});
+}).strict();
 
 export type DriverBlockInline = z.infer<typeof DriverBlockInline>;
 
@@ -40,7 +40,7 @@ export const PacketInput = z.object({
   driverBlockRefs: z.array(DriverBlockRef).optional(), // Bounded by enforcement logic
   driverBlockInline: z.array(DriverBlockInline).optional(), // Bounded by enforcement logic
   meta: z.record(z.string(), z.any()).optional(),
-});
+}).strict();
 
 export type PacketInput = z.infer<typeof PacketInput>;
 

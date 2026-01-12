@@ -88,6 +88,7 @@ export const DRIVER_BLOCK_BOUNDS = {
  * No client-controlled mode exists; server contract is deterministic.
  */
 export function assembleDriverBlocks(packet: PacketInput): DriverBlockEnforcementResult {
+  const baselineBlocks: AssembledDriverBlock[] = [];
   const systemBlocks: AssembledDriverBlock[] = [];
   const userBlocks: AssembledDriverBlock[] = [];
   const dropped: Array<{ id: string; reason: string }> = [];
@@ -97,7 +98,7 @@ export function assembleDriverBlocks(packet: PacketInput): DriverBlockEnforcemen
 
   // Step 0: Baseline system blocks (server-owned, always applied, never dropped)
   for (const baselineBlock of SYSTEM_BASELINE_BLOCKS) {
-    systemBlocks.push({
+    baselineBlocks.push({
       id: baselineBlock.id,
       version: baselineBlock.version,
       title: baselineBlock.title,
@@ -191,11 +192,11 @@ export function assembleDriverBlocks(packet: PacketInput): DriverBlockEnforcemen
     }
   }
 
-  // Enforce total block limit
-  const allBlocks = [...systemBlocks, ...userBlocks];
-  if (allBlocks.length > DRIVER_BLOCK_BOUNDS.MAX_TOTAL_BLOCKS) {
-    // Drop excess user blocks (system blocks take priority)
-    const excessCount = allBlocks.length - DRIVER_BLOCK_BOUNDS.MAX_TOTAL_BLOCKS;
+  // Enforce total block limit (baseline blocks are excluded from this limit)
+  const nonBaselineBlocks = [...systemBlocks, ...userBlocks];
+  if (nonBaselineBlocks.length > DRIVER_BLOCK_BOUNDS.MAX_TOTAL_BLOCKS) {
+    // Drop excess user blocks (system refs take priority)
+    const excessCount = nonBaselineBlocks.length - DRIVER_BLOCK_BOUNDS.MAX_TOTAL_BLOCKS;
     const droppedUserBlocks = userBlocks.splice(-excessCount, excessCount);
     for (const block of droppedUserBlocks) {
       dropped.push({
@@ -206,7 +207,7 @@ export function assembleDriverBlocks(packet: PacketInput): DriverBlockEnforcemen
   }
 
   return {
-    accepted: [...systemBlocks, ...userBlocks],
+    accepted: [...baselineBlocks, ...systemBlocks, ...userBlocks],
     dropped,
     trimmed,
   };

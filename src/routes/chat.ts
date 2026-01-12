@@ -285,6 +285,23 @@ export async function chatRoutes(
   app.post("/chat", async (req, reply) => {
     const parsed = PacketInput.safeParse(req.body);
     if (!parsed.success) {
+      const unrecognized = new Set<string>();
+      for (const issue of parsed.error.issues) {
+        if (issue.code === "unrecognized_keys") {
+          for (const key of issue.keys) {
+            unrecognized.add(key);
+          }
+        }
+      }
+
+      if (unrecognized.size > 0) {
+        return reply.code(400).send({
+          error: "invalid_request",
+          message: "Unrecognized keys in request",
+          unrecognizedKeys: Array.from(unrecognized),
+        });
+      }
+
       return reply.code(400).send({
         error: "invalid_request",
         details: parsed.error.flatten(),
@@ -503,6 +520,13 @@ export async function chatRoutes(
       },
     });
 
+    const driverBlockSummary = {
+      baselineCount: promptPack.driverBlocks.filter((b) => b.source === "system_baseline").length,
+      acceptedCount: promptPack.driverBlocks.length,
+      droppedCount: promptPack.driverBlockEnforcement.dropped.length,
+      trimmedCount: promptPack.driverBlockEnforcement.trimmed.length,
+    };
+
     // Trace event: Driver Blocks enforcement (if any blocks were dropped or trimmed)
     if (promptPack.driverBlockEnforcement.dropped.length > 0 || promptPack.driverBlockEnforcement.trimmed.length > 0) {
       await store.appendTraceEvent({
@@ -656,6 +680,7 @@ export async function chatRoutes(
         pending: true,
         simulated: true,
         checkAfterMs: 750,
+        driverBlocks: driverBlockSummary,
         threadMemento: getLatestThreadMemento(packet.threadId, { includeDraft: true }),
       });
     }
@@ -818,6 +843,7 @@ export async function chatRoutes(
       modeDecision,
       assistant,
       threadMemento,
+      driverBlocks: driverBlockSummary,
       trace: {
         traceRunId: traceRun.id,
         level: traceLevel,

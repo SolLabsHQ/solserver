@@ -19,7 +19,6 @@ const CanonicalPacketInputV0 = z.object({
       version: z.string(),
       hash: z.string(),
     }),
-    driver_block_mode: z.enum(["default", "custom"]).optional(),
     driver_block_refs: z.array(z.object({
       id: z.string(),
       version: z.string(),
