@@ -4,11 +4,8 @@ import { z } from "zod";
 
 import { PacketInput } from "../contracts/chat";
 import { routeMode } from "../control-plane/router";
-import {
-  buildPromptPack,
-  promptPackLogShape,
-  toSinglePromptText,
-} from "../control-plane/prompt_pack";
+import { buildPromptPack, toSinglePromptText, promptPackLogShape } from "../control-plane/prompt_pack";
+import { runGatesPipeline } from "../gates/gates_pipeline";
 import {
   getLatestThreadMemento,
   putThreadMemento,
@@ -430,6 +427,75 @@ export async function chatRoutes(
       },
     });
 
+    // --- Step 4: Evidence intake + Gates pipeline ---
+    // Trace event: Evidence intake
+    const evidenceReceived = Boolean(packet.evidence);
+    const captureCount = packet.evidence?.captures?.length || 0;
+    const supportCount = packet.evidence?.supports?.length || 0;
+    const claimCount = packet.evidence?.claims?.length || 0;
+    const snippetCharTotal = packet.evidence?.supports
+      ?.filter(s => s.type === "text_snippet" && s.snippetText)
+      .reduce((sum, s) => sum + (s.snippetText?.length || 0), 0) || 0;
+
+    await store.appendTraceEvent({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "evidence_intake",
+      status: "completed",
+      summary: evidenceReceived ? `Evidence received: ${captureCount} captures, ${supportCount} supports, ${claimCount} claims` : "No evidence provided",
+      metadata: {
+        evidence_received: evidenceReceived,
+        captureCount,
+        supportCount,
+        claimCount,
+        snippetCharTotal,
+      },
+    });
+
+    // Run gates pipeline
+    const gatesOutput = runGatesPipeline(packet);
+
+    // Trace event: Normalize/Modality gate
+    await store.appendTraceEvent({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "gate_normalize_modality",
+      status: "completed",
+      summary: `Modalities detected: ${gatesOutput.normalizeModality.modalities.join(", ")}`,
+      metadata: {
+        modalities: gatesOutput.normalizeModality.modalities,
+        modalitySummary: gatesOutput.normalizeModality.modalitySummary,
+      },
+    });
+
+    // Trace event: Intent/Risk gate
+    await store.appendTraceEvent({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "gate_intent_risk",
+      status: "completed",
+      summary: `Intent: ${gatesOutput.intentRisk.intent}, Risk: ${gatesOutput.intentRisk.risk}`,
+      metadata: {
+        intent: gatesOutput.intentRisk.intent,
+        risk: gatesOutput.intentRisk.risk,
+        riskReasons: gatesOutput.intentRisk.riskReasons,
+      },
+    });
+
+    // Trace event: Lattice stub
+    await store.appendTraceEvent({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "gate_lattice",
+      status: "completed",
+      summary: "Lattice stub (v0)",
+      metadata: gatesOutput.lattice,
+    });
+
     // Dev/testing hook: force a 500 when requested.
     const simulate = String((req.headers as any)["x-sol-simulate-status"] ?? "");
     if (simulate) {
@@ -681,6 +747,11 @@ export async function chatRoutes(
         simulated: true,
         checkAfterMs: 750,
         driverBlocks: driverBlockSummary,
+        evidenceSummary: {
+          captureCount,
+          supportCount,
+          claimCount,
+        },
         threadMemento: getLatestThreadMemento(packet.threadId, { includeDraft: true }),
       });
     }
@@ -844,6 +915,11 @@ export async function chatRoutes(
       assistant,
       threadMemento,
       driverBlocks: driverBlockSummary,
+      evidenceSummary: {
+        captureCount,
+        supportCount,
+        claimCount,
+      },
       trace: {
         traceRunId: traceRun.id,
         level: traceLevel,
