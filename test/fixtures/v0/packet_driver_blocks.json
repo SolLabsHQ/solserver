@@ -1,0 +1,37 @@
+{
+  "packetType": "chat",
+  "threadId": "thread-driver-blocks-001",
+  "clientRequestId": "req-driver-blocks-001",
+  "message": "Help me draft a decision memo",
+  "driverBlockMode": "custom",
+  "driverBlockRefs": [
+    {
+      "id": "DB-001",
+      "version": "1.0"
+    },
+    {
+      "id": "DB-002",
+      "version": "1.0"
+    },
+    {
+      "id": "DB-003",
+      "version": "1.0"
+    }
+  ],
+  "driverBlockInline": [
+    {
+      "id": "user-block-001",
+      "version": "1",
+      "title": "Decision Closure",
+      "scope": "thread",
+      "definition": "When I make a decision, provide a Receipt (summary of decision + rationale) and Release (next action). Do not revisit the decision unless I explicitly ask.",
+      "source": "user_created",
+      "approvedAt": "2026-01-11T00:00:00Z",
+      "threadId": "thread-driver-blocks-001",
+      "notes": "Custom decision closure pattern"
+    }
+  ],
+  "traceConfig": {
+    "level": "info"
+  }
+}

@@ -497,8 +497,27 @@ export async function chatRoutes(
       summary: "Prompt pack assembled",
       metadata: {
         inputLength: providerInputText.length,
+        driverBlocksAccepted: promptPack.driverBlocks.length,
+        driverBlocksDropped: promptPack.driverBlockEnforcement.dropped.length,
+        driverBlocksTrimmed: promptPack.driverBlockEnforcement.trimmed.length,
       },
     });
+
+    // Trace event: Driver Blocks enforcement (if any blocks were dropped or trimmed)
+    if (promptPack.driverBlockEnforcement.dropped.length > 0 || promptPack.driverBlockEnforcement.trimmed.length > 0) {
+      await store.appendTraceEvent({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "compose_request",
+        status: "warning",
+        summary: `Driver Blocks enforcement: ${promptPack.driverBlockEnforcement.dropped.length} dropped, ${promptPack.driverBlockEnforcement.trimmed.length} trimmed`,
+        metadata: {
+          dropped: promptPack.driverBlockEnforcement.dropped,
+          trimmed: promptPack.driverBlockEnforcement.trimmed,
+        },
+      });
+    }
 
     // Dev/testing hook: simulate an accepted-but-pending response (202) that COMPLETES shortly after.
     // SolMobile can poll GET /transmissions/:id to observe created -> completed and fetch assistant.
