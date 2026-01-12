@@ -98,7 +98,6 @@ describe("Driver Blocks (v0)", () => {
         packetType: "chat",
         threadId: "thread-bounds-001",
         message: "Test",
-        driverBlockMode: "custom",
         // Use valid system block IDs (DB-001 to DB-005) repeated to exceed MAX_REFS (10)
         driverBlockRefs: Array.from({ length: 15 }, (_, i) => ({
           id: `DB-00${(i % 5) + 1}`, // Cycles through DB-001 to DB-005
@@ -122,7 +121,6 @@ describe("Driver Blocks (v0)", () => {
         packetType: "chat",
         threadId: "thread-bounds-002",
         message: "Test",
-        driverBlockMode: "custom",
         driverBlockInline: Array.from({ length: 10 }, (_, i) => ({
           id: `user-block-${i + 1}`,
           version: "1",
@@ -152,7 +150,6 @@ describe("Driver Blocks (v0)", () => {
         packetType: "chat",
         threadId: "thread-bounds-003",
         message: "Test",
-        driverBlockMode: "custom",
         driverBlockInline: [
           {
             id: "user-block-oversized",
@@ -215,7 +212,6 @@ describe("Driver Blocks (v0)", () => {
         packetType: "chat",
         threadId: "thread-order-001",
         message: "Test",
-        driverBlockMode: "custom",
         driverBlockRefs: [
           { id: "DB-001", version: "1.0" },
           { id: "DB-002", version: "1.0" },
@@ -281,7 +277,6 @@ describe("Driver Blocks (v0)", () => {
           threadId: "thread-trace-001",
           message: "Test",
           traceConfig: { level: "debug" },
-          driverBlockMode: "custom",
           driverBlockInline: Array.from({ length: 10 }, (_, i) => ({
             id: `user-block-${i + 1}`,
             version: "1",
@@ -351,7 +346,7 @@ describe("Driver Blocks (v0)", () => {
         url: "/v1/chat",
         payload: {
           packetType: "chat",
-          threadId: "thread-trace-003",
+          threadId: "thread-e2e-001",
           message: "Test",
           traceConfig: { level: "debug" },
           driverBlockRefs: [
@@ -375,14 +370,12 @@ describe("Driver Blocks (v0)", () => {
     });
   });
 
-  describe("driver_block_mode Enforcement", () => {
-    it("should apply baseline only when mode=default", () => {
+  describe("Baseline-Always Behavior", () => {
+    it("should accept client blocks when provided (additive)", () => {
       const packet: PacketInput = {
         packetType: "chat",
-        threadId: "thread-mode-001",
+        threadId: "thread-additive-001",
         message: "Test",
-        driverBlockMode: "default",
-        // These should be ignored
         driverBlockRefs: [{ id: "DB-001", version: "1.0" }],
         driverBlockInline: [
           {
@@ -399,129 +392,71 @@ describe("Driver Blocks (v0)", () => {
 
       const result = assembleDriverBlocks(packet);
 
-      // Should accept no blocks (baseline-only means no custom blocks)
-      expect(result.accepted.length).toBe(0);
-
-      // Should drop all custom blocks
-      expect(result.dropped.length).toBe(2); // 1 ref + 1 inline
-
-      // Should flag mismatch
-      expect(result.mismatch).toBe(true);
-      expect(result.mismatchDetails).toBeDefined();
-      expect(result.mismatchDetails?.droppedRefsCount).toBe(1);
-      expect(result.mismatchDetails?.droppedInlineCount).toBe(1);
-
-      // Should have mismatch reason
-      expect(result.dropped[0].reason).toContain('driver_block_mode="default"');
-    });
-
-    it("should apply baseline + custom when mode=custom", () => {
-      const packet: PacketInput = {
-        packetType: "chat",
-        threadId: "thread-mode-002",
-        message: "Test",
-        driverBlockMode: "custom",
-        driverBlockRefs: [{ id: "DB-001", version: "1.0" }],
-        driverBlockInline: [
-          {
-            id: "user-block-001",
-            version: "1",
-            title: "Custom Block",
-            scope: "thread",
-            definition: "Custom policy",
-            source: "user_created",
-            approvedAt: "2026-01-11T00:00:00Z",
-          },
-        ],
-      };
-
-      const result = assembleDriverBlocks(packet);
-
-      // Should accept both system ref and user inline
+      // Should accept both system ref and user inline (additive)
       expect(result.accepted.length).toBe(2);
       expect(result.accepted[0].source).toBe("system_ref");
       expect(result.accepted[1].source).toBe("user_inline");
-
-      // Should not flag mismatch
-      expect(result.mismatch).toBe(false);
-      expect(result.mismatchDetails).toBeUndefined();
 
       // Should not drop any blocks
       expect(result.dropped.length).toBe(0);
     });
 
-    it("should default to mode=default when omitted", () => {
+    it("should work when no client blocks provided", () => {
       const packet: PacketInput = {
         packetType: "chat",
-        threadId: "thread-mode-003",
+        threadId: "thread-additive-002",
         message: "Test",
-        // driverBlockMode omitted
-        driverBlockRefs: [{ id: "DB-001", version: "1.0" }],
+        // No driverBlockRefs or driverBlockInline
       };
 
       const result = assembleDriverBlocks(packet);
 
-      // Should treat as mode="default" and drop custom blocks
-      expect(result.mismatch).toBe(true);
-      expect(result.dropped.length).toBe(1);
-      expect(result.dropped[0].reason).toContain('driver_block_mode="default"');
-    });
-
-    it("should not flag mismatch when mode=default and no custom blocks", () => {
-      const packet: PacketInput = {
-        packetType: "chat",
-        threadId: "thread-mode-004",
-        message: "Test",
-        driverBlockMode: "default",
-        // No custom blocks
-      };
-
-      const result = assembleDriverBlocks(packet);
-
-      // Should not flag mismatch
-      expect(result.mismatch).toBe(false);
-      expect(result.mismatchDetails).toBeUndefined();
+      // Should accept no blocks (no baseline defined yet, no client blocks)
+      expect(result.accepted.length).toBe(0);
       expect(result.dropped.length).toBe(0);
     });
 
-    it("should emit trace event for driver_block_mode mismatch", async () => {
-      const response = await app.inject({
-        method: "POST",
-        url: "/v1/chat",
-        payload: {
-          packetType: "chat",
-          threadId: "thread-mode-trace-001",
-          message: "Test",
-          traceConfig: { level: "debug" },
-          driverBlockMode: "default",
-          driverBlockRefs: [{ id: "DB-001", version: "1.0" }],
-          driverBlockInline: [
-            {
-              id: "user-block-001",
-              version: "1",
-              title: "Custom Block",
-              scope: "thread",
-              definition: "Custom policy",
-              source: "user_created",
-              approvedAt: "2026-01-11T00:00:00Z",
-              threadId: "thread-mode-trace-001",
-            },
-          ],
-        },
-      });
+    it("should maintain strict ordering (system refs before user inline)", () => {
+      const packet: PacketInput = {
+        packetType: "chat",
+        threadId: "thread-additive-003",
+        message: "Test",
+        driverBlockRefs: [
+          { id: "DB-001", version: "1.0" },
+          { id: "DB-002", version: "1.0" },
+        ],
+        driverBlockInline: [
+          {
+            id: "user-block-001",
+            version: "1",
+            title: "Custom Block",
+            scope: "thread",
+            definition: "Custom policy",
+            source: "user_created",
+            approvedAt: "2026-01-11T00:00:00Z",
+          },
+        ],
+      };
 
-      expect(response.statusCode).toBe(200);
-      const body = JSON.parse(response.body);
+      const result = assembleDriverBlocks(packet);
 
-      // Should have a warning event for mismatch
-      const mismatchEvent = body.trace.events.find(
-        (e: any) => e.status === "warning" && e.summary.includes("Driver Blocks mismatch")
-      );
-      expect(mismatchEvent).toBeDefined();
-      expect(mismatchEvent.metadata.mismatch).toBe(true);
-      expect(mismatchEvent.metadata.mismatchDetails).toBeDefined();
-      expect(mismatchEvent.metadata.mismatchDetails.droppedRefsCount).toBe(1);
-      expect(mismatchEvent.metadata.mismatchDetails.droppedInlineCount).toBe(1);
+      // Should have 3 blocks total
+      expect(result.accepted.length).toBe(3);
+
+      // System refs should come first
+      expect(result.accepted[0].source).toBe("system_ref");
+      expect(result.accepted[0].id).toBe("DB-001");
+      expect(result.accepted[1].source).toBe("system_ref");
+      expect(result.accepted[1].id).toBe("DB-002");
+
+      // User inline should come last
+      expect(result.accepted[2].source).toBe("user_inline");
+      expect(result.accepted[2].id).toBe("user-block-001");
+
+      // Order field should be sequential
+      expect(result.accepted[0].order).toBe(0);
+      expect(result.accepted[1].order).toBe(1);
+      expect(result.accepted[2].order).toBe(2);
     });
   });
 

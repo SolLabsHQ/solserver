@@ -107,7 +107,6 @@ describe("Canon Fixture Conformance (v0)", () => {
 
     // Verify required fields are present
     expect(fixtureData.packet.trace_config).toBeDefined();
-    expect(fixtureData.packet.driver_block_mode).toBeDefined();
     expect(fixtureData.packet.driver_block_refs).toBeDefined();
     expect(fixtureData.packet.driver_block_inline).toBeDefined();
   });

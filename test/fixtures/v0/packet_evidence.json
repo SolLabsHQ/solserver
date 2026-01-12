@@ -12,7 +12,6 @@
       "version": "1.0.0",
       "hash": "abc123"
     },
-    "driver_block_mode": "custom",
     "driver_block_refs": [
       {
         "id": "system-default-001",

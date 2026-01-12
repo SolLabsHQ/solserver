@@ -3,7 +3,6 @@
   "threadId": "thread-driver-blocks-001",
   "clientRequestId": "req-driver-blocks-001",
   "message": "Help me draft a decision memo",
-  "driverBlockMode": "custom",
   "driverBlockRefs": [
     {
       "id": "DB-001",

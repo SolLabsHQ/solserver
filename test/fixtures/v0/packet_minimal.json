@@ -12,7 +12,6 @@
       "version": "1.0.0",
       "hash": "abc123"
     },
-    "driver_block_mode": "default",
     "driver_block_refs": [],
     "driver_block_inline": [],
     "trace_config": {

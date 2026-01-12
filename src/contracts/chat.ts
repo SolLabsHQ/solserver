@@ -36,8 +36,7 @@ export const PacketInput = z.object({
   clientRequestId: z.string().min(1).optional(),
   message: z.string().min(1).max(20_000),
   traceConfig: TraceConfig.optional(),
-  // Driver Blocks (v0)
-  driverBlockMode: z.enum(["default", "custom"]).optional(),
+  // Driver Blocks (v0) - always additive
   driverBlockRefs: z.array(DriverBlockRef).optional(), // Bounded by enforcement logic
   driverBlockInline: z.array(DriverBlockInline).optional(), // Bounded by enforcement logic
   meta: z.record(z.string(), z.any()).optional(),
