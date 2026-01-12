@@ -74,10 +74,20 @@ describe("Gates Pipeline", () => {
     expect(intentRisk).toBeDefined();
     expect(lattice).toBeDefined();
 
-    // Verify ordering (by timestamp)
-    expect(new Date(evidenceIntake!.ts).getTime()).toBeLessThan(new Date(normalizeModality!.ts).getTime());
-    expect(new Date(normalizeModality!.ts).getTime()).toBeLessThan(new Date(intentRisk!.ts).getTime());
-    expect(new Date(intentRisk!.ts).getTime()).toBeLessThan(new Date(lattice!.ts).getTime());
+    const ordered = traceEvents.filter((event) =>
+      ["evidence_intake", "gate_normalize_modality", "gate_intent_risk", "gate_lattice"].includes(event.phase)
+    );
+    const seqs = ordered.map((event) => event.metadata?.seq);
+    expect(seqs.every((seq) => Number.isFinite(seq))).toBe(true);
+    for (let i = 1; i < seqs.length; i++) {
+      expect(seqs[i]).toBeGreaterThan(seqs[i - 1]);
+    }
+    expect(ordered.map((event) => event.phase)).toEqual([
+      "evidence_intake",
+      "gate_normalize_modality",
+      "gate_intent_risk",
+      "gate_lattice",
+    ]);
   });
 
   it("should validate evidence schema and accept valid evidence", async () => {
@@ -119,6 +129,7 @@ describe("Gates Pipeline", () => {
       captureCount: 1,
       supportCount: 1,
       claimCount: 1,
+      snippetCharTotal: 0,
     });
 
     // Verify evidence_intake trace event
@@ -279,6 +290,7 @@ describe("Gates Pipeline", () => {
   });
 
   it("should keep response bounded (no raw gate outputs or evidence content)", async () => {
+    const snippetText = "Long snippet content that should not be echoed";
     const response = await app.inject({
       method: "POST",
       url: "/v1/chat",
@@ -289,7 +301,7 @@ describe("Gates Pipeline", () => {
           supports: [{
             supportId: "sup-001",
             type: "text_snippet",
-            snippetText: "Long snippet content that should not be echoed",
+            snippetText,
             createdAt: new Date().toISOString(),
           }],
         },
@@ -304,10 +316,11 @@ describe("Gates Pipeline", () => {
       captureCount: 0,
       supportCount: 1,
       claimCount: 0,
+      snippetCharTotal: snippetText.length,
     });
 
     // Verify no raw evidence content in response
-    expect(JSON.stringify(body)).not.toContain("Long snippet content");
+    expect(JSON.stringify(body)).not.toContain(snippetText);
     
     // Verify no full gate outputs in response (only trace summary)
     expect(body).not.toHaveProperty("gatesOutput");

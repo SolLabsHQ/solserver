@@ -44,14 +44,28 @@ export const Capture = z.object({
 export type Capture = z.infer<typeof Capture>;
 
 // ClaimSupport (evidence backing a claim)
-export const ClaimSupport = z.object({
+const ClaimSupportUrlCapture = z.object({
   supportId: z.string().min(1),
-  type: z.enum(["url_capture", "text_snippet"]),
-  captureId: z.string().min(1).optional(), // REQUIRED if type="url_capture"
-  snippetText: z.string().min(1).max(10_000).optional(), // REQUIRED if type="text_snippet"
+  type: z.literal("url_capture"),
+  captureId: z.string().min(1),
+  snippetText: z.string().min(1).max(10_000).optional(),
   snippetHash: z.string().optional(),
   createdAt: z.string().datetime(),
 }).strict();
+
+const ClaimSupportTextSnippet = z.object({
+  supportId: z.string().min(1),
+  type: z.literal("text_snippet"),
+  snippetText: z.string().min(1).max(10_000),
+  snippetHash: z.string().optional(),
+  captureId: z.string().min(1).optional(),
+  createdAt: z.string().datetime(),
+}).strict();
+
+export const ClaimSupport = z.discriminatedUnion("type", [
+  ClaimSupportUrlCapture,
+  ClaimSupportTextSnippet,
+]);
 
 export type ClaimSupport = z.infer<typeof ClaimSupport>;
 

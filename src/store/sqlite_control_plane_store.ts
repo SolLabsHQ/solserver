@@ -405,16 +405,17 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       return [];
     }
 
-    if (options?.limit !== undefined) {
-      const stmt = this.db.prepare(`
-        SELECT * FROM trace_events
-        WHERE trace_run_id = ?
-        ORDER BY ts DESC
-        LIMIT ?
-      `);
-      const rows = stmt.all(traceRunId, options.limit) as any[];
-      return rows
-        .map((row) => ({
+    const stmt = this.db.prepare(`
+      SELECT rowid, * FROM trace_events
+      WHERE trace_run_id = ?
+    `);
+    const rows = stmt.all(traceRunId) as any[];
+
+    const events = rows.map((row) => {
+      const metadata = row.metadata_json ? JSON.parse(row.metadata_json) : undefined;
+      const seq = Number.isFinite(metadata?.seq) ? metadata.seq : null;
+      return {
+        event: {
           id: row.id,
           traceRunId: row.trace_run_id,
           transmissionId: row.transmission_id,
@@ -423,29 +424,31 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
           phase: row.phase,
           status: row.status,
           summary: row.summary ?? undefined,
-          metadata: row.metadata_json ? JSON.parse(row.metadata_json) : undefined,
-        }))
-        .reverse();
+          metadata,
+        },
+        seq,
+        ts: row.ts,
+        rowid: row.rowid as number,
+      };
+    });
+
+    const withSeq = events.filter((entry) => entry.seq !== null);
+    const withoutSeq = events.filter((entry) => entry.seq === null);
+
+    withSeq.sort((a, b) => (a.seq as number) - (b.seq as number));
+    withoutSeq.sort((a, b) => {
+      if (a.ts < b.ts) return -1;
+      if (a.ts > b.ts) return 1;
+      return a.rowid - b.rowid;
+    });
+
+    const sorted = [...withSeq, ...withoutSeq].map((entry) => entry.event);
+
+    if (options?.limit !== undefined) {
+      return sorted.slice(-options.limit);
     }
 
-    const stmt = this.db.prepare(`
-      SELECT * FROM trace_events
-      WHERE trace_run_id = ?
-      ORDER BY ts ASC
-    `);
-    const rows = stmt.all(traceRunId) as any[];
-
-    return rows.map((row) => ({
-      id: row.id,
-      traceRunId: row.trace_run_id,
-      transmissionId: row.transmission_id,
-      ts: row.ts,
-      actor: row.actor,
-      phase: row.phase,
-      status: row.status,
-      summary: row.summary ?? undefined,
-      metadata: row.metadata_json ? JSON.parse(row.metadata_json) : undefined,
-    }));
+    return sorted;
   }
 
   private rowToTransmission(row: any): Transmission {

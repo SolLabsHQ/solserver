@@ -396,6 +396,12 @@ export async function chatRoutes(
 
     reply.header("x-sol-trace-run-id", traceRun.id);
 
+    let traceSeq = 0;
+    const appendTrace = async (event: Parameters<typeof store.appendTraceEvent>[0]) => {
+      const metadata = { ...(event.metadata ?? {}), seq: traceSeq++ };
+      return store.appendTraceEvent({ ...event, metadata });
+    };
+
     // Route-scoped logger for control-plane tracing (keeps logs searchable).
     const log = req.log.child({
       plane: "chat",
@@ -413,7 +419,7 @@ export async function chatRoutes(
     }, "control_plane.transmission_ready");
 
     // Trace event: Policy engine (mode routing)
-    await store.appendTraceEvent({
+    await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
@@ -437,7 +443,7 @@ export async function chatRoutes(
       ?.filter(s => s.type === "text_snippet" && s.snippetText)
       .reduce((sum, s) => sum + (s.snippetText?.length || 0), 0) || 0;
 
-    await store.appendTraceEvent({
+    await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
@@ -457,7 +463,7 @@ export async function chatRoutes(
     const gatesOutput = runGatesPipeline(packet);
 
     // Trace event: Normalize/Modality gate
-    await store.appendTraceEvent({
+    await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
@@ -471,7 +477,7 @@ export async function chatRoutes(
     });
 
     // Trace event: Intent/Risk gate
-    await store.appendTraceEvent({
+    await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
@@ -486,7 +492,7 @@ export async function chatRoutes(
     });
 
     // Trace event: Lattice stub
-    await store.appendTraceEvent({
+    await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
@@ -523,7 +529,7 @@ export async function chatRoutes(
 
     // --- Step 6: Prompt assembly stub (mounted law + retrieval slot) ---
     // We build the PromptPack even when using the fake provider so OpenAI wiring is a swap, not a rewrite.
-    await store.appendTraceEvent({
+    await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
@@ -540,7 +546,7 @@ export async function chatRoutes(
 
     log.debug(retrievalLogShape(retrievalItems), "control_plane.retrieval");
 
-    await store.appendTraceEvent({
+    await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
@@ -550,7 +556,7 @@ export async function chatRoutes(
       metadata: { itemCount: retrievalItems.length },
     });
 
-    await store.appendTraceEvent({
+    await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
@@ -571,7 +577,7 @@ export async function chatRoutes(
     // We do not log the content here.
     const providerInputText = toSinglePromptText(promptPack);
 
-    await store.appendTraceEvent({
+    await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
@@ -595,7 +601,7 @@ export async function chatRoutes(
 
     // Trace event: Driver Blocks enforcement (if any blocks were dropped or trimmed)
     if (promptPack.driverBlockEnforcement.dropped.length > 0 || promptPack.driverBlockEnforcement.trimmed.length > 0) {
-      await store.appendTraceEvent({
+      await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "solserver",
@@ -751,6 +757,7 @@ export async function chatRoutes(
           captureCount,
           supportCount,
           claimCount,
+          snippetCharTotal,
         },
         threadMemento: getLatestThreadMemento(packet.threadId, { includeDraft: true }),
       });
@@ -760,7 +767,7 @@ export async function chatRoutes(
     let threadMemento: any = null;
 
     try {
-      await store.appendTraceEvent({
+      await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "model",
@@ -776,7 +783,7 @@ export async function chatRoutes(
 
       assistant = meta.assistant;
 
-      await store.appendTraceEvent({
+      await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "model",
@@ -788,7 +795,7 @@ export async function chatRoutes(
         },
       });
 
-      await store.appendTraceEvent({
+      await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "solserver",
@@ -799,7 +806,7 @@ export async function chatRoutes(
 
       const lint = postOutputLinter({ modeLabel: modeDecision.modeLabel, content: assistant });
 
-      await store.appendTraceEvent({
+      await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "solserver",
@@ -919,6 +926,7 @@ export async function chatRoutes(
         captureCount,
         supportCount,
         claimCount,
+        snippetCharTotal,
       },
       trace: {
         traceRunId: traceRun.id,
