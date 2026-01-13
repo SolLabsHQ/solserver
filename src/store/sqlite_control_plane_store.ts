@@ -692,13 +692,20 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
   }): Promise<Array<{ transmissionId: string; evidence: Evidence }>> {
     const { threadId, limit = 100 } = args;
 
-    // Get distinct transmission IDs for thread (ordered by most recent)
+    // Get distinct transmission IDs for thread (ordered by most recent evidence)
     const transmissionIds = this.db
       .prepare(`
-        SELECT DISTINCT transmission_id
-        FROM captures
+        SELECT transmission_id, MAX(sort_ts) AS sort_ts
+        FROM (
+          SELECT transmission_id, thread_id, created_at AS sort_ts FROM captures
+          UNION ALL
+          SELECT transmission_id, thread_id, created_at_iso AS sort_ts FROM claim_supports
+          UNION ALL
+          SELECT transmission_id, thread_id, created_at_iso AS sort_ts FROM claim_map_entries
+        )
         WHERE thread_id = ?
-        ORDER BY created_at DESC
+        GROUP BY transmission_id
+        ORDER BY sort_ts DESC, transmission_id DESC
         LIMIT ?
       `)
       .all(threadId, limit)

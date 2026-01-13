@@ -444,6 +444,7 @@ export async function chatRoutes(
     let evidenceIntakeOutput;
     try {
       evidenceIntakeOutput = runEvidenceIntake(packet);
+      packet.evidence = evidenceIntakeOutput.evidence;
 
       // Persist evidence to SQLite (idempotent)
       if (evidenceIntakeOutput.evidence) {
@@ -459,14 +460,14 @@ export async function chatRoutes(
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "solserver",
-        phase: "normalize",
+        phase: "evidence_intake",
         status: "completed",
         summary: `Evidence processed: ${evidenceIntakeOutput.autoCaptures} auto-captures, ${evidenceIntakeOutput.clientCaptures} client-captures`,
         metadata: {
           autoCaptures: evidenceIntakeOutput.autoCaptures,
           clientCaptures: evidenceIntakeOutput.clientCaptures,
-          urlsDetected: evidenceIntakeOutput.urlsDetected,
-          urlErrors: evidenceIntakeOutput.urlErrors,
+          urlsDetectedCount: evidenceIntakeOutput.urlsDetected.length,
+          urlErrorsCount: evidenceIntakeOutput.urlErrors.length,
           captureCount: evidenceIntakeOutput.evidence.captures?.length ?? 0,
           supportCount: evidenceIntakeOutput.evidence.supports?.length ?? 0,
           claimCount: evidenceIntakeOutput.evidence.claims?.length ?? 0,
@@ -479,7 +480,7 @@ export async function chatRoutes(
           traceRunId: traceRun.id,
           transmissionId: transmission.id,
           actor: "solserver",
-          phase: "normalize",
+          phase: "evidence_intake",
           status: "failed",
           summary: `Evidence validation failed: ${error.message}`,
           metadata: error.details,

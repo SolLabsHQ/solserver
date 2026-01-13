@@ -52,6 +52,7 @@ export type TraceRun = {
 export type TraceEventActor = "solmobile" | "solserver" | "model" | "renderer" | "user";
 export type TraceEventPhase =
   | "normalize"
+  | "evidence_intake"
   | "modality_gate"
   | "intent_gate"
   | "risk_gate"

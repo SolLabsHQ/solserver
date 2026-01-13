@@ -201,6 +201,48 @@ function testEvidenceStore(storeName: string, createStore: () => ControlPlaneSto
       expect(results[1].evidence.captures![0].url).toBeDefined();
     });
 
+    it("should retrieve supports+claims only evidence by thread", async () => {
+      const threadId = "test-thread-supports-only";
+
+      const tx = await store.createTransmission({
+        packet: { threadId, message: "Message with snippet only" },
+        modeDecision: { modeLabel: "chat", domainFlags: [], confidence: 1.0 },
+      });
+
+      await store.saveEvidence({
+        transmissionId: tx.id,
+        threadId,
+        evidence: {
+          supports: [
+            {
+              supportId: "support-1",
+              type: "text_snippet",
+              snippetText: "Snippet only evidence",
+              createdAt: "2026-01-01T00:00:00Z",
+            },
+          ],
+          claims: [
+            {
+              claimId: "claim-1",
+              claimText: "Claim with snippet support",
+              supportIds: ["support-1"],
+              createdAt: "2026-01-01T00:00:00Z",
+            },
+          ],
+        },
+      });
+
+      const results = await store.getEvidenceByThread({
+        threadId,
+        limit: 10,
+      });
+
+      const match = results.find((row) => row.transmissionId === tx.id);
+      expect(match).toBeDefined();
+      expect(match!.evidence.supports).toHaveLength(1);
+      expect(match!.evidence.claims).toHaveLength(1);
+    });
+
     it("should respect limit in getEvidenceByThread", async () => {
       const threadId = "test-thread-limit";
 
