@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { PacketInput, ModeDecision } from "../contracts/chat";
+import type { PacketInput, ModeDecision, Evidence } from "../contracts/chat";
 
 export type TransmissionStatus = "created" | "completed" | "failed";
 export type DeliveryStatus = "succeeded" | "failed";
@@ -131,6 +131,22 @@ export interface ControlPlaneStore {
 
   getTraceRun(traceRunId: string): Promise<TraceRun | null>;
   getTraceEvents(traceRunId: string, options?: { limit?: number }): Promise<TraceEvent[]>;
+
+  // Evidence methods (PR #7)
+  saveEvidence(args: {
+    transmissionId: string;
+    threadId: string;
+    evidence: Evidence;
+  }): Promise<void>;
+
+  getEvidence(args: {
+    transmissionId: string;
+  }): Promise<Evidence | null>;
+
+  getEvidenceByThread(args: {
+    threadId: string;
+    limit?: number;
+  }): Promise<Array<{ transmissionId: string; evidence: Evidence }>>;
 }
 
 export class MemoryControlPlaneStore implements ControlPlaneStore {
@@ -141,6 +157,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
   private chatResults = new Map<string, ChatResult>(); // transmissionId -> cached result
   private traceRuns = new Map<string, TraceRun>(); // traceRunId -> TraceRun
   private traceEvents = new Map<string, TraceEvent[]>(); // traceRunId -> TraceEvent[]
+  private evidence = new Map<string, Evidence>(); // transmissionId -> Evidence
 
   async createTransmission(args: {
     packet: PacketInput;
@@ -305,5 +322,44 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       return events.slice(-options.limit); // Return last N events
     }
     return events;
+  }
+
+  // Evidence methods (PR #7)
+  async saveEvidence(args: {
+    transmissionId: string;
+    threadId: string;
+    evidence: Evidence;
+  }): Promise<void> {
+    // Idempotent: overwrite existing evidence for this transmission
+    this.evidence.set(args.transmissionId, args.evidence);
+  }
+
+  async getEvidence(args: {
+    transmissionId: string;
+  }): Promise<Evidence | null> {
+    return this.evidence.get(args.transmissionId) ?? null;
+  }
+
+  async getEvidenceByThread(args: {
+    threadId: string;
+    limit?: number;
+  }): Promise<Array<{ transmissionId: string; evidence: Evidence }>> {
+    const results: Array<{ transmissionId: string; evidence: Evidence }> = [];
+    const limit = args.limit ?? 100;
+
+    // Find transmissions for this thread
+    for (const [transmissionId, transmission] of this.transmissions.entries()) {
+      if (transmission.threadId === args.threadId) {
+        const evidence = this.evidence.get(transmissionId);
+        if (evidence) {
+          results.push({ transmissionId, evidence });
+          if (results.length >= limit) {
+            break;
+          }
+        }
+      }
+    }
+
+    return results;
   }
 }
