@@ -18,7 +18,7 @@ import type {
   TraceEventPhase,
   TraceEventStatus,
 } from "./control_plane_store";
-import type { PacketInput, ModeDecision } from "../contracts/chat";
+import type { PacketInput, ModeDecision, Evidence } from "../contracts/chat";
 
 export class SqliteControlPlaneStore implements ControlPlaneStore {
   private db: Database.Database;
@@ -105,6 +105,64 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
 
       CREATE INDEX IF NOT EXISTS idx_trace_events_trace_run_id ON trace_events(trace_run_id);
       CREATE INDEX IF NOT EXISTS idx_trace_events_transmission_id ON trace_events(transmission_id);
+
+      -- Evidence tables (PR #7)
+      CREATE TABLE IF NOT EXISTS captures (
+        id TEXT PRIMARY KEY,
+        transmission_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        capture_id TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'url',
+        url TEXT NOT NULL,
+        captured_at TEXT NOT NULL,
+        title TEXT,
+        source TEXT NOT NULL DEFAULT 'user_provided',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (transmission_id) REFERENCES transmissions(id) ON DELETE CASCADE,
+        UNIQUE (transmission_id, capture_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_captures_transmission ON captures(transmission_id);
+      CREATE INDEX IF NOT EXISTS idx_captures_thread ON captures(thread_id);
+      CREATE INDEX IF NOT EXISTS idx_captures_tx_capture ON captures(transmission_id, capture_id);
+
+      CREATE TABLE IF NOT EXISTS claim_supports (
+        id TEXT PRIMARY KEY,
+        transmission_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        support_id TEXT NOT NULL,
+        type TEXT NOT NULL CHECK (type IN ('url_capture', 'text_snippet')),
+        capture_id TEXT,
+        snippet_text TEXT,
+        snippet_hash TEXT,
+        created_at_iso TEXT NOT NULL,
+        FOREIGN KEY (transmission_id) REFERENCES transmissions(id) ON DELETE CASCADE,
+        FOREIGN KEY (transmission_id, capture_id) 
+          REFERENCES captures(transmission_id, capture_id) 
+          ON DELETE SET NULL,
+        UNIQUE (transmission_id, support_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_supports_transmission ON claim_supports(transmission_id);
+      CREATE INDEX IF NOT EXISTS idx_supports_thread ON claim_supports(thread_id);
+      CREATE INDEX IF NOT EXISTS idx_supports_tx_support ON claim_supports(transmission_id, support_id);
+      CREATE INDEX IF NOT EXISTS idx_supports_tx_capture ON claim_supports(transmission_id, capture_id);
+
+      CREATE TABLE IF NOT EXISTS claim_map_entries (
+        id TEXT PRIMARY KEY,
+        transmission_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        claim_id TEXT NOT NULL,
+        claim_text TEXT NOT NULL,
+        support_ids TEXT NOT NULL,
+        created_at_iso TEXT NOT NULL,
+        FOREIGN KEY (transmission_id) REFERENCES transmissions(id) ON DELETE CASCADE,
+        UNIQUE (transmission_id, claim_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_claims_transmission ON claim_map_entries(transmission_id);
+      CREATE INDEX IF NOT EXISTS idx_claims_thread ON claim_map_entries(thread_id);
+      CREATE INDEX IF NOT EXISTS idx_claims_tx_claim ON claim_map_entries(transmission_id, claim_id);
     `);
   }
 
@@ -459,6 +517,211 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       createdAt: row.created_at,
       status: row.status,
     };
+  }
+
+  // Evidence methods (PR #7)
+  async saveEvidence(args: {
+    transmissionId: string;
+    threadId: string;
+    evidence: Evidence;
+  }): Promise<void> {
+    const { transmissionId, threadId, evidence } = args;
+
+    // Idempotent: delete-then-insert in single transaction
+    const tx = this.db.transaction(() => {
+      // Delete existing evidence for this transmission
+      this.db.prepare("DELETE FROM captures WHERE transmission_id = ?").run(transmissionId);
+      this.db.prepare("DELETE FROM claim_supports WHERE transmission_id = ?").run(transmissionId);
+      this.db.prepare("DELETE FROM claim_map_entries WHERE transmission_id = ?").run(transmissionId);
+
+      // Insert captures
+      if (evidence.captures) {
+        const insertCapture = this.db.prepare(`
+          INSERT INTO captures (
+            id, transmission_id, thread_id, capture_id, kind, url, 
+            captured_at, title, source
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        for (const capture of evidence.captures) {
+          insertCapture.run(
+            randomUUID(),
+            transmissionId,
+            threadId,
+            capture.captureId,
+            capture.kind,
+            capture.url,
+            capture.capturedAt,
+            capture.title || null,
+            capture.source
+          );
+        }
+      }
+
+      // Insert supports
+      if (evidence.supports) {
+        const insertSupport = this.db.prepare(`
+          INSERT INTO claim_supports (
+            id, transmission_id, thread_id, support_id, type, 
+            capture_id, snippet_text, snippet_hash, created_at_iso
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        for (const support of evidence.supports) {
+          insertSupport.run(
+            randomUUID(),
+            transmissionId,
+            threadId,
+            support.supportId,
+            support.type,
+            support.captureId || null,
+            support.snippetText || null,
+            support.snippetHash || null,
+            support.createdAt
+          );
+        }
+      }
+
+      // Insert claims
+      if (evidence.claims) {
+        const insertClaim = this.db.prepare(`
+          INSERT INTO claim_map_entries (
+            id, transmission_id, thread_id, claim_id, 
+            claim_text, support_ids, created_at_iso
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        for (const claim of evidence.claims) {
+          insertClaim.run(
+            randomUUID(),
+            transmissionId,
+            threadId,
+            claim.claimId,
+            claim.claimText,
+            JSON.stringify(claim.supportIds),
+            claim.createdAt
+          );
+        }
+      }
+    });
+
+    tx();
+  }
+
+  async getEvidence(args: {
+    transmissionId: string;
+  }): Promise<Evidence | null> {
+    const { transmissionId } = args;
+
+    // Read captures
+    const captures = this.db
+      .prepare(`
+        SELECT capture_id, kind, url, captured_at, title, source
+        FROM captures
+        WHERE transmission_id = ?
+        ORDER BY created_at
+      `)
+      .all(transmissionId) as any[];
+
+    // Read supports
+    const supports = this.db
+      .prepare(`
+        SELECT support_id, type, capture_id, snippet_text, snippet_hash, created_at_iso
+        FROM claim_supports
+        WHERE transmission_id = ?
+        ORDER BY created_at_iso
+      `)
+      .all(transmissionId) as any[];
+
+    // Read claims
+    const claims = this.db
+      .prepare(`
+        SELECT claim_id, claim_text, support_ids, created_at_iso
+        FROM claim_map_entries
+        WHERE transmission_id = ?
+        ORDER BY created_at_iso
+      `)
+      .all(transmissionId) as any[];
+
+    // Return null if no evidence found
+    if (captures.length === 0 && supports.length === 0 && claims.length === 0) {
+      return null;
+    }
+
+    // Map to Evidence DTO (contract-shaped)
+    const evidence: Evidence = {
+      captures:
+        captures.length > 0
+          ? captures.map((row) => ({
+              captureId: row.capture_id,
+              kind: row.kind,
+              url: row.url,
+              capturedAt: row.captured_at,
+              title: row.title || undefined,
+              source: row.source,
+            }))
+          : undefined,
+      supports:
+        supports.length > 0
+          ? supports.map((row) => ({
+              supportId: row.support_id,
+              type: row.type,
+              captureId: row.capture_id || undefined,
+              snippetText: row.snippet_text || undefined,
+              snippetHash: row.snippet_hash || undefined,
+              createdAt: row.created_at_iso,
+            }))
+          : undefined,
+      claims:
+        claims.length > 0
+          ? claims.map((row) => ({
+              claimId: row.claim_id,
+              claimText: row.claim_text,
+              supportIds: JSON.parse(row.support_ids),
+              createdAt: row.created_at_iso,
+            }))
+          : undefined,
+    };
+
+    return evidence;
+  }
+
+  async getEvidenceByThread(args: {
+    threadId: string;
+    limit?: number;
+  }): Promise<Array<{ transmissionId: string; evidence: Evidence }>> {
+    const { threadId, limit = 100 } = args;
+
+    // Get distinct transmission IDs for thread (ordered by most recent evidence)
+    const transmissionIds = this.db
+      .prepare(`
+        SELECT transmission_id, MAX(sort_ts) AS sort_ts
+        FROM (
+          SELECT transmission_id, thread_id, created_at AS sort_ts FROM captures
+          UNION ALL
+          SELECT transmission_id, thread_id, created_at_iso AS sort_ts FROM claim_supports
+          UNION ALL
+          SELECT transmission_id, thread_id, created_at_iso AS sort_ts FROM claim_map_entries
+        )
+        WHERE thread_id = ?
+        GROUP BY transmission_id
+        ORDER BY sort_ts DESC, transmission_id DESC
+        LIMIT ?
+      `)
+      .all(threadId, limit)
+      .map((row: any) => row.transmission_id);
+
+    // Fetch evidence for each transmission
+    const results: Array<{ transmissionId: string; evidence: Evidence }> = [];
+
+    for (const transmissionId of transmissionIds) {
+      const evidence = await this.getEvidence({ transmissionId });
+      if (evidence) {
+        results.push({ transmissionId, evidence });
+      }
+    }
+
+    return results;
   }
 
   close() {
