@@ -324,6 +324,48 @@ function testEvidenceStore(storeName: string, createStore: () => ControlPlaneSto
         expect(retrieved).toBeNull();
       }
     });
+
+    it("should handle supports+claims-only evidence (no captures)", async () => {
+      const evidence: Evidence = {
+        supports: [
+          {
+            supportId: "support-1",
+            type: "text_snippet",
+            snippetText: "Some text evidence",
+            createdAt: "2026-01-01T00:00:00Z",
+          },
+        ],
+        claims: [
+          {
+            claimId: "claim-1",
+            claimText: "This is a claim",
+            supportIds: ["support-1"],
+            createdAt: "2026-01-01T00:00:00Z",
+          },
+        ],
+      };
+
+      const transmission = await store.createTransmission({
+        packet: { threadId: "test-thread", message: "Test" },
+        modeDecision: { modeLabel: "chat", domainFlags: [], confidence: 1.0 },
+      });
+
+      await store.saveEvidence({
+        transmissionId: transmission.id,
+        threadId: "test-thread",
+        evidence,
+      });
+
+      const retrieved = await store.getEvidence({
+        transmissionId: transmission.id,
+      });
+
+      expect(retrieved).toBeDefined();
+      expect(retrieved!.captures).toBeUndefined();
+      expect(retrieved!.supports).toHaveLength(1);
+      expect(retrieved!.claims).toHaveLength(1);
+      expect(retrieved!.supports![0].snippetText).toBe("Some text evidence");
+    });
   });
 }
 

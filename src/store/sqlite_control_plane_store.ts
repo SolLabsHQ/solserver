@@ -692,16 +692,23 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
   }): Promise<Array<{ transmissionId: string; evidence: Evidence }>> {
     const { threadId, limit = 100 } = args;
 
-    // Get distinct transmission IDs for thread (ordered by most recent)
+    // UNION across all evidence tables to find transmissions with any evidence
+    // Use deterministic sort_ts ordering (most recent first)
     const transmissionIds = this.db
       .prepare(`
-        SELECT DISTINCT transmission_id
-        FROM captures
-        WHERE thread_id = ?
-        ORDER BY created_at DESC
+        SELECT DISTINCT transmission_id, MAX(sort_ts) as latest_ts
+        FROM (
+          SELECT transmission_id, created_at as sort_ts FROM captures WHERE thread_id = ?
+          UNION ALL
+          SELECT transmission_id, created_at_iso as sort_ts FROM claim_supports WHERE thread_id = ?
+          UNION ALL
+          SELECT transmission_id, created_at_iso as sort_ts FROM claim_map_entries WHERE thread_id = ?
+        )
+        GROUP BY transmission_id
+        ORDER BY latest_ts DESC
         LIMIT ?
       `)
-      .all(threadId, limit)
+      .all(threadId, threadId, threadId, limit)
       .map((row: any) => row.transmission_id);
 
     // Fetch evidence for each transmission
