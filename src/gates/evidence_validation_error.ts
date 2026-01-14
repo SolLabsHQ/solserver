@@ -4,7 +4,9 @@ export type EvidenceValidationErrorCode =
   | "missing_required_field"
   | "capture_count_overflow"
   | "support_count_overflow"
-  | "claim_count_overflow";
+  | "claim_count_overflow"
+  | "timestamp_missing"
+  | "timestamp_invalid";
 
 export interface EvidenceValidationErrorDetails {
   code: EvidenceValidationErrorCode;

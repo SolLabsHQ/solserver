@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import type { EvidenceSummary, EvidenceWarning } from "./evidence_warning";
+
 export const TraceConfig = z.object({
   level: z.enum(["info", "debug"]).default("info"),
 }).strict();
@@ -52,3 +54,36 @@ export type ModeDecision = {
   reasons: string[];
   version: string;
 };
+
+export type Capture = {
+  captureId: string;
+  kind: "url";
+  url: string;
+  capturedAt: string;
+  title?: string;
+  source: "user_provided" | "auto_detected";
+};
+
+export type ClaimSupport = {
+  supportId: string;
+  type: "url_capture" | "text_snippet";
+  captureId?: string;
+  snippetText?: string;
+  snippetHash?: string;
+  createdAt: string;
+};
+
+export type ClaimMapEntry = {
+  claimId: string;
+  claimText: string;
+  supportIds: string[];
+  createdAt: string;
+};
+
+export type Evidence = {
+  captures?: Capture[];
+  supports?: ClaimSupport[];
+  claims?: ClaimMapEntry[];
+};
+
+export type { EvidenceSummary, EvidenceWarning };
