@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import type { PacketInput, Evidence, Capture } from "../contracts/chat";
+import type { EvidenceWarning } from "../contracts/evidence_warning";
 import { extractUrls } from "./url_extraction";
 import { EvidenceValidationError } from "./evidence_validation_error";
 
@@ -12,7 +13,7 @@ export type EvidenceIntakeOutput = {
   autoCaptures: number;
   clientCaptures: number;
   urlsDetected: string[];
-  urlErrors: Array<{ url: string; reason: string }>;
+  warnings: EvidenceWarning[];
 };
 
 /**
@@ -28,6 +29,69 @@ function createAutoCapturesFromUrls(urls: string[]): Capture[] {
     capturedAt: now,
     source: "user_provided" as const,
   }));
+}
+
+/**
+ * Validate ISO-8601 timestamp
+ * Accepts any valid ISO-8601 format that can be parsed by Date constructor
+ */
+function isValidISO8601(timestamp: string): boolean {
+  try {
+    const date = new Date(timestamp);
+    // Check if date is valid and timestamp looks like ISO-8601
+    // Must contain 'T' separator and end with 'Z' or timezone offset
+    return !isNaN(date.getTime()) && /T.*Z?$/.test(timestamp);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate timestamps for supports and claims (fail-closed)
+ * Throws typed EvidenceValidationError if timestamps are missing or invalid
+ */
+function validateTimestamps(evidence: Evidence): void {
+  // Validate support timestamps
+  if (evidence.supports) {
+    for (const support of evidence.supports) {
+      if (!support.createdAt) {
+        throw new EvidenceValidationError({
+          code: "timestamp_missing",
+          message: `Support ${support.supportId} missing required createdAt timestamp`,
+          supportId: support.supportId,
+        });
+      }
+
+      if (!isValidISO8601(support.createdAt)) {
+        throw new EvidenceValidationError({
+          code: "timestamp_invalid",
+          message: `Support ${support.supportId} has invalid ISO-8601 timestamp: ${support.createdAt}`,
+          supportId: support.supportId,
+        });
+      }
+    }
+  }
+
+  // Validate claim timestamps
+  if (evidence.claims) {
+    for (const claim of evidence.claims) {
+      if (!claim.createdAt) {
+        throw new EvidenceValidationError({
+          code: "timestamp_missing",
+          message: `Claim ${claim.claimId} missing required createdAt timestamp`,
+          claimId: claim.claimId,
+        });
+      }
+
+      if (!isValidISO8601(claim.createdAt)) {
+        throw new EvidenceValidationError({
+          code: "timestamp_invalid",
+          message: `Claim ${claim.claimId} has invalid ISO-8601 timestamp: ${claim.createdAt}`,
+          claimId: claim.claimId,
+        });
+      }
+    }
+  }
 }
 
 /**
@@ -159,18 +223,19 @@ function mergeCaptures(
  * Run evidence intake gate
  * 
  * Process:
- * 1. Extract URLs from messageText
+ * 1. Extract URLs from messageText (fail-open with warnings)
  * 2. Create auto-captures for detected URLs
  * 3. Merge with client-provided evidence (client-authoritative)
- * 4. Validate orphaned references (fail closed)
- * 5. Enforce bounds
+ * 4. Validate timestamps (fail-closed)
+ * 5. Validate orphaned references (fail-closed)
+ * 6. Enforce bounds (fail-closed)
  * 
  * @param packet - Incoming packet with message and optional evidence
- * @returns Evidence intake output with processed evidence and metadata
+ * @returns Evidence intake output with processed evidence, metadata, and warnings
  */
 export function runEvidenceIntake(packet: PacketInput): EvidenceIntakeOutput {
-  // Extract URLs from message text
-  const { urls: urlsDetected, errors: urlErrors } = extractUrls(packet.message);
+  // Extract URLs from message text (fail-open with warnings)
+  const { urls: urlsDetected, warnings } = extractUrls(packet.message);
 
   // Create auto-captures from detected URLs
   const autoCaptures = createAutoCapturesFromUrls(urlsDetected);
@@ -190,10 +255,13 @@ export function runEvidenceIntake(packet: PacketInput): EvidenceIntakeOutput {
     claims: clientClaims.length > 0 ? clientClaims : undefined,
   };
 
-  // Enforce bounds
+  // Enforce bounds (fail-closed)
   enforceBounds(evidence);
 
-  // Validate orphaned references (fail closed)
+  // Validate timestamps (fail-closed)
+  validateTimestamps(evidence);
+
+  // Validate orphaned references (fail-closed)
   validateEvidence(evidence);
 
   return {
@@ -201,6 +269,6 @@ export function runEvidenceIntake(packet: PacketInput): EvidenceIntakeOutput {
     autoCaptures: autoCaptures.length,
     clientCaptures: clientCaptures.length,
     urlsDetected,
-    urlErrors,
+    warnings,
   };
 }

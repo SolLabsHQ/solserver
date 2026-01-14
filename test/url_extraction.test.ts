@@ -7,7 +7,7 @@ describe("URL Extraction", () => {
     const result = extractUrls(text);
 
     expect(result.urls).toEqual(["http://example.com"]);
-    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
   });
 
   it("should extract basic HTTPS URLs", () => {
@@ -15,7 +15,7 @@ describe("URL Extraction", () => {
     const result = extractUrls(text);
 
     expect(result.urls).toEqual(["https://example.com"]);
-    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
   });
 
   it("should strip trailing punctuation from URLs", () => {
@@ -60,7 +60,7 @@ describe("URL Extraction", () => {
 
     // Regex only matches http/https, so these are simply not extracted
     expect(result.urls).toEqual([]);
-    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
   });
 
   it("should reject invalid URL formats after extraction", () => {
@@ -77,8 +77,10 @@ describe("URL Extraction", () => {
     const result = extractUrls(longUrl);
 
     expect(result.urls).toEqual([]);
-    expect(result.errors.length).toBe(1);
-    expect(result.errors[0].reason).toContain("url_too_long");
+    expect(result.warnings.length).toBe(1);
+    expect(result.warnings[0].code).toBe("url_length_overflow");
+    expect(result.warnings[0].count).toBe(longUrl.length);
+    expect(result.warnings[0].max).toBe(2048);
   });
 
   it("should enforce max URL count (100)", () => {
@@ -88,7 +90,10 @@ describe("URL Extraction", () => {
     const result = extractUrls(text);
 
     expect(result.urls.length).toBe(100);
-    expect(result.errors).toEqual([]);
+    expect(result.warnings.length).toBe(1);
+    expect(result.warnings[0].code).toBe("url_count_overflow");
+    expect(result.warnings[0].count).toBe(101);
+    expect(result.warnings[0].max).toBe(100);
   });
 
   it("should handle mixed valid and invalid URLs", () => {
@@ -97,7 +102,7 @@ describe("URL Extraction", () => {
     const result = extractUrls(text);
 
     expect(result.urls).toEqual(["https://example.com", "https://good.com"]);
-    expect(result.errors).toEqual([]); // ftp not extracted, so no errors
+    expect(result.warnings).toEqual([]); // ftp not extracted, so no warnings
   });
 
   it("should handle URLs with query parameters", () => {
@@ -119,6 +124,6 @@ describe("URL Extraction", () => {
     const result = extractUrls(text);
 
     expect(result.urls).toEqual([]);
-    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
   });
 });
