@@ -337,6 +337,12 @@ export async function chatRoutes(
               modeDecision: existing.modeDecision,
               assistant: cached.assistant,
               idempotentReplay: true,
+              evidenceSummary: {
+                captureCount: 0,
+                supportCount: 0,
+                claimCount: 0,
+                snippetCharTotal: 0,
+              },
               threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
             };
           }
@@ -348,6 +354,12 @@ export async function chatRoutes(
             status: existing.status,
             pending: true,
             idempotentReplay: true,
+            evidenceSummary: {
+              captureCount: 0,
+              supportCount: 0,
+              claimCount: 0,
+              snippetCharTotal: 0,
+            },
             threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
           });
         }
@@ -360,6 +372,12 @@ export async function chatRoutes(
             status: existing.status,
             pending: true,
             idempotentReplay: true,
+            evidenceSummary: {
+              captureCount: 0,
+              supportCount: 0,
+              claimCount: 0,
+              snippetCharTotal: 0,
+            },
             threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
           });
         }
