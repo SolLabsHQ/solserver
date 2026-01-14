@@ -40,7 +40,7 @@ function isValidISO8601(timestamp: string): boolean {
     const date = new Date(timestamp);
     // Check if date is valid and timestamp looks like ISO-8601
     // Must contain 'T' separator and end with 'Z' or timezone offset
-    return !isNaN(date.getTime()) && /T.*Z?$/.test(timestamp);
+    return !isNaN(date.getTime()) && /T.*(Z|[+-]\d{2}:\d{2})$/.test(timestamp);
   } catch {
     return false;
   }

@@ -33,7 +33,7 @@ describe("URL Warnings (PR #7.1)", () => {
     expect(result.urls.length).toBe(100);
     expect(result.warnings.length).toBe(1);
     expect(result.warnings[0].code).toBe("url_count_overflow");
-    expect(result.warnings[0].count).toBe(101);
+    expect(result.warnings[0].count).toBe(1);
     expect(result.warnings[0].max).toBe(100);
     expect(result.warnings[0].message).toContain("1 URL(s) ignored");
   });

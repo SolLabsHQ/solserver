@@ -27,14 +27,13 @@ function isValidUrl(urlString: string): boolean {
 
 /**
  * Redact URL for safe display in warnings
- * Format: host + truncated path (max 50 chars), no scheme, no query/fragment
+ * Format: host + truncated path (max 50 chars), no scheme, no query, no fragment
  * Example: "example.com/very/long/path/..."
  */
 function redactUrl(urlString: string): string {
   try {
     const url = new URL(urlString);
-    const pathPart = url.pathname + url.hash;
-    const hostAndPath = url.host + pathPart;
+    const hostAndPath = url.host + url.pathname;
     
     if (hostAndPath.length > 50) {
       return hostAndPath.substring(0, 47) + "...";
@@ -149,11 +148,11 @@ export function extractUrls(text: string): {
   }
   
   // Add aggregated count overflow warning if needed
-  if (countOverflow > 0) {
+  if (countOverflow > 0 && warnings.length < MAX_WARNINGS) {
     warnings.push({
       code: "url_count_overflow",
       message: `${countOverflow} URL(s) ignored (exceeded maximum of ${MAX_URL_COUNT})`,
-      count: matches.length,
+      count: countOverflow,
       max: MAX_URL_COUNT,
     });
   }

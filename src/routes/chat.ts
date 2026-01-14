@@ -333,6 +333,7 @@ export async function chatRoutes(
     }
 
     const packet = parsed.data;
+    const emptyEvidenceSummary = { captures: 0, supports: 0, claims: 0, warnings: 0 };
 
     // --- Idempotency + retry semantics ---
     // If clientRequestId is provided, we dedupe retries. Behavior by stored status:
@@ -365,6 +366,7 @@ export async function chatRoutes(
               assistant: cached.assistant,
               idempotentReplay: true,
               threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
+              evidenceSummary: emptyEvidenceSummary,
             };
           }
 
@@ -376,6 +378,7 @@ export async function chatRoutes(
             pending: true,
             idempotentReplay: true,
             threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
+            evidenceSummary: emptyEvidenceSummary,
           });
         }
 
@@ -388,6 +391,7 @@ export async function chatRoutes(
             pending: true,
             idempotentReplay: true,
             threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
+            evidenceSummary: emptyEvidenceSummary,
           });
         }
 
