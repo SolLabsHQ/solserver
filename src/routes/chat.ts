@@ -4,11 +4,8 @@ import { z } from "zod";
 
 import { PacketInput } from "../contracts/chat";
 import { routeMode } from "../control-plane/router";
-import {
-  buildPromptPack,
-  promptPackLogShape,
-  toSinglePromptText,
-} from "../control-plane/prompt_pack";
+import { buildPromptPack, toSinglePromptText, promptPackLogShape } from "../control-plane/prompt_pack";
+import { runGatesPipeline } from "../gates/gates_pipeline";
 import {
   getLatestThreadMemento,
   putThreadMemento,
@@ -427,6 +424,12 @@ export async function chatRoutes(
 
     reply.header("x-sol-trace-run-id", traceRun.id);
 
+    let traceSeq = 0;
+    const appendTrace = async (event: Parameters<typeof store.appendTraceEvent>[0]) => {
+      const metadata = { ...(event.metadata ?? {}), seq: traceSeq++ };
+      return store.appendTraceEvent({ ...event, metadata });
+    };
+
     // Route-scoped logger for control-plane tracing (keeps logs searchable).
     const log = req.log.child({
       plane: "chat",
@@ -459,8 +462,12 @@ export async function chatRoutes(
         });
       }
 
+      const snippetCharTotal = evidenceIntakeOutput.evidence?.supports
+        ?.filter((s) => s.type === "text_snippet" && s.snippetText)
+        .reduce((sum, s) => sum + (s.snippetText?.length || 0), 0) ?? 0;
+
       // Trace event: Evidence intake
-      await store.appendTraceEvent({
+      await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "solserver",
@@ -475,12 +482,13 @@ export async function chatRoutes(
           captureCount: evidenceIntakeOutput.evidence.captures?.length ?? 0,
           supportCount: evidenceIntakeOutput.evidence.supports?.length ?? 0,
           claimCount: evidenceIntakeOutput.evidence.claims?.length ?? 0,
+          snippetCharTotal,
         },
       });
     } catch (error) {
       // Handle EvidenceValidationError (fail closed with structured 400)
       if (error instanceof EvidenceValidationError) {
-        await store.appendTraceEvent({
+        await appendTrace({
           traceRunId: traceRun.id,
           transmissionId: transmission.id,
           actor: "solserver",
@@ -501,7 +509,7 @@ export async function chatRoutes(
     }
 
     // Trace event: Policy engine (mode routing)
-    await store.appendTraceEvent({
+    await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
@@ -513,6 +521,62 @@ export async function chatRoutes(
         domainFlags: modeDecision.domainFlags,
         confidence: modeDecision.confidence,
       },
+    });
+
+    // Run gates pipeline
+    const gatesOutput = runGatesPipeline(packet);
+
+    const effectiveEvidence = evidenceIntakeOutput?.evidence ?? packet.evidence ?? null;
+    const effectiveWarnings: any[] = evidenceIntakeOutput?.warnings ?? [];
+
+    const evidenceSummary = {
+      captures: effectiveEvidence?.captures?.length || 0,
+      supports: effectiveEvidence?.supports?.length || 0,
+      claims: effectiveEvidence?.claims?.length || 0,
+      warnings: effectiveWarnings.length,
+    };
+
+    const hasEvidence =
+      evidenceSummary.captures > 0 || evidenceSummary.supports > 0 || evidenceSummary.claims > 0;
+
+    // Trace event: Normalize/Modality gate
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "gate_normalize_modality",
+      status: "completed",
+      summary: `Modalities detected: ${gatesOutput.normalizeModality.modalities.join(", ")}`,
+      metadata: {
+        modalities: gatesOutput.normalizeModality.modalities,
+        modalitySummary: gatesOutput.normalizeModality.modalitySummary,
+      },
+    });
+
+    // Trace event: Intent/Risk gate
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "gate_intent_risk",
+      status: "completed",
+      summary: `Intent: ${gatesOutput.intentRisk.intent}, Risk: ${gatesOutput.intentRisk.risk}`,
+      metadata: {
+        intent: gatesOutput.intentRisk.intent,
+        risk: gatesOutput.intentRisk.risk,
+        riskReasons: gatesOutput.intentRisk.riskReasons,
+      },
+    });
+
+    // Trace event: Lattice stub
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "gate_lattice",
+      status: "completed",
+      summary: "Lattice stub (v0)",
+      metadata: gatesOutput.lattice,
     });
 
     // Dev/testing hook: force a 500 when requested.
@@ -542,7 +606,7 @@ export async function chatRoutes(
 
     // --- Step 6: Prompt assembly stub (mounted law + retrieval slot) ---
     // We build the PromptPack even when using the fake provider so OpenAI wiring is a swap, not a rewrite.
-    await store.appendTraceEvent({
+    await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
@@ -559,7 +623,7 @@ export async function chatRoutes(
 
     log.debug(retrievalLogShape(retrievalItems), "control_plane.retrieval");
 
-    await store.appendTraceEvent({
+    await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
@@ -569,7 +633,7 @@ export async function chatRoutes(
       metadata: { itemCount: retrievalItems.length },
     });
 
-    await store.appendTraceEvent({
+    await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
@@ -590,7 +654,7 @@ export async function chatRoutes(
     // We do not log the content here.
     const providerInputText = toSinglePromptText(promptPack);
 
-    await store.appendTraceEvent({
+    await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
@@ -614,7 +678,7 @@ export async function chatRoutes(
 
     // Trace event: Driver Blocks enforcement (if any blocks were dropped or trimmed)
     if (promptPack.driverBlockEnforcement.dropped.length > 0 || promptPack.driverBlockEnforcement.trimmed.length > 0) {
-      await store.appendTraceEvent({
+      await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "solserver",
@@ -766,6 +830,9 @@ export async function chatRoutes(
         simulated: true,
         checkAfterMs: 750,
         driverBlocks: driverBlockSummary,
+        ...(hasEvidence ? { evidence: effectiveEvidence } : {}),
+        evidenceSummary,
+        ...(effectiveWarnings.length > 0 ? { evidenceWarnings: effectiveWarnings } : {}),
         threadMemento: getLatestThreadMemento(packet.threadId, { includeDraft: true }),
       });
     }
@@ -774,7 +841,7 @@ export async function chatRoutes(
     let threadMemento: any = null;
 
     try {
-      await store.appendTraceEvent({
+      await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "model",
@@ -790,7 +857,7 @@ export async function chatRoutes(
 
       assistant = meta.assistant;
 
-      await store.appendTraceEvent({
+      await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "model",
@@ -802,7 +869,7 @@ export async function chatRoutes(
         },
       });
 
-      await store.appendTraceEvent({
+      await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "solserver",
@@ -813,7 +880,7 @@ export async function chatRoutes(
 
       const lint = postOutputLinter({ modeLabel: modeDecision.modeLabel, content: assistant });
 
-      await store.appendTraceEvent({
+      await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "solserver",
@@ -922,14 +989,6 @@ export async function chatRoutes(
     const traceEventLimit = traceLevel === "debug" ? 50 : 0; // debug: return up to 50 events, info: no events
     const traceEvents = await store.getTraceEvents(traceRun.id, { limit: traceEventLimit });
 
-    // Build evidenceSummary (always present - PR #7.1)
-    const evidenceSummary = {
-      captures: evidenceIntakeOutput.evidence.captures?.length ?? 0,
-      supports: evidenceIntakeOutput.evidence.supports?.length ?? 0,
-      claims: evidenceIntakeOutput.evidence.claims?.length ?? 0,
-      warnings: evidenceIntakeOutput.warnings.length,
-    };
-
     return {
       ok: true,
       transmissionId: transmission.id,
@@ -938,13 +997,9 @@ export async function chatRoutes(
       threadMemento,
       driverBlocks: driverBlockSummary,
       // Evidence fields (PR #7.1): include evidence only when present
-      ...(evidenceIntakeOutput.evidence.captures || evidenceIntakeOutput.evidence.supports || evidenceIntakeOutput.evidence.claims
-        ? { evidence: evidenceIntakeOutput.evidence }
-        : {}),
+      ...(hasEvidence ? { evidence: effectiveEvidence } : {}),
       evidenceSummary,
-      ...(evidenceIntakeOutput.warnings.length > 0
-        ? { evidenceWarnings: evidenceIntakeOutput.warnings }
-        : {}),
+      ...(effectiveWarnings.length > 0 ? { evidenceWarnings: effectiveWarnings } : {}),
       trace: {
         traceRunId: traceRun.id,
         level: traceLevel,
