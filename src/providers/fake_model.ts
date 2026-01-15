@@ -24,7 +24,7 @@ export type ThreadMementoDraft = {
 };
 
 export type FakeModelReplyWithMeta = {
-  assistant: string;
+  rawText: string;
   mementoDraft: ThreadMementoDraft | null;
 };
 
@@ -79,6 +79,7 @@ export async function fakeModelReplyWithMeta(input: {
   modeLabel: string;
 }): Promise<FakeModelReplyWithMeta> {
   const assistant = await fakeModelReply(input);
+  const rawText = JSON.stringify({ assistant_text: assistant });
   const mementoDraft = proposeMementoFromPrompt(input.userText);
-  return { assistant, mementoDraft };
+  return { rawText, mementoDraft };
 }

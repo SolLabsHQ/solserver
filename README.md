@@ -210,9 +210,10 @@ curl -s http://127.0.0.1:3333/v1/transmissions/$TID | jq
 Note: SolMobile v0 can resolve 202 via polling, but we are not running an automatic poll loop yet. Manual pumping (leave and return to the thread view) is acceptable for now.
 
 ### Test-only headers (NODE_ENV=test)
-- `x-sol-test-output-attempt-0`: override attempt 0 output for deterministic linter and trace validation.
-- `x-sol-test-output-attempt-1`: override attempt 1 output for deterministic linter and trace validation.
-- `x-sol-test-output`: fallback override when attempt-specific headers are not set.
+- `x-sol-test-output-envelope`: raw provider output for OutputEnvelope parsing (takes precedence).
+- `x-sol-test-output-attempt-0`: override attempt 0 assistant text (wrapped into OutputEnvelope).
+- `x-sol-test-output-attempt-1`: override attempt 1 assistant text (wrapped into OutputEnvelope).
+- `x-sol-test-output`: fallback assistant text when attempt-specific headers are not set (wrapped into OutputEnvelope).
 
 ### Provider toggle (planned)
 - Default provider is a **fake model** for pipeline testing.
