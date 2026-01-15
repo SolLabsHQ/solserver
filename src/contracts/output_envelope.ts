@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const OutputEnvelope = z.object({
+export const OutputEnvelopeSchema = z.object({
   assistant_text: z.string().min(1),
   assumptions: z.array(z.string()).optional(),
   unknowns: z.array(z.string()).optional(),
@@ -8,4 +8,4 @@ export const OutputEnvelope = z.object({
   meta: z.record(z.any()).optional(),
 }).strict();
 
-export type OutputEnvelope = z.infer<typeof OutputEnvelope>;
+export type OutputEnvelope = z.infer<typeof OutputEnvelopeSchema>;
