@@ -72,6 +72,7 @@ describe("/v1/chat idempotency", () => {
     });
     expect(second.statusCode).toBe(409);
     expect(second.json().error).toBe("idempotency_conflict");
+    expect(second.headers["x-sol-transmission-id"]).toBeTruthy();
   });
 
   it("allows retry after a simulated 500 using the same transmission id", async () => {
