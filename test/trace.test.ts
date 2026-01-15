@@ -43,7 +43,8 @@ describe("Trace (v0)", () => {
     expect(body.trace).toBeDefined();
     expect(body.trace.traceRunId).toBeDefined();
     expect(body.trace.level).toBe("info"); // default level
-    expect(body.trace.eventCount).toBe(0); // info level returns no events
+    expect(body.trace.eventCount).toBeGreaterThan(0);
+    expect(body.trace.phaseCounts).toBeDefined();
 
     // Verify trace run was created in store
     const traceRun = await store.getTraceRun(body.trace.traceRunId);
@@ -86,6 +87,30 @@ describe("Trace (v0)", () => {
     expect(firstEvent.status).toBeDefined();
   });
 
+  it("should return accurate eventCount from traceSummary", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      payload: {
+        packetType: "chat",
+        threadId: "thread-trace-summary-1",
+        message: "Test message for trace summary",
+        traceConfig: {
+          level: "debug",
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body);
+
+    const allEvents = await store.getTraceEvents(body.trace.traceRunId);
+    const summary = await store.getTraceSummary(body.trace.traceRunId);
+
+    expect(summary).not.toBeNull();
+    expect(summary?.eventCount).toBe(allEvents.length);
+  });
+
   it("should not return events for info level (bounded response)", async () => {
     const response = await app.inject({
       method: "POST",
@@ -106,7 +131,8 @@ describe("Trace (v0)", () => {
     // Info level should NOT return events (bounded)
     expect(body.trace.level).toBe("info");
     expect(body.trace.events).toBeUndefined();
-    expect(body.trace.eventCount).toBe(0); // eventCount is 0 when no events are returned
+    expect(body.trace.eventCount).toBeGreaterThan(0);
+    expect(body.trace.phaseCounts).toBeDefined();
   });
 
   it("should generate trace events at key phases", async () => {
@@ -234,6 +260,19 @@ describe("Trace (v0) sqlite", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
+  it("initializes schema idempotently on repeated instantiation", () => {
+    const localDir = mkdtempSync(join(tmpdir(), "solserver-trace-schema-"));
+    const dbPath = join(localDir, `trace-${randomUUID()}.db`);
+
+    const first = new SqliteControlPlaneStore(dbPath);
+    first.close();
+
+    const second = new SqliteControlPlaneStore(dbPath);
+    second.close();
+
+    rmSync(localDir, { recursive: true, force: true });
+  });
+
   it("persists trace runs/events and keeps info responses bounded", async () => {
     const response = await app.inject({
       method: "POST",
@@ -251,7 +290,8 @@ describe("Trace (v0) sqlite", () => {
     expect(body.trace.traceRunId).toBeDefined();
     expect(body.trace.level).toBe("info");
     expect(body.trace.events).toBeUndefined();
-    expect(body.trace.eventCount).toBe(0);
+    expect(body.trace.eventCount).toBeGreaterThan(0);
+    expect(body.trace.phaseCounts).toBeDefined();
 
     const traceRun = await store.getTraceRun(body.trace.traceRunId);
     expect(traceRun).not.toBeNull();

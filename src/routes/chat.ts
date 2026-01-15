@@ -539,45 +539,34 @@ export async function chatRoutes(
     const hasEvidence =
       evidenceSummary.captures > 0 || evidenceSummary.supports > 0 || evidenceSummary.claims > 0;
 
-    // Trace event: Normalize/Modality gate
-    await appendTrace({
-      traceRunId: traceRun.id,
-      transmissionId: transmission.id,
-      actor: "solserver",
-      phase: "gate_normalize_modality",
-      status: "completed",
-      summary: `Modalities detected: ${gatesOutput.normalizeModality.modalities.join(", ")}`,
-      metadata: {
-        modalities: gatesOutput.normalizeModality.modalities,
-        modalitySummary: gatesOutput.normalizeModality.modalitySummary,
-      },
-    });
+    const phaseByGateName: Record<string, "gate_normalize_modality" | "gate_intent_risk" | "gate_lattice"> = {
+      normalize_modality: "gate_normalize_modality",
+      intent_risk: "gate_intent_risk",
+      lattice: "gate_lattice",
+    };
 
-    // Trace event: Intent/Risk gate
-    await appendTrace({
-      traceRunId: traceRun.id,
-      transmissionId: transmission.id,
-      actor: "solserver",
-      phase: "gate_intent_risk",
-      status: "completed",
-      summary: `Intent: ${gatesOutput.intentRisk.intent}, Risk: ${gatesOutput.intentRisk.risk}`,
-      metadata: {
-        intent: gatesOutput.intentRisk.intent,
-        risk: gatesOutput.intentRisk.risk,
-        riskReasons: gatesOutput.intentRisk.riskReasons,
-      },
-    });
+    const statusByGateStatus: Record<string, "completed" | "failed" | "warning"> = {
+      pass: "completed",
+      fail: "failed",
+      warn: "warning",
+    };
 
-    // Trace event: Lattice stub
-    await appendTrace({
-      traceRunId: traceRun.id,
-      transmissionId: transmission.id,
-      actor: "solserver",
-      phase: "gate_lattice",
-      status: "completed",
-      summary: "Lattice stub (v0)",
-      metadata: gatesOutput.lattice,
-    });
+    for (const result of gatesOutput.results) {
+      const phase = phaseByGateName[result.gateName];
+      if (!phase) {
+        log.warn({ gateName: result.gateName }, "gate.trace.unknown_gate");
+        continue;
+      }
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase,
+        status: statusByGateStatus[result.status] ?? "completed",
+        summary: result.summary,
+        metadata: { gateName: result.gateName, ...(result.metadata ?? {}) },
+      });
+    }
 
     // Dev/testing hook: force a 500 when requested.
     const simulate = String((req.headers as any)["x-sol-simulate-status"] ?? "");
@@ -985,9 +974,16 @@ export async function chatRoutes(
       outputChars: assistant.length,
     }, "delivery.completed");
 
+    const traceSummary = await store.getTraceSummary(traceRun.id);
+
     // Fetch trace events for response (bounded by level)
     const traceEventLimit = traceLevel === "debug" ? 50 : 0; // debug: return up to 50 events, info: no events
-    const traceEvents = await store.getTraceEvents(traceRun.id, { limit: traceEventLimit });
+    const traceEvents = traceLevel === "debug"
+      ? await store.getTraceEvents(traceRun.id, { limit: traceEventLimit })
+      : [];
+
+    const eventCount = traceSummary?.eventCount
+      ?? (traceLevel === "debug" ? traceEvents.length : 0);
 
     return {
       ok: true,
@@ -1003,8 +999,10 @@ export async function chatRoutes(
       trace: {
         traceRunId: traceRun.id,
         level: traceLevel,
-        eventCount: traceEvents.length,
-        ...(traceLevel === "debug" ? { events: traceEvents } : {}),
+        eventCount,
+        ...(traceLevel === "debug"
+          ? { events: traceEvents }
+          : { phaseCounts: traceSummary?.phaseCounts ?? {} }),
       },
     };
   });

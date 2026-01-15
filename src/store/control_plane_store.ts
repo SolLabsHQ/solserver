@@ -53,6 +53,9 @@ export type TraceEventActor = "solmobile" | "solserver" | "model" | "renderer" |
 export type TraceEventPhase =
   | "normalize"
   | "evidence_intake"
+  | "gate_normalize_modality"
+  | "gate_intent_risk"
+  | "gate_lattice"
   | "modality_gate"
   | "intent_gate"
   | "risk_gate"
@@ -77,6 +80,12 @@ export type TraceEvent = {
   status: TraceEventStatus;
   summary?: string;
   metadata?: Record<string, any>;
+};
+
+export type TraceSummary = {
+  eventCount: number;
+  phaseCounts: Record<TraceEventPhase, number>;
+  latestTs?: string;
 };
 
 export interface ControlPlaneStore {
@@ -132,6 +141,7 @@ export interface ControlPlaneStore {
 
   getTraceRun(traceRunId: string): Promise<TraceRun | null>;
   getTraceEvents(traceRunId: string, options?: { limit?: number }): Promise<TraceEvent[]>;
+  getTraceSummary(traceRunId: string): Promise<TraceSummary | null>;
 
   // Evidence methods (PR #7)
   saveEvidence(args: {
@@ -323,6 +333,24 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       return events.slice(-options.limit); // Return last N events
     }
     return events;
+  }
+
+  async getTraceSummary(traceRunId: string): Promise<TraceSummary | null> {
+    const events = this.traceEvents.get(traceRunId);
+    if (!events) return null;
+    const phaseCounts: Record<TraceEventPhase, number> = {} as Record<TraceEventPhase, number>;
+    let latestTs: string | undefined;
+    for (const event of events) {
+      phaseCounts[event.phase] = (phaseCounts[event.phase] ?? 0) + 1;
+      if (!latestTs || event.ts > latestTs) {
+        latestTs = event.ts;
+      }
+    }
+    return {
+      eventCount: events.length,
+      phaseCounts,
+      latestTs,
+    };
   }
 
   // Evidence methods (PR #7)

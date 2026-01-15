@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify from "fastify";
 import { chatRoutes } from "../src/routes/chat";
+import { runGatesPipeline } from "../src/gates/gates_pipeline";
 import { SqliteControlPlaneStore } from "../src/store/sqlite_control_plane_store";
 import { unlinkSync } from "fs";
 
@@ -13,6 +14,22 @@ function makeApp(dbPath: string) {
 }
 
 describe("Gates Pipeline", () => {
+  it("should expose adapter results in order", () => {
+    const output = runGatesPipeline({
+      packetType: "chat",
+      threadId: "thread-results-1",
+      message: "hello world",
+    } as any);
+
+    expect(output.results).toHaveLength(3);
+    expect(output.results.map((r) => r.gateName)).toEqual([
+      "normalize_modality",
+      "intent_risk",
+      "lattice",
+    ]);
+  });
+
+
   let app: any;
   let store: SqliteControlPlaneStore;
   const testDbPath = "./data/test_gates_pipeline.db";
