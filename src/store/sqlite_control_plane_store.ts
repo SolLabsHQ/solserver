@@ -104,6 +104,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_trace_events_trace_run_id ON trace_events(trace_run_id);
+      CREATE INDEX IF NOT EXISTS idx_trace_events_trace_run_id_phase ON trace_events(trace_run_id, phase);
       CREATE INDEX IF NOT EXISTS idx_trace_events_transmission_id ON trace_events(transmission_id);
 
       -- Evidence tables (PR #7)
