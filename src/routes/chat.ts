@@ -553,7 +553,10 @@ export async function chatRoutes(
 
     for (const result of gatesOutput.results) {
       const phase = phaseByGateName[result.gateName];
-      if (!phase) continue;
+      if (!phase) {
+        log.warn({ gateName: result.gateName }, "gate.trace.unknown_gate");
+        continue;
+      }
       await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
