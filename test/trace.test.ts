@@ -260,6 +260,19 @@ describe("Trace (v0) sqlite", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
+  it("initializes schema idempotently on repeated instantiation", () => {
+    const localDir = mkdtempSync(join(tmpdir(), "solserver-trace-schema-"));
+    const dbPath = join(localDir, `trace-${randomUUID()}.db`);
+
+    const first = new SqliteControlPlaneStore(dbPath);
+    first.close();
+
+    const second = new SqliteControlPlaneStore(dbPath);
+    second.close();
+
+    rmSync(localDir, { recursive: true, force: true });
+  });
+
   it("persists trace runs/events and keeps info responses bounded", async () => {
     const response = await app.inject({
       method: "POST",
