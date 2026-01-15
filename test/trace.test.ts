@@ -87,6 +87,30 @@ describe("Trace (v0)", () => {
     expect(firstEvent.status).toBeDefined();
   });
 
+  it("should return accurate eventCount from traceSummary", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      payload: {
+        packetType: "chat",
+        threadId: "thread-trace-summary-1",
+        message: "Test message for trace summary",
+        traceConfig: {
+          level: "debug",
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body);
+
+    const allEvents = await store.getTraceEvents(body.trace.traceRunId);
+    const summary = await store.getTraceSummary(body.trace.traceRunId);
+
+    expect(summary).not.toBeNull();
+    expect(summary?.eventCount).toBe(allEvents.length);
+  });
+
   it("should not return events for info level (bounded response)", async () => {
     const response = await app.inject({
       method: "POST",
