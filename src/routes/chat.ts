@@ -15,12 +15,40 @@ import {
   retrieveContext,
   retrievalLogShape,
 } from "../control-plane/retrieval";
-import { postOutputLinter } from "../gates/post_linter";
+import { postOutputLinter, type PostLinterViolation } from "../gates/post_linter";
 import { runEvidenceIntake } from "../gates/evidence_intake";
 import { EvidenceValidationError } from "../gates/evidence_validation_error";
 import { fakeModelReplyWithMeta } from "../providers/fake_model";
 import type { ControlPlaneStore } from "../store/control_plane_store";
 import { MemoryControlPlaneStore } from "../store/control_plane_store";
+
+type PostLinterMetadata = {
+  kind: "post_linter";
+  violationsCount: number;
+  blockIds: string[];
+  firstFailure?: {
+    blockId: string;
+    rule: string;
+    pattern: string;
+  };
+};
+
+function buildPostLinterMetadata(violations: PostLinterViolation[]): PostLinterMetadata {
+  const blockIds = Array.from(new Set(violations.map((v) => v.blockId))).slice(0, 10);
+  const first = violations[0];
+  return {
+    kind: "post_linter",
+    violationsCount: violations.length,
+    blockIds,
+    firstFailure: first
+      ? {
+          blockId: first.blockId,
+          rule: first.rule,
+          pattern: first.pattern,
+        }
+      : undefined,
+  };
+}
 
 export async function chatRoutes(
   app: FastifyInstance,
@@ -446,6 +474,11 @@ export async function chatRoutes(
       domainFlags: modeDecision?.domainFlags ?? [],
     }, "control_plane.transmission_ready");
 
+    const testOutput = process.env.NODE_ENV === "test"
+      ? String((req.headers as any)["x-sol-test-output"] ?? "")
+      : "";
+    const forcedAssistant = testOutput.length > 0 ? testOutput : undefined;
+
     // --- Evidence Intake (PR #7) ---
     // Run evidence intake gate: extract URLs, create auto-captures, validate
     let evidenceIntakeOutput;
@@ -720,28 +753,17 @@ export async function chatRoutes(
               modeLabel: modeDecision.modeLabel,
             });
 
-            const assistant = meta.assistant;
+            const assistant = forcedAssistant ?? meta.assistant;
 
             const lint = postOutputLinter({
               modeLabel: modeDecision.modeLabel,
               content: assistant,
+              driverBlocks: promptPack.driverBlocks,
             });
 
             if (!lint.ok) {
-              await store.appendDeliveryAttempt({
-                transmissionId,
-                provider: "fake",
-                status: "failed",
-                error: lint.error,
-              });
-
-              await store.updateTransmissionStatus({
-                transmissionId,
-                status: "failed",
-              });
-
-              bgLog.warn({ error: lint.error }, "gate.post_lint_failed_async");
-              return;
+              const lintMeta = buildPostLinterMetadata(lint.violations);
+              bgLog.warn(lintMeta, "gate.post_lint_warning_async");
             }
 
             // Option 1: model-proposed ThreadMemento draft.
@@ -844,7 +866,7 @@ export async function chatRoutes(
         modeLabel: modeDecision.modeLabel,
       });
 
-      assistant = meta.assistant;
+      assistant = forcedAssistant ?? meta.assistant;
 
       await appendTrace({
         traceRunId: traceRun.id,
@@ -867,39 +889,30 @@ export async function chatRoutes(
         summary: "Running output linter",
       });
 
-      const lint = postOutputLinter({ modeLabel: modeDecision.modeLabel, content: assistant });
+      const lint = postOutputLinter({
+        modeLabel: modeDecision.modeLabel,
+        content: assistant,
+        driverBlocks: promptPack.driverBlocks,
+      });
+
+      const lintMeta = lint.ok
+        ? { kind: "post_linter", violationsCount: 0, blockIds: [] as string[] }
+        : buildPostLinterMetadata(lint.violations);
 
       await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "solserver",
         phase: "output_gates",
-        status: lint.ok ? "completed" : "failed",
-        summary: lint.ok ? "Output linter passed" : `Output linter failed: ${lint.error}`,
-        metadata: { lintOk: lint.ok, error: lint.error },
+        status: lint.ok ? "completed" : "warning",
+        summary: lint.ok
+          ? "Output linter passed"
+          : `Output linter warning: ${lintMeta.violationsCount} violations`,
+        metadata: lintMeta,
       });
 
       if (!lint.ok) {
-        await store.appendDeliveryAttempt({
-          transmissionId: transmission.id,
-          provider: "fake",
-          status: "failed",
-          error: lint.error,
-        });
-
-        await store.updateTransmissionStatus({
-          transmissionId: transmission.id,
-          status: "failed",
-        });
-
-        log.warn({ error: lint.error }, "gate.post_lint_failed");
-
-        return reply.code(500).send({
-          error: "post_lint_failed",
-          details: lint.error,
-          transmissionId: transmission.id,
-          retryable: false,
-        });
+        log.warn(lintMeta, "gate.post_lint_warning");
       }
 
       // Option 1: model-proposed ThreadMemento draft.

@@ -209,6 +209,9 @@ curl -s http://127.0.0.1:3333/v1/transmissions/$TID | jq
 
 Note: SolMobile v0 can resolve 202 via polling, but we are not running an automatic poll loop yet. Manual pumping (leave and return to the thread view) is acceptable for now.
 
+### Test-only headers (NODE_ENV=test)
+- `x-sol-test-output`: override assistant output for deterministic linter and trace validation. Ignored outside tests.
+
 ### Provider toggle (planned)
 - Default provider is a **fake model** for pipeline testing.
 - OpenAI wiring is added later behind an environment flag.
