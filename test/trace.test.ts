@@ -43,7 +43,8 @@ describe("Trace (v0)", () => {
     expect(body.trace).toBeDefined();
     expect(body.trace.traceRunId).toBeDefined();
     expect(body.trace.level).toBe("info"); // default level
-    expect(body.trace.eventCount).toBe(0); // info level returns no events
+    expect(body.trace.eventCount).toBeGreaterThan(0);
+    expect(body.trace.phaseCounts).toBeDefined();
 
     // Verify trace run was created in store
     const traceRun = await store.getTraceRun(body.trace.traceRunId);
@@ -106,7 +107,8 @@ describe("Trace (v0)", () => {
     // Info level should NOT return events (bounded)
     expect(body.trace.level).toBe("info");
     expect(body.trace.events).toBeUndefined();
-    expect(body.trace.eventCount).toBe(0); // eventCount is 0 when no events are returned
+    expect(body.trace.eventCount).toBeGreaterThan(0);
+    expect(body.trace.phaseCounts).toBeDefined();
   });
 
   it("should generate trace events at key phases", async () => {
@@ -251,7 +253,8 @@ describe("Trace (v0) sqlite", () => {
     expect(body.trace.traceRunId).toBeDefined();
     expect(body.trace.level).toBe("info");
     expect(body.trace.events).toBeUndefined();
-    expect(body.trace.eventCount).toBe(0);
+    expect(body.trace.eventCount).toBeGreaterThan(0);
+    expect(body.trace.phaseCounts).toBeDefined();
 
     const traceRun = await store.getTraceRun(body.trace.traceRunId);
     expect(traceRun).not.toBeNull();

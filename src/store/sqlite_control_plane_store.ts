@@ -509,6 +509,35 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     return sorted;
   }
 
+  async getTraceSummary(traceRunId: string): Promise<TraceSummary | null> {
+    const countStmt = this.db.prepare(`
+      SELECT COUNT(*) as count, MAX(ts) as latest_ts
+      FROM trace_events
+      WHERE trace_run_id = ?
+    `);
+    const countRow = countStmt.get(traceRunId) as any;
+    const eventCount = Number(countRow?.count ?? 0);
+
+    const phaseStmt = this.db.prepare(`
+      SELECT phase, COUNT(*) as count
+      FROM trace_events
+      WHERE trace_run_id = ?
+      GROUP BY phase
+    `);
+    const phaseRows = phaseStmt.all(traceRunId) as any[];
+
+    const phaseCounts: Record<TraceEventPhase, number> = {} as Record<TraceEventPhase, number>;
+    for (const row of phaseRows) {
+      phaseCounts[row.phase] = Number(row.count ?? 0);
+    }
+
+    return {
+      eventCount,
+      phaseCounts,
+      latestTs: countRow?.latest_ts ?? undefined,
+    };
+  }
+
   private rowToTransmission(row: any): Transmission {
     return {
       id: row.id,
