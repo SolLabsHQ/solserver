@@ -137,7 +137,9 @@ describe("Gates Pipeline", () => {
     const evidenceIntake = traceEvents.find(e => e.phase === "evidence_intake");
     expect(evidenceIntake).toBeDefined();
     expect(evidenceIntake!.metadata).toMatchObject({
-      evidence_received: true,
+      autoCaptures: 0,
+      clientCaptures: 1,
+      warningsCount: 0,
       captureCount: 1,
       supportCount: 1,
       claimCount: 1,
@@ -313,7 +315,7 @@ describe("Gates Pipeline", () => {
 
     // Verify response only contains bounded summaries
     expect(body.evidenceSummary).toEqual({
-      captures: 0,
+      captures: 1,
       supports: 1,
       claims: 0,
       warnings: 0,

@@ -362,12 +362,6 @@ export async function chatRoutes(
               modeDecision: existing.modeDecision,
               assistant: cached.assistant,
               idempotentReplay: true,
-              evidenceSummary: {
-                captures: 0,
-                supports: 0,
-                claims: 0,
-                warnings: 0,
-              },
               threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
               evidenceSummary: emptyEvidenceSummary,
             };
@@ -380,12 +374,6 @@ export async function chatRoutes(
             status: existing.status,
             pending: true,
             idempotentReplay: true,
-            evidenceSummary: {
-              captures: 0,
-              supports: 0,
-              claims: 0,
-              warnings: 0,
-            },
             threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
             evidenceSummary: emptyEvidenceSummary,
           });
@@ -399,12 +387,6 @@ export async function chatRoutes(
             status: existing.status,
             pending: true,
             idempotentReplay: true,
-            evidenceSummary: {
-              captures: 0,
-              supports: 0,
-              claims: 0,
-              warnings: 0,
-            },
             threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
             evidenceSummary: emptyEvidenceSummary,
           });
@@ -480,8 +462,12 @@ export async function chatRoutes(
         });
       }
 
+      const snippetCharTotal = evidenceIntakeOutput.evidence?.supports
+        ?.filter((s) => s.type === "text_snippet" && s.snippetText)
+        .reduce((sum, s) => sum + (s.snippetText?.length || 0), 0) ?? 0;
+
       // Trace event: Evidence intake
-      await store.appendTraceEvent({
+      await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "solserver",
@@ -496,12 +482,13 @@ export async function chatRoutes(
           captureCount: evidenceIntakeOutput.evidence.captures?.length ?? 0,
           supportCount: evidenceIntakeOutput.evidence.supports?.length ?? 0,
           claimCount: evidenceIntakeOutput.evidence.claims?.length ?? 0,
+          snippetCharTotal,
         },
       });
     } catch (error) {
       // Handle EvidenceValidationError (fail closed with structured 400)
       if (error instanceof EvidenceValidationError) {
-        await store.appendTraceEvent({
+        await appendTrace({
           traceRunId: traceRun.id,
           transmissionId: transmission.id,
           actor: "solserver",
@@ -536,40 +523,8 @@ export async function chatRoutes(
       },
     });
 
-    // --- Step 4: Evidence intake + Gates pipeline ---
-    // Trace event: Evidence intake
-    const evidenceReceived = Boolean(packet.evidence);
-    const captureCount = packet.evidence?.captures?.length || 0;
-    const supportCount = packet.evidence?.supports?.length || 0;
-    const claimCount = packet.evidence?.claims?.length || 0;
-    const snippetCharTotal = packet.evidence?.supports
-      ?.filter(s => s.type === "text_snippet" && s.snippetText)
-      .reduce((sum, s) => sum + (s.snippetText?.length || 0), 0) || 0;
-
-    await appendTrace({
-      traceRunId: traceRun.id,
-      transmissionId: transmission.id,
-      actor: "solserver",
-      phase: "evidence_intake",
-      status: "completed",
-      summary: evidenceReceived ? `Evidence received: ${captureCount} captures, ${supportCount} supports, ${claimCount} claims` : "No evidence provided",
-      metadata: {
-        evidence_received: evidenceReceived,
-        captureCount,
-        supportCount,
-        claimCount,
-        snippetCharTotal,
-      },
-    });
-
     // Run gates pipeline
     const gatesOutput = runGatesPipeline(packet);
-
-    // Evidence response wiring (fail-open warnings, merged/validated evidence from gates when available).
-    // NOTE: Some branches may not yet surface evidence intake output on the typed GatesOutput.
-    // We read it defensively via `any` and fall back to the raw request evidence.
-    const evidenceIntakeOutput =
-      (gatesOutput as any).evidenceIntake ?? (gatesOutput as any).evidence_intake ?? null;
 
     const effectiveEvidence = evidenceIntakeOutput?.evidence ?? packet.evidence ?? null;
     const effectiveWarnings: any[] = evidenceIntakeOutput?.warnings ?? [];
@@ -875,7 +830,9 @@ export async function chatRoutes(
         simulated: true,
         checkAfterMs: 750,
         driverBlocks: driverBlockSummary,
+        ...(hasEvidence ? { evidence: effectiveEvidence } : {}),
         evidenceSummary,
+        ...(effectiveWarnings.length > 0 ? { evidenceWarnings: effectiveWarnings } : {}),
         threadMemento: getLatestThreadMemento(packet.threadId, { includeDraft: true }),
       });
     }
@@ -1032,14 +989,6 @@ export async function chatRoutes(
     const traceEventLimit = traceLevel === "debug" ? 50 : 0; // debug: return up to 50 events, info: no events
     const traceEvents = await store.getTraceEvents(traceRun.id, { limit: traceEventLimit });
 
-    // Build evidenceSummary (always present - PR #7.1)
-    const evidenceSummary = {
-      captures: evidenceIntakeOutput.evidence.captures?.length ?? 0,
-      supports: evidenceIntakeOutput.evidence.supports?.length ?? 0,
-      claims: evidenceIntakeOutput.evidence.claims?.length ?? 0,
-      warnings: evidenceIntakeOutput.warnings.length,
-    };
-
     return {
       ok: true,
       transmissionId: transmission.id,
@@ -1048,13 +997,9 @@ export async function chatRoutes(
       threadMemento,
       driverBlocks: driverBlockSummary,
       // Evidence fields (PR #7.1): include evidence only when present
-      ...(evidenceIntakeOutput.evidence.captures || evidenceIntakeOutput.evidence.supports || evidenceIntakeOutput.evidence.claims
-        ? { evidence: evidenceIntakeOutput.evidence }
-        : {}),
+      ...(hasEvidence ? { evidence: effectiveEvidence } : {}),
       evidenceSummary,
-      ...(evidenceIntakeOutput.warnings.length > 0
-        ? { evidenceWarnings: evidenceIntakeOutput.warnings }
-        : {}),
+      ...(effectiveWarnings.length > 0 ? { evidenceWarnings: effectiveWarnings } : {}),
       trace: {
         traceRunId: traceRun.id,
         level: traceLevel,
