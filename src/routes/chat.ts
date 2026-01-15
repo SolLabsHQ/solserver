@@ -16,6 +16,8 @@ import {
   retrievalLogShape,
 } from "../control-plane/retrieval";
 import { postOutputLinter } from "../gates/post_linter";
+import { runEvidenceIntake } from "../gates/evidence_intake";
+import { EvidenceValidationError } from "../gates/evidence_validation_error";
 import { fakeModelReplyWithMeta } from "../providers/fake_model";
 import type { ControlPlaneStore } from "../store/control_plane_store";
 import { MemoryControlPlaneStore } from "../store/control_plane_store";
@@ -65,6 +67,28 @@ export async function chatRoutes(
       usage,
       threadMemento,
     };
+  });
+
+  // Evidence retrieval endpoints (PR #7)
+  app.get("/transmissions/:id/evidence", async (req, reply) => {
+    const transmissionId = (req.params as any).id as string;
+
+    const evidence = await store.getEvidence({ transmissionId });
+
+    if (!evidence) {
+      return reply.code(404).send({ error: "not_found" });
+    }
+
+    return { ok: true, evidence };
+  });
+
+  app.get("/threads/:threadId/evidence", async (req, reply) => {
+    const threadId = (req.params as any).threadId as string;
+    const limit = Number((req.query as any)?.limit ?? 100);
+
+    const results = await store.getEvidenceByThread({ threadId, limit });
+
+    return { ok: true, results };
   });
 
   /**
@@ -306,6 +330,7 @@ export async function chatRoutes(
     }
 
     const packet = parsed.data;
+    const emptyEvidenceSummary = { captures: 0, supports: 0, claims: 0, warnings: 0 };
 
     // --- Idempotency + retry semantics ---
     // If clientRequestId is provided, we dedupe retries. Behavior by stored status:
@@ -344,6 +369,7 @@ export async function chatRoutes(
                 warnings: 0,
               },
               threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
+              evidenceSummary: emptyEvidenceSummary,
             };
           }
 
@@ -361,6 +387,7 @@ export async function chatRoutes(
               warnings: 0,
             },
             threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
+            evidenceSummary: emptyEvidenceSummary,
           });
         }
 
@@ -379,6 +406,7 @@ export async function chatRoutes(
               warnings: 0,
             },
             threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
+            evidenceSummary: emptyEvidenceSummary,
           });
         }
 
@@ -435,6 +463,63 @@ export async function chatRoutes(
       status: transmission.status,
       domainFlags: modeDecision?.domainFlags ?? [],
     }, "control_plane.transmission_ready");
+
+    // --- Evidence Intake (PR #7) ---
+    // Run evidence intake gate: extract URLs, create auto-captures, validate
+    let evidenceIntakeOutput;
+    try {
+      evidenceIntakeOutput = runEvidenceIntake(packet);
+      packet.evidence = evidenceIntakeOutput.evidence;
+
+      // Persist evidence to SQLite (idempotent)
+      if (evidenceIntakeOutput.evidence) {
+        await store.saveEvidence({
+          transmissionId: transmission.id,
+          threadId: packet.threadId,
+          evidence: evidenceIntakeOutput.evidence,
+        });
+      }
+
+      // Trace event: Evidence intake
+      await store.appendTraceEvent({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "evidence_intake",
+        status: "completed",
+        summary: `Evidence processed: ${evidenceIntakeOutput.autoCaptures} auto-captures, ${evidenceIntakeOutput.clientCaptures} client-captures`,
+        metadata: {
+          autoCaptures: evidenceIntakeOutput.autoCaptures,
+          clientCaptures: evidenceIntakeOutput.clientCaptures,
+          urlsDetectedCount: evidenceIntakeOutput.urlsDetected.length,
+          warningsCount: evidenceIntakeOutput.warnings.length,
+          captureCount: evidenceIntakeOutput.evidence.captures?.length ?? 0,
+          supportCount: evidenceIntakeOutput.evidence.supports?.length ?? 0,
+          claimCount: evidenceIntakeOutput.evidence.claims?.length ?? 0,
+        },
+      });
+    } catch (error) {
+      // Handle EvidenceValidationError (fail closed with structured 400)
+      if (error instanceof EvidenceValidationError) {
+        await store.appendTraceEvent({
+          traceRunId: traceRun.id,
+          transmissionId: transmission.id,
+          actor: "solserver",
+          phase: "evidence_intake",
+          status: "failed",
+          summary: `Evidence validation failed: ${error.message}`,
+          metadata: error.details,
+        });
+
+        await store.updateTransmissionStatus({
+          transmissionId: transmission.id,
+          status: "failed",
+        });
+
+        return reply.code(400).send(error.toJSON());
+      }
+      throw error;
+    }
 
     // Trace event: Policy engine (mode routing)
     await appendTrace({
@@ -947,6 +1032,14 @@ export async function chatRoutes(
     const traceEventLimit = traceLevel === "debug" ? 50 : 0; // debug: return up to 50 events, info: no events
     const traceEvents = await store.getTraceEvents(traceRun.id, { limit: traceEventLimit });
 
+    // Build evidenceSummary (always present - PR #7.1)
+    const evidenceSummary = {
+      captures: evidenceIntakeOutput.evidence.captures?.length ?? 0,
+      supports: evidenceIntakeOutput.evidence.supports?.length ?? 0,
+      claims: evidenceIntakeOutput.evidence.claims?.length ?? 0,
+      warnings: evidenceIntakeOutput.warnings.length,
+    };
+
     return {
       ok: true,
       transmissionId: transmission.id,
@@ -954,10 +1047,14 @@ export async function chatRoutes(
       assistant,
       threadMemento,
       driverBlocks: driverBlockSummary,
-      // Evidence fields: include evidence only when present; include warnings only when present
-      ...(hasEvidence ? { evidence: effectiveEvidence } : {}),
+      // Evidence fields (PR #7.1): include evidence only when present
+      ...(evidenceIntakeOutput.evidence.captures || evidenceIntakeOutput.evidence.supports || evidenceIntakeOutput.evidence.claims
+        ? { evidence: evidenceIntakeOutput.evidence }
+        : {}),
       evidenceSummary,
-      ...(effectiveWarnings.length > 0 ? { evidenceWarnings: effectiveWarnings } : {}),
+      ...(evidenceIntakeOutput.warnings.length > 0
+        ? { evidenceWarnings: evidenceIntakeOutput.warnings }
+        : {}),
       trace: {
         traceRunId: traceRun.id,
         level: traceLevel,
