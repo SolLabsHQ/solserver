@@ -43,7 +43,9 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         message TEXT NOT NULL,
         mode_decision TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        status TEXT NOT NULL
+        status TEXT NOT NULL,
+        status_code INTEGER,
+        retryable INTEGER
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_client_request_id ON transmissions(client_request_id);
@@ -165,6 +167,13 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       CREATE INDEX IF NOT EXISTS idx_claims_thread ON claim_map_entries(thread_id);
       CREATE INDEX IF NOT EXISTS idx_claims_tx_claim ON claim_map_entries(transmission_id, claim_id);
     `);
+
+    try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN status_code INTEGER");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN retryable INTEGER");
+    } catch {}
   }
 
   async createTransmission(args: {
@@ -183,11 +192,13 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       modeDecision: args.modeDecision,
       createdAt: new Date().toISOString(),
       status: "created",
+      statusCode: undefined,
+      retryable: undefined,
     };
 
     const stmt = this.db.prepare(`
-      INSERT INTO transmissions (id, packet_type, thread_id, client_request_id, message, mode_decision, created_at, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO transmissions (id, packet_type, thread_id, client_request_id, message, mode_decision, created_at, status, status_code, retryable)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     try {
@@ -199,7 +210,9 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         t.message,
         JSON.stringify(t.modeDecision),
         t.createdAt,
-        t.status
+        t.status,
+        t.statusCode ?? null,
+        t.retryable === undefined ? null : (t.retryable ? 1 : 0)
       );
     } catch (err) {
       const code = (err as { code?: string } | null)?.code;
@@ -229,12 +242,17 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
   async updateTransmissionStatus(args: {
     transmissionId: string;
     status: TransmissionStatus;
+    statusCode?: number;
+    retryable?: boolean;
   }): Promise<void> {
     const stmt = this.db.prepare(`
-      UPDATE transmissions SET status = ? WHERE id = ?
+      UPDATE transmissions
+      SET status = ?, status_code = COALESCE(?, status_code), retryable = COALESCE(?, retryable)
+      WHERE id = ?
     `);
 
-    stmt.run(args.status, args.transmissionId);
+    const retryableValue = args.retryable === undefined ? null : (args.retryable ? 1 : 0);
+    stmt.run(args.status, args.statusCode ?? null, retryableValue, args.transmissionId);
   }
 
   async appendDeliveryAttempt(args: {
@@ -549,6 +567,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       modeDecision: JSON.parse(row.mode_decision),
       createdAt: row.created_at,
       status: row.status,
+      statusCode: row.status_code ?? undefined,
+      retryable: row.retryable === null || row.retryable === undefined ? undefined : Boolean(row.retryable),
     };
   }
 

@@ -10,7 +10,7 @@ import { assembleDriverBlocks, formatDriverBlocksForPrompt, type AssembledDriver
 
 export type PromptRole = "system" | "user";
 
-export type PromptSectionId = "law" | "retrieval" | "user_message";
+export type PromptSectionId = "law" | "correction" | "retrieval" | "user_message";
 
 export type RetrievalItemKind = "memento" | "bookmark" | "memory";
 
@@ -97,6 +97,26 @@ function formatRetrievalSection(items: RetrievalItem[]): { content: string; used
  * 2) retrieval (system)
  * 3) user_message (user)
  */
+export function withCorrectionSection(pack: PromptPack, correctionText: string): PromptPack {
+  const text = correctionText.trim();
+  if (!text) return pack;
+
+  const sections: PromptSection[] = [];
+  for (const section of pack.sections) {
+    sections.push(section);
+    if (section.id === "law") {
+      sections.push({
+        id: "correction",
+        role: "system",
+        title: "Correction",
+        content: text,
+      });
+    }
+  }
+
+  return { ...pack, sections };
+}
+
 export function buildPromptPack(args: {
   packet: PacketInput;
   modeDecision: ModeDecision;
