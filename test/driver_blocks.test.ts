@@ -307,12 +307,13 @@ describe("Driver Blocks (v0)", () => {
       expect(warningEvent.metadata.dropped.length).toBeGreaterThan(0);
     });
 
-    it("should emit post-linter warning and still return 200", async () => {
+    it("should retry with correction and return 200 on attempt 1", async () => {
       const response = await app.inject({
         method: "POST",
         url: "/v1/chat",
         headers: {
-          "x-sol-test-output": "I sent the email for you.",
+          "x-sol-test-output-attempt-0": "I sent the email for you.",
+          "x-sol-test-output-attempt-1": "shape\nReceipt: Acknowledged.\nRelease: You are not required to take external actions.\nNext: Tell me if you want a draft or steps.\nAssumption: No external actions were taken.\nHere is a draft email you can send.",
         },
         payload: {
           packetType: "chat",
@@ -324,13 +325,50 @@ describe("Driver Blocks (v0)", () => {
 
       expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.body);
+      expect(body.assistant).toBe("shape\nReceipt: Acknowledged.\nRelease: You are not required to take external actions.\nNext: Tell me if you want a draft or steps.\nAssumption: No external actions were taken.\nHere is a draft email you can send.");
 
-      const warningEvent = body.trace.events.find(
-        (e: any) => e.phase === "output_gates" && e.status === "warning" && e.metadata?.kind === "post_linter"
+      const attempt0Warning = body.trace.events.find(
+        (e: any) => e.phase === "output_gates" && e.status === "warning" && e.metadata?.kind === "post_linter" && e.metadata?.attempt === 0
       );
-      expect(warningEvent).toBeDefined();
-      expect(warningEvent.metadata.violationsCount).toBeGreaterThan(0);
-      expect(warningEvent.metadata.blockIds).toContain("DB-001");
+      expect(attempt0Warning).toBeDefined();
+      expect(attempt0Warning.metadata.violationsCount).toBeGreaterThan(0);
+      expect(attempt0Warning.metadata.blockIds).toContain("DB-001");
+
+      const attempt1Completed = body.trace.events.find(
+        (e: any) => e.phase === "output_gates" && e.status === "completed" && e.metadata?.kind === "post_linter" && e.metadata?.attempt === 1
+      );
+      expect(attempt1Completed).toBeDefined();
+    });
+
+    it("should fail closed after attempt 1 violation", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat",
+        headers: {
+          "x-sol-test-output-attempt-0": "I sent the email for you.",
+          "x-sol-test-output-attempt-1": "I sent the email for you.",
+        },
+        payload: {
+          packetType: "chat",
+          threadId: "thread-trace-lint-002",
+          message: "Test",
+          traceConfig: { level: "debug" },
+        },
+      });
+
+      expect(response.statusCode).toBe(422);
+      const body = JSON.parse(response.body);
+      expect(body.error).toBe("driver_block_enforcement_failed");
+      expect(body.retryable).toBe(false);
+      expect(body.assistant).toContain("I can't claim to have performed external actions");
+
+      const traceRunId = response.headers["x-sol-trace-run-id"] as string | undefined;
+      expect(traceRunId).toBeDefined();
+      const traceEvents = await store.getTraceEvents(traceRunId!, { limit: 200 });
+      const enforcementEvent = traceEvents.find(
+        (e) => e.phase === "output_gates" && e.status === "failed" && e.metadata?.kind === "driver_block_enforcement"
+      );
+      expect(enforcementEvent).toBeDefined();
     });
 
     it("should not emit trace event when no enforcement violations", async () => {

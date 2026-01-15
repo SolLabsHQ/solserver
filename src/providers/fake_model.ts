@@ -2,7 +2,15 @@ export async function fakeModelReply(input: {
   userText: string;
   modeLabel: string;
 }): Promise<string> {
-  return `[${input.modeLabel}] Stub response: I received ${input.userText.length} chars.`;
+  const lines = [
+    `[${input.modeLabel}] shape`,
+    "Receipt: Acknowledged.",
+    "Release: You are not required to take external actions.",
+    "Next: Tell me if you want a draft or steps.",
+    "Assumption: No external actions were taken.",
+    `Stub response: I received ${input.userText.length} chars.`,
+  ];
+  return lines.join("\n");
 }
 
 // ThreadMemento draft is navigation-only metadata (NOT durable knowledge).

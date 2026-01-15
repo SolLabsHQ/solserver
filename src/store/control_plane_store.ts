@@ -14,6 +14,8 @@ export type Transmission = {
   modeDecision: ModeDecision;
   createdAt: string;
   status: TransmissionStatus;
+  statusCode?: number;
+  retryable?: boolean;
 };
 
 export type DeliveryAttempt = {
@@ -99,6 +101,8 @@ export interface ControlPlaneStore {
   updateTransmissionStatus(args: {
     transmissionId: string;
     status: TransmissionStatus;
+    statusCode?: number;
+    retryable?: boolean;
   }): Promise<void>;
 
   appendDeliveryAttempt(args: {
@@ -186,6 +190,8 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       modeDecision: args.modeDecision,
       createdAt: new Date().toISOString(),
       status: "created",
+      statusCode: undefined,
+      retryable: undefined,
     };
 
     this.transmissions.set(id, t);
@@ -206,10 +212,17 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
   async updateTransmissionStatus(args: {
     transmissionId: string;
     status: TransmissionStatus;
+    statusCode?: number;
+    retryable?: boolean;
   }): Promise<void> {
     const existing = this.transmissions.get(args.transmissionId);
     if (!existing) return;
-    this.transmissions.set(args.transmissionId, { ...existing, status: args.status });
+    this.transmissions.set(args.transmissionId, {
+      ...existing,
+      status: args.status,
+      statusCode: args.statusCode ?? existing.statusCode,
+      retryable: args.retryable ?? existing.retryable,
+    });
   }
 
   async appendDeliveryAttempt(args: {

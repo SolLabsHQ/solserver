@@ -4,7 +4,7 @@ import { z } from "zod";
 
 import { PacketInput } from "../contracts/chat";
 import { routeMode } from "../control-plane/router";
-import { buildPromptPack, toSinglePromptText, promptPackLogShape } from "../control-plane/prompt_pack";
+import { buildPromptPack, toSinglePromptText, promptPackLogShape, withCorrectionSection, type PromptPack } from "../control-plane/prompt_pack";
 import { runGatesPipeline } from "../gates/gates_pipeline";
 import {
   getLatestThreadMemento,
@@ -22,8 +22,28 @@ import { fakeModelReplyWithMeta } from "../providers/fake_model";
 import type { ControlPlaneStore } from "../store/control_plane_store";
 import { MemoryControlPlaneStore } from "../store/control_plane_store";
 
+type EnforcementFailureMetadata = {
+  kind: "driver_block_enforcement";
+  outcome: "fail_closed_422";
+  attempts: number;
+  violationsCount: number;
+};
+
+function getForcedTestOutput(req: any, attempt: 0 | 1): string | undefined {
+  if (process.env.NODE_ENV != "test") return undefined;
+  const headers = req?.headers ?? {};
+  const keyed = attempt === 0
+    ? headers["x-sol-test-output-attempt-0"]
+    : headers["x-sol-test-output-attempt-1"];
+  const attemptValue = String(keyed ?? "").trim();
+  if (attemptValue) return attemptValue;
+  const fallback = String(headers["x-sol-test-output"] ?? "").trim();
+  return fallback ? fallback : undefined;
+}
+
 type PostLinterMetadata = {
   kind: "post_linter";
+  attempt: 0 | 1;
   violationsCount: number;
   blockIds: string[];
   firstFailure?: {
@@ -33,11 +53,12 @@ type PostLinterMetadata = {
   };
 };
 
-function buildPostLinterMetadata(violations: PostLinterViolation[]): PostLinterMetadata {
+function buildPostLinterMetadata(violations: PostLinterViolation[], attempt: 0 | 1): PostLinterMetadata {
   const blockIds = Array.from(new Set(violations.map((v) => v.blockId))).slice(0, 10);
   const first = violations[0];
   return {
     kind: "post_linter",
+    attempt,
     violationsCount: violations.length,
     blockIds,
     firstFailure: first
@@ -48,6 +69,49 @@ function buildPostLinterMetadata(violations: PostLinterViolation[]): PostLinterM
         }
       : undefined,
   };
+}
+
+function buildCorrectionText(violations: PostLinterViolation[], driverBlocks: Array<{ id: string; title?: string }>): string {
+  if (violations.length == 0) return "";
+
+  const blockTitles = new Map(driverBlocks.map((b) => [b.id, b.title]));
+  const uniqueBlocks: string[] = [];
+  for (const v of violations) {
+    if (!uniqueBlocks.includes(v.blockId)) {
+      uniqueBlocks.push(v.blockId);
+    }
+  }
+
+  const header = "CORRECTION (Attempt 1)";
+  const blockLines = uniqueBlocks.map((id) => {
+    const title = blockTitles.get(id);
+    return title ? `- ${id} ${title}` : `- ${id}`;
+  });
+
+  const ruleLines = violations.slice(0, 6).map((v) => {
+    if (v.rule === "must-not") {
+      return `- Avoid: "${v.pattern}"`;
+    }
+    return `- Include: "${v.pattern}"`;
+  });
+
+  return [
+    header,
+    "Your previous response violated Driver Blocks:",
+    ...blockLines,
+    "Rewrite to comply:",
+    ...ruleLines,
+    "Return only the corrected response.",
+  ].join("\n");
+}
+
+function buildEnforcementStub(): string {
+  return [
+    "I can't claim to have performed external actions.",
+    "Here is a safe alternative you can execute:",
+    "- Draft: Provide the message you want to send.",
+    "- Steps: Review the draft, then send it using your preferred tool.",
+  ].join("\n");
 }
 
 export async function chatRoutes(
@@ -458,6 +522,43 @@ export async function chatRoutes(
       return store.appendTraceEvent({ ...event, metadata });
     };
 
+    const runModelAttempt = async (args: {
+      attempt: 0 | 1;
+      promptPack: PromptPack;
+      modeLabel: string;
+      forcedAssistant?: string;
+    }) => {
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "model",
+        phase: "model_call",
+        status: "started",
+        summary: `Calling model provider (Attempt ${args.attempt})`,
+        metadata: { attempt: args.attempt },
+      });
+
+      const providerInputText = toSinglePromptText(args.promptPack);
+      const meta = await fakeModelReplyWithMeta({
+        userText: providerInputText,
+        modeLabel: args.modeLabel,
+      });
+
+      const assistant = args.forcedAssistant ?? meta.assistant;
+
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "model",
+        phase: "model_call",
+        status: "completed",
+        summary: `Model response received (Attempt ${args.attempt})`,
+        metadata: { attempt: args.attempt, outputLength: assistant.length },
+      });
+
+      return { assistant, mementoDraft: meta.mementoDraft };
+    };
+
     // Route-scoped logger for control-plane tracing (keeps logs searchable).
     const log = req.log.child({
       plane: "chat",
@@ -473,11 +574,6 @@ export async function chatRoutes(
       status: transmission.status,
       domainFlags: modeDecision?.domainFlags ?? [],
     }, "control_plane.transmission_ready");
-
-    const testOutput = process.env.NODE_ENV === "test"
-      ? String((req.headers as any)["x-sol-test-output"] ?? "")
-      : "";
-    const forcedAssistant = testOutput.length > 0 ? testOutput : undefined;
 
     // --- Evidence Intake (PR #7) ---
     // Run evidence intake gate: extract URLs, create auto-captures, validate
@@ -748,69 +844,213 @@ export async function chatRoutes(
               return;
             }
 
-            const meta = await fakeModelReplyWithMeta({
-              userText: providerInputText,
+            const attempt0Output = getForcedTestOutput(req, 0);
+            const attempt1Output = getForcedTestOutput(req, 1);
+
+            const attempt0 = await runModelAttempt({
+              attempt: 0,
+              promptPack,
               modeLabel: modeDecision.modeLabel,
+              forcedAssistant: attempt0Output,
             });
 
-            const assistant = forcedAssistant ?? meta.assistant;
+            await appendTrace({
+              traceRunId: traceRun.id,
+              transmissionId: transmission.id,
+              actor: "solserver",
+              phase: "output_gates",
+              status: "started",
+              summary: "Running output linter",
+              metadata: { kind: "post_linter", attempt: 0 },
+            });
 
-            const lint = postOutputLinter({
+            const lint0 = postOutputLinter({
               modeLabel: modeDecision.modeLabel,
-              content: assistant,
+              content: attempt0.assistant,
               driverBlocks: promptPack.driverBlocks,
             });
 
-            if (!lint.ok) {
-              const lintMeta = buildPostLinterMetadata(lint.violations);
-              bgLog.warn(lintMeta, "gate.post_lint_warning_async");
-            }
+            const lintMeta0 = buildPostLinterMetadata(lint0.ok ? [] : lint0.violations, 0);
 
-            // Option 1: model-proposed ThreadMemento draft.
-            // We store it temporarily (in-memory) as a navigation artifact.
-            // Client may display this and offer Undo.
-            if (meta.mementoDraft) {
-              const m = putThreadMemento({
-                threadId: packet.threadId,
-                arc: meta.mementoDraft.arc || "Untitled",
-                active: meta.mementoDraft.active ?? [],
-                parked: meta.mementoDraft.parked ?? [],
-                decisions: meta.mementoDraft.decisions ?? [],
-                next: meta.mementoDraft.next ?? [],
+            await appendTrace({
+              traceRunId: traceRun.id,
+              transmissionId: transmission.id,
+              actor: "solserver",
+              phase: "output_gates",
+              status: lint0.ok ? "completed" : "warning",
+              summary: lint0.ok
+                ? "Output linter passed"
+                : `Output linter warning: ${lintMeta0.violationsCount} violations`,
+              metadata: lintMeta0,
+            });
+
+            if (lint0.ok) {
+              if (attempt0.mementoDraft) {
+                const m = putThreadMemento({
+                  threadId: packet.threadId,
+                  arc: attempt0.mementoDraft.arc || "Untitled",
+                  active: attempt0.mementoDraft.active ?? [],
+                  parked: attempt0.mementoDraft.parked ?? [],
+                  decisions: attempt0.mementoDraft.decisions ?? [],
+                  next: attempt0.mementoDraft.next ?? [],
+                });
+
+                bgLog.info(
+                  {
+                    plane: "memento",
+                    threadId: packet.threadId,
+                    mementoId: m.id,
+                    source: "model",
+                  },
+                  "control_plane.memento_auto_put"
+                );
+              }
+
+              await store.appendDeliveryAttempt({
+                transmissionId,
+                provider: "fake",
+                status: "succeeded",
+                outputChars: attempt0.assistant.length,
               });
 
-              bgLog.info(
-                {
-                  plane: "memento",
-                  threadId: packet.threadId,
-                  mementoId: m.id,
-                  source: "model",
-                },
-                "control_plane.memento_auto_put"
-              );
+              await store.recordUsage({
+                transmissionId,
+                inputChars: packet.message.length,
+                outputChars: attempt0.assistant.length,
+              });
+
+              await store.updateTransmissionStatus({
+                transmissionId,
+                status: "completed",
+              });
+
+              await store.setChatResult({ transmissionId, assistant: attempt0.assistant });
+
+              bgLog.info({ status: "completed", outputChars: attempt0.assistant.length }, "delivery.completed_async");
+              return;
             }
+
+            const correctionText = buildCorrectionText(lint0.violations, promptPack.driverBlocks);
+            const promptPack1 = withCorrectionSection(promptPack, correctionText);
+
+            const attempt1 = await runModelAttempt({
+              attempt: 1,
+              promptPack: promptPack1,
+              modeLabel: modeDecision.modeLabel,
+              forcedAssistant: attempt1Output,
+            });
+
+            await appendTrace({
+              traceRunId: traceRun.id,
+              transmissionId: transmission.id,
+              actor: "solserver",
+              phase: "output_gates",
+              status: "started",
+              summary: "Running output linter",
+              metadata: { kind: "post_linter", attempt: 1 },
+            });
+
+
+        const lint1 = postOutputLinter({
+              modeLabel: modeDecision.modeLabel,
+              content: attempt1.assistant,
+              driverBlocks: promptPack.driverBlocks,
+            });
+
+            const lintMeta1 = buildPostLinterMetadata(lint1.ok ? [] : lint1.violations, 1);
+
+            await appendTrace({
+              traceRunId: traceRun.id,
+              transmissionId: transmission.id,
+              actor: "solserver",
+              phase: "output_gates",
+              status: lint1.ok ? "completed" : "warning",
+              summary: lint1.ok
+                ? "Output linter passed"
+                : `Output linter warning: ${lintMeta1.violationsCount} violations`,
+              metadata: lintMeta1,
+            });
+
+            if (lint1.ok) {
+              if (attempt1.mementoDraft) {
+                const m = putThreadMemento({
+                  threadId: packet.threadId,
+                  arc: attempt1.mementoDraft.arc || "Untitled",
+                  active: attempt1.mementoDraft.active ?? [],
+                  parked: attempt1.mementoDraft.parked ?? [],
+                  decisions: attempt1.mementoDraft.decisions ?? [],
+                  next: attempt1.mementoDraft.next ?? [],
+                });
+
+                bgLog.info(
+                  {
+                    plane: "memento",
+                    threadId: packet.threadId,
+                    mementoId: m.id,
+                    source: "model",
+                  },
+                  "control_plane.memento_auto_put"
+                );
+              }
+
+              await store.appendDeliveryAttempt({
+                transmissionId,
+                provider: "fake",
+                status: "succeeded",
+                outputChars: attempt1.assistant.length,
+              });
+
+              await store.recordUsage({
+                transmissionId,
+                inputChars: packet.message.length,
+                outputChars: attempt1.assistant.length,
+              });
+
+              await store.updateTransmissionStatus({
+                transmissionId,
+                status: "completed",
+              });
+
+              await store.setChatResult({ transmissionId, assistant: attempt1.assistant });
+
+              bgLog.info({ status: "completed", outputChars: attempt1.assistant.length }, "delivery.completed_async");
+              return;
+            }
+
+            const stubAssistant = buildEnforcementStub();
+
+            await appendTrace({
+              traceRunId: traceRun.id,
+              transmissionId: transmission.id,
+              actor: "solserver",
+              phase: "output_gates",
+              status: "failed",
+              summary: "Driver block enforcement failed (async)",
+              metadata: {
+                kind: "driver_block_enforcement",
+                outcome: "fail_closed_422",
+                attempts: 2,
+                violationsCount: lintMeta1.violationsCount,
+              } satisfies EnforcementFailureMetadata,
+            });
 
             await store.appendDeliveryAttempt({
               transmissionId,
               provider: "fake",
-              status: "succeeded",
-              outputChars: assistant.length,
-            });
-
-            await store.recordUsage({
-              transmissionId,
-              inputChars: packet.message.length,
-              outputChars: assistant.length,
+              status: "failed",
+              error: "driver_block_enforcement_failed",
             });
 
             await store.updateTransmissionStatus({
               transmissionId,
-              status: "completed",
+              status: "failed",
+              statusCode: 422,
+            retryable: false,
             });
 
-            await store.setChatResult({ transmissionId, assistant });
+            await store.setChatResult({ transmissionId, assistant: stubAssistant });
 
-            bgLog.info({ status: "completed", outputChars: assistant.length }, "delivery.completed_async");
+            bgLog.warn({ status: "failed" }, "delivery.failed_async");
           } catch (err: any) {
             const msg = String(err?.message ?? err);
 
@@ -831,6 +1071,7 @@ export async function chatRoutes(
             pendingCompletions.delete(transmissionId);
           }
         }, delayMs);
+
       }
 
       return reply.code(202).send({
@@ -848,36 +1089,18 @@ export async function chatRoutes(
       });
     }
 
+    const attempt0Output = getForcedTestOutput(req, 0);
+    const attempt1Output = getForcedTestOutput(req, 1);
+
     let assistant: string;
     let threadMemento: any = null;
 
     try {
-      await appendTrace({
-        traceRunId: traceRun.id,
-        transmissionId: transmission.id,
-        actor: "model",
-        phase: "model_call",
-        status: "started",
-        summary: "Calling model provider",
-      });
-
-      const meta = await fakeModelReplyWithMeta({
-        userText: providerInputText,
+      const attempt0 = await runModelAttempt({
+        attempt: 0,
+        promptPack,
         modeLabel: modeDecision.modeLabel,
-      });
-
-      assistant = forcedAssistant ?? meta.assistant;
-
-      await appendTrace({
-        traceRunId: traceRun.id,
-        transmissionId: transmission.id,
-        actor: "model",
-        phase: "model_call",
-        status: "completed",
-        summary: "Model response received",
-        metadata: {
-          outputLength: assistant.length,
-        },
+        forcedAssistant: attempt0Output,
       });
 
       await appendTrace({
@@ -887,58 +1110,147 @@ export async function chatRoutes(
         phase: "output_gates",
         status: "started",
         summary: "Running output linter",
+        metadata: { kind: "post_linter", attempt: 0 },
       });
 
-      const lint = postOutputLinter({
+            const lint0 = postOutputLinter({
         modeLabel: modeDecision.modeLabel,
-        content: assistant,
+        content: attempt0.assistant,
         driverBlocks: promptPack.driverBlocks,
       });
 
-      const lintMeta = lint.ok
-        ? { kind: "post_linter", violationsCount: 0, blockIds: [] as string[] }
-        : buildPostLinterMetadata(lint.violations);
+      const lintMeta0 = buildPostLinterMetadata(lint0.ok ? [] : lint0.violations, 0);
 
       await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "solserver",
         phase: "output_gates",
-        status: lint.ok ? "completed" : "warning",
-        summary: lint.ok
+        status: lint0.ok ? "completed" : "warning",
+        summary: lint0.ok
           ? "Output linter passed"
-          : `Output linter warning: ${lintMeta.violationsCount} violations`,
-        metadata: lintMeta,
+          : `Output linter warning: ${lintMeta0.violationsCount} violations`,
+        metadata: lintMeta0,
       });
 
-      if (!lint.ok) {
-        log.warn(lintMeta, "gate.post_lint_warning");
+      if (!lint0.ok) {
+        log.warn(lintMeta0, "gate.post_lint_warning");
       }
 
-      // Option 1: model-proposed ThreadMemento draft.
-      // We store it temporarily (in-memory) as a navigation artifact.
-      // Client may display this and offer Undo.
-      if (meta.mementoDraft) {
-        const m = putThreadMemento({
-          threadId: packet.threadId,
-          arc: meta.mementoDraft.arc || "Untitled",
-          active: meta.mementoDraft.active ?? [],
-          parked: meta.mementoDraft.parked ?? [],
-          decisions: meta.mementoDraft.decisions ?? [],
-          next: meta.mementoDraft.next ?? [],
+      if (lint0.ok) {
+        assistant = attempt0.assistant;
+        if (attempt0.mementoDraft) {
+          const m = putThreadMemento({
+            threadId: packet.threadId,
+            arc: attempt0.mementoDraft.arc || "Untitled",
+            active: attempt0.mementoDraft.active ?? [],
+            parked: attempt0.mementoDraft.parked ?? [],
+            decisions: attempt0.mementoDraft.decisions ?? [],
+            next: attempt0.mementoDraft.next ?? [],
+          });
+          threadMemento = m;
+          log.info({ plane: "memento", threadId: packet.threadId, mementoId: m.id, source: "model" }, "control_plane.memento_auto_put");
+        }
+      } else {
+        const correctionText = buildCorrectionText(lint0.violations, promptPack.driverBlocks);
+        const promptPack1 = withCorrectionSection(promptPack, correctionText);
+
+        const attempt1 = await runModelAttempt({
+          attempt: 1,
+          promptPack: promptPack1,
+          modeLabel: modeDecision.modeLabel,
+          forcedAssistant: attempt1Output,
         });
 
-        threadMemento = m;
+        await appendTrace({
+          traceRunId: traceRun.id,
+          transmissionId: transmission.id,
+          actor: "solserver",
+          phase: "output_gates",
+          status: "started",
+          summary: "Running output linter",
+          metadata: { kind: "post_linter", attempt: 1 },
+        });
 
-        log.info(
-          {
-            plane: "memento",
-            threadId: packet.threadId,
-            mementoId: m.id,
-            source: "model",
-          },
-          "control_plane.memento_auto_put"
-        );
+        const lint1 = postOutputLinter({
+          modeLabel: modeDecision.modeLabel,
+          content: attempt1.assistant,
+          driverBlocks: promptPack.driverBlocks,
+        });
+
+        const lintMeta1 = buildPostLinterMetadata(lint1.ok ? [] : lint1.violations, 1);
+
+        await appendTrace({
+          traceRunId: traceRun.id,
+          transmissionId: transmission.id,
+          actor: "solserver",
+          phase: "output_gates",
+          status: lint1.ok ? "completed" : "warning",
+          summary: lint1.ok
+            ? "Output linter passed"
+            : `Output linter warning: ${lintMeta1.violationsCount} violations`,
+          metadata: lintMeta1,
+        });
+
+        if (!lint1.ok) {
+          log.warn(lintMeta1, "gate.post_lint_warning");
+        }
+
+        if (lint1.ok) {
+          assistant = attempt1.assistant;
+          if (attempt1.mementoDraft) {
+            const m = putThreadMemento({
+              threadId: packet.threadId,
+              arc: attempt1.mementoDraft.arc || "Untitled",
+              active: attempt1.mementoDraft.active ?? [],
+              parked: attempt1.mementoDraft.parked ?? [],
+              decisions: attempt1.mementoDraft.decisions ?? [],
+              next: attempt1.mementoDraft.next ?? [],
+            });
+            threadMemento = m;
+            log.info({ plane: "memento", threadId: packet.threadId, mementoId: m.id, source: "model" }, "control_plane.memento_auto_put");
+          }
+        } else {
+          const stubAssistant = buildEnforcementStub();
+
+          await appendTrace({
+            traceRunId: traceRun.id,
+            transmissionId: transmission.id,
+            actor: "solserver",
+            phase: "output_gates",
+            status: "failed",
+            summary: "Driver block enforcement failed",
+            metadata: {
+              kind: "driver_block_enforcement",
+              outcome: "fail_closed_422",
+              attempts: 2,
+              violationsCount: lintMeta1.violationsCount,
+            } satisfies EnforcementFailureMetadata,
+          });
+
+          await store.appendDeliveryAttempt({
+            transmissionId: transmission.id,
+            provider: "fake",
+            status: "failed",
+            error: "driver_block_enforcement_failed",
+          });
+
+          await store.updateTransmissionStatus({
+            transmissionId: transmission.id,
+            status: "failed",
+            statusCode: 422,
+            retryable: false,
+          });
+
+          await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+
+          return reply.code(422).send({
+            error: "driver_block_enforcement_failed",
+            transmissionId: transmission.id,
+            retryable: false,
+            assistant: stubAssistant,
+          });
+        }
       }
     } catch (err: any) {
       await store.appendDeliveryAttempt({
@@ -961,6 +1273,7 @@ export async function chatRoutes(
         retryable: true,
       });
     }
+
 
     await store.appendDeliveryAttempt({
       transmissionId: transmission.id,
