@@ -338,10 +338,10 @@ export async function chatRoutes(
               assistant: cached.assistant,
               idempotentReplay: true,
               evidenceSummary: {
-                captureCount: 0,
-                supportCount: 0,
-                claimCount: 0,
-                snippetCharTotal: 0,
+                captures: 0,
+                supports: 0,
+                claims: 0,
+                warnings: 0,
               },
               threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
             };
@@ -355,10 +355,10 @@ export async function chatRoutes(
             pending: true,
             idempotentReplay: true,
             evidenceSummary: {
-              captureCount: 0,
-              supportCount: 0,
-              claimCount: 0,
-              snippetCharTotal: 0,
+              captures: 0,
+              supports: 0,
+              claims: 0,
+              warnings: 0,
             },
             threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
           });
@@ -373,10 +373,10 @@ export async function chatRoutes(
             pending: true,
             idempotentReplay: true,
             evidenceSummary: {
-              captureCount: 0,
-              supportCount: 0,
-              claimCount: 0,
-              snippetCharTotal: 0,
+              captures: 0,
+              supports: 0,
+              claims: 0,
+              warnings: 0,
             },
             threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
           });
@@ -479,6 +479,25 @@ export async function chatRoutes(
 
     // Run gates pipeline
     const gatesOutput = runGatesPipeline(packet);
+
+    // Evidence response wiring (fail-open warnings, merged/validated evidence from gates when available).
+    // NOTE: Some branches may not yet surface evidence intake output on the typed GatesOutput.
+    // We read it defensively via `any` and fall back to the raw request evidence.
+    const evidenceIntakeOutput =
+      (gatesOutput as any).evidenceIntake ?? (gatesOutput as any).evidence_intake ?? null;
+
+    const effectiveEvidence = evidenceIntakeOutput?.evidence ?? packet.evidence ?? null;
+    const effectiveWarnings: any[] = evidenceIntakeOutput?.warnings ?? [];
+
+    const evidenceSummary = {
+      captures: effectiveEvidence?.captures?.length || 0,
+      supports: effectiveEvidence?.supports?.length || 0,
+      claims: effectiveEvidence?.claims?.length || 0,
+      warnings: effectiveWarnings.length,
+    };
+
+    const hasEvidence =
+      evidenceSummary.captures > 0 || evidenceSummary.supports > 0 || evidenceSummary.claims > 0;
 
     // Trace event: Normalize/Modality gate
     await appendTrace({
@@ -771,12 +790,7 @@ export async function chatRoutes(
         simulated: true,
         checkAfterMs: 750,
         driverBlocks: driverBlockSummary,
-        evidenceSummary: {
-          captureCount,
-          supportCount,
-          claimCount,
-          snippetCharTotal,
-        },
+        evidenceSummary,
         threadMemento: getLatestThreadMemento(packet.threadId, { includeDraft: true }),
       });
     }
@@ -940,12 +954,10 @@ export async function chatRoutes(
       assistant,
       threadMemento,
       driverBlocks: driverBlockSummary,
-      evidenceSummary: {
-        captureCount,
-        supportCount,
-        claimCount,
-        snippetCharTotal,
-      },
+      // Evidence fields: include evidence only when present; include warnings only when present
+      ...(hasEvidence ? { evidence: effectiveEvidence } : {}),
+      evidenceSummary,
+      ...(effectiveWarnings.length > 0 ? { evidenceWarnings: effectiveWarnings } : {}),
       trace: {
         traceRunId: traceRun.id,
         level: traceLevel,

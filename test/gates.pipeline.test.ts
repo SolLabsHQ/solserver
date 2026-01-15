@@ -126,10 +126,10 @@ describe("Gates Pipeline", () => {
     const body = JSON.parse(response.body);
     expect(body.ok).toBe(true);
     expect(body.evidenceSummary).toEqual({
-      captureCount: 1,
-      supportCount: 1,
-      claimCount: 1,
-      snippetCharTotal: 0,
+      captures: 1,
+      supports: 1,
+      claims: 1,
+      warnings: 0,
     });
 
     // Verify evidence_intake trace event
@@ -313,14 +313,15 @@ describe("Gates Pipeline", () => {
 
     // Verify response only contains bounded summaries
     expect(body.evidenceSummary).toEqual({
-      captureCount: 0,
-      supportCount: 1,
-      claimCount: 0,
-      snippetCharTotal: snippetText.length,
+      captures: 0,
+      supports: 1,
+      claims: 0,
+      warnings: 0,
     });
 
-    // Verify no raw evidence content in response
-    expect(JSON.stringify(body)).not.toContain(snippetText);
+    // Evidence is returned in response when present
+    expect(body.evidence).toBeDefined();
+    expect(body.evidence.supports?.[0]?.snippetText).toBe(snippetText);
     
     // Verify no full gate outputs in response (only trace summary)
     expect(body).not.toHaveProperty("gatesOutput");
