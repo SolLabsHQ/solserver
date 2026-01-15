@@ -326,6 +326,8 @@ describe("Driver Blocks (v0)", () => {
       expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.body);
       expect(body.assistant).toBe("shape\nReceipt: Acknowledged.\nRelease: You are not required to take external actions.\nNext: Tell me if you want a draft or steps.\nAssumption: No external actions were taken.\nHere is a draft email you can send.");
+      expect(body.outputEnvelope).toBeDefined();
+      expect(body.outputEnvelope.assistant_text).toBe(body.assistant);
 
       const attempt0Warning = body.trace.events.find(
         (e: any) => e.phase === "output_gates" && e.status === "warning" && e.metadata?.kind === "post_linter" && e.metadata?.attempt === 0
@@ -334,10 +336,22 @@ describe("Driver Blocks (v0)", () => {
       expect(attempt0Warning.metadata.violationsCount).toBeGreaterThan(0);
       expect(attempt0Warning.metadata.blockIds).toContain("DB-001");
 
+      const attempt0Envelope = body.trace.events.find(
+        (e: any) => e.phase === "output_gates" && e.metadata?.kind === "output_envelope" && e.metadata?.attempt === 0
+      );
+      expect(attempt0Envelope).toBeDefined();
+      expect(attempt0Envelope.metadata.ok).toBe(true);
+
       const attempt1Completed = body.trace.events.find(
         (e: any) => e.phase === "output_gates" && e.status === "completed" && e.metadata?.kind === "post_linter" && e.metadata?.attempt === 1
       );
       expect(attempt1Completed).toBeDefined();
+
+      const attempt1Envelope = body.trace.events.find(
+        (e: any) => e.phase === "output_gates" && e.metadata?.kind === "output_envelope" && e.metadata?.attempt === 1
+      );
+      expect(attempt1Envelope).toBeDefined();
+      expect(attempt1Envelope.metadata.ok).toBe(true);
     });
 
     it("should fail closed after attempt 1 violation", async () => {
@@ -361,6 +375,7 @@ describe("Driver Blocks (v0)", () => {
       expect(body.error).toBe("driver_block_enforcement_failed");
       expect(body.retryable).toBe(false);
       expect(body.assistant).toContain("I can't claim to have performed external actions");
+      expect(body.outputEnvelope).toBeUndefined();
 
       const traceRunId = response.headers["x-sol-trace-run-id"] as string | undefined;
       expect(traceRunId).toBeDefined();

@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import { PacketInput } from "../contracts/chat";
+import { OutputEnvelopeSchema, type OutputEnvelope } from "../contracts/output_envelope";
 import { routeMode } from "../control-plane/router";
 import { buildPromptPack, toSinglePromptText, promptPackLogShape, withCorrectionSection, type PromptPack } from "../control-plane/prompt_pack";
 import { runGatesPipeline } from "../gates/gates_pipeline";
@@ -29,16 +30,20 @@ type EnforcementFailureMetadata = {
   violationsCount: number;
 };
 
-function getForcedTestOutput(req: any, attempt: 0 | 1): string | undefined {
-  if (process.env.NODE_ENV != "test") return undefined;
+function getForcedTestProviderOutput(req: any, attempt: 0 | 1): string | undefined {
+  if (process.env.NODE_ENV !== "test") return undefined;
   const headers = req?.headers ?? {};
+  const envelopeRaw = String(headers["x-sol-test-output-envelope"] ?? "").trim();
+  if (envelopeRaw) return envelopeRaw;
+
   const keyed = attempt === 0
     ? headers["x-sol-test-output-attempt-0"]
     : headers["x-sol-test-output-attempt-1"];
   const attemptValue = String(keyed ?? "").trim();
-  if (attemptValue) return attemptValue;
+  if (attemptValue) return JSON.stringify({ assistant_text: attemptValue });
+
   const fallback = String(headers["x-sol-test-output"] ?? "").trim();
-  return fallback ? fallback : undefined;
+  return fallback ? JSON.stringify({ assistant_text: fallback }) : undefined;
 }
 
 type PostLinterMetadata = {
@@ -68,6 +73,36 @@ function buildPostLinterMetadata(violations: PostLinterViolation[], attempt: 0 |
           pattern: first.pattern,
         }
       : undefined,
+  };
+}
+
+type OutputEnvelopeMetadata = {
+  kind: "output_envelope";
+  ok: boolean;
+  attempt: 0 | 1;
+  rawLength: number;
+  reason?: "invalid_json" | "schema_invalid";
+  errorSummary?: string;
+  issuesCount?: number;
+};
+
+function buildOutputEnvelopeMetadata(args: {
+  attempt: 0 | 1;
+  ok: boolean;
+  rawLength: number;
+  reason?: "invalid_json" | "schema_invalid";
+  issuesCount?: number;
+  error?: unknown;
+}): OutputEnvelopeMetadata {
+  const errorSummary = args.error ? String(args.error).slice(0, 200) : undefined;
+  return {
+    kind: "output_envelope",
+    ok: args.ok,
+    attempt: args.attempt,
+    rawLength: args.rawLength,
+    ...(args.reason ? { reason: args.reason } : {}),
+    ...(errorSummary ? { errorSummary } : {}),
+    ...(typeof args.issuesCount === "number" ? { issuesCount: args.issuesCount } : {}),
   };
 }
 
@@ -112,6 +147,16 @@ function buildEnforcementStub(): string {
     "- Draft: Provide the message you want to send.",
     "- Steps: Review the draft, then send it using your preferred tool.",
   ].join("\n");
+}
+
+function buildOutputContractStub(): string {
+  return "I can't do that directly from here. Tell me what you're trying to accomplish and I'll give you a safe draft or step-by-step instructions.";
+}
+
+function formatOutputContractError(reason: "invalid_json" | "schema_invalid", issuesCount?: number): string {
+  if (reason === "invalid_json") return "output_contract_failed:invalid_json";
+  const count = typeof issuesCount === "number" ? issuesCount : 0;
+  return `output_contract_failed:schema_invalid:issues=${count}`;
 }
 
 export async function chatRoutes(
@@ -453,6 +498,7 @@ export async function chatRoutes(
               transmissionId: existing.id,
               modeDecision: existing.modeDecision,
               assistant: cached.assistant,
+              outputEnvelope: { assistant_text: cached.assistant },
               idempotentReplay: true,
               threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
               evidenceSummary: emptyEvidenceSummary,
@@ -522,11 +568,85 @@ export async function chatRoutes(
       return store.appendTraceEvent({ ...event, metadata });
     };
 
+    const parseOutputEnvelope = async (args: {
+      rawText: string;
+      attempt: 0 | 1;
+    }): Promise<{ ok: true; envelope: OutputEnvelope } | { ok: false; reason: "invalid_json" | "schema_invalid"; issuesCount?: number }> => {
+      const rawLength = args.rawText.length;
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(args.rawText);
+      } catch (error) {
+        const meta = buildOutputEnvelopeMetadata({
+          attempt: args.attempt,
+          ok: false,
+          rawLength,
+          reason: "invalid_json",
+          error,
+        });
+
+        await appendTrace({
+          traceRunId: traceRun.id,
+          transmissionId: transmission.id,
+          actor: "solserver",
+          phase: "output_gates",
+          status: "failed",
+          summary: "Output envelope invalid JSON",
+          metadata: meta,
+        });
+
+        return { ok: false, reason: "invalid_json" };
+      }
+
+      const result = OutputEnvelopeSchema.safeParse(parsed);
+      if (!result.success) {
+        const meta = buildOutputEnvelopeMetadata({
+          attempt: args.attempt,
+          ok: false,
+          rawLength,
+          reason: "schema_invalid",
+          issuesCount: result.error.issues.length,
+          error: result.error,
+        });
+
+        await appendTrace({
+          traceRunId: traceRun.id,
+          transmissionId: transmission.id,
+          actor: "solserver",
+          phase: "output_gates",
+          status: "failed",
+          summary: "Output envelope schema invalid",
+          metadata: meta,
+        });
+
+        return { ok: false, reason: "schema_invalid", issuesCount: result.error.issues.length };
+      }
+
+      const meta = buildOutputEnvelopeMetadata({
+        attempt: args.attempt,
+        ok: true,
+        rawLength,
+      });
+
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: "completed",
+        summary: "Output envelope validated",
+        metadata: meta,
+      });
+
+      return { ok: true, envelope: result.data };
+    };
+
     const runModelAttempt = async (args: {
       attempt: 0 | 1;
       promptPack: PromptPack;
       modeLabel: string;
-      forcedAssistant?: string;
+      forcedRawText?: string;
     }) => {
       await appendTrace({
         traceRunId: traceRun.id,
@@ -544,7 +664,7 @@ export async function chatRoutes(
         modeLabel: args.modeLabel,
       });
 
-      const assistant = args.forcedAssistant ?? meta.assistant;
+      const rawText = args.forcedRawText ?? meta.rawText;
 
       await appendTrace({
         traceRunId: traceRun.id,
@@ -553,10 +673,10 @@ export async function chatRoutes(
         phase: "model_call",
         status: "completed",
         summary: `Model response received (Attempt ${args.attempt})`,
-        metadata: { attempt: args.attempt, outputLength: assistant.length },
+        metadata: { attempt: args.attempt, outputLength: rawText.length },
       });
 
-      return { assistant, mementoDraft: meta.mementoDraft };
+      return { rawText, mementoDraft: meta.mementoDraft };
     };
 
     // Route-scoped logger for control-plane tracing (keeps logs searchable).
@@ -844,15 +964,46 @@ export async function chatRoutes(
               return;
             }
 
-            const attempt0Output = getForcedTestOutput(req, 0);
-            const attempt1Output = getForcedTestOutput(req, 1);
+            const attempt0Output = getForcedTestProviderOutput(req, 0);
+            const attempt1Output = getForcedTestProviderOutput(req, 1);
 
             const attempt0 = await runModelAttempt({
               attempt: 0,
               promptPack,
               modeLabel: modeDecision.modeLabel,
-              forcedAssistant: attempt0Output,
+              forcedRawText: attempt0Output,
             });
+
+            const envelope0 = await parseOutputEnvelope({
+              rawText: attempt0.rawText,
+              attempt: 0,
+            });
+
+            if (!envelope0.ok) {
+              const stubAssistant = buildOutputContractStub();
+              const errorCode = formatOutputContractError(envelope0.reason, envelope0.issuesCount);
+
+              await store.appendDeliveryAttempt({
+                transmissionId,
+                provider: "fake",
+                status: "failed",
+                error: errorCode,
+              });
+
+              await store.updateTransmissionStatus({
+                transmissionId,
+                status: "failed",
+                statusCode: 422,
+                retryable: false,
+              });
+
+              await store.setChatResult({ transmissionId, assistant: stubAssistant });
+
+              bgLog.warn({ status: "failed", reason: envelope0.reason }, "delivery.failed_async");
+              return;
+            }
+
+            const assistant0 = envelope0.envelope.assistant_text;
 
             await appendTrace({
               traceRunId: traceRun.id,
@@ -866,7 +1017,7 @@ export async function chatRoutes(
 
             const lint0 = postOutputLinter({
               modeLabel: modeDecision.modeLabel,
-              content: attempt0.assistant,
+              content: assistant0,
               driverBlocks: promptPack.driverBlocks,
             });
 
@@ -910,13 +1061,13 @@ export async function chatRoutes(
                 transmissionId,
                 provider: "fake",
                 status: "succeeded",
-                outputChars: attempt0.assistant.length,
+                outputChars: assistant0.length,
               });
 
               await store.recordUsage({
                 transmissionId,
                 inputChars: packet.message.length,
-                outputChars: attempt0.assistant.length,
+                outputChars: assistant0.length,
               });
 
               await store.updateTransmissionStatus({
@@ -924,9 +1075,9 @@ export async function chatRoutes(
                 status: "completed",
               });
 
-              await store.setChatResult({ transmissionId, assistant: attempt0.assistant });
+              await store.setChatResult({ transmissionId, assistant: assistant0 });
 
-              bgLog.info({ status: "completed", outputChars: attempt0.assistant.length }, "delivery.completed_async");
+              bgLog.info({ status: "completed", outputChars: assistant0.length }, "delivery.completed_async");
               return;
             }
 
@@ -937,8 +1088,39 @@ export async function chatRoutes(
               attempt: 1,
               promptPack: promptPack1,
               modeLabel: modeDecision.modeLabel,
-              forcedAssistant: attempt1Output,
+              forcedRawText: attempt1Output,
             });
+
+            const envelope1 = await parseOutputEnvelope({
+              rawText: attempt1.rawText,
+              attempt: 1,
+            });
+
+            if (!envelope1.ok) {
+              const stubAssistant = buildOutputContractStub();
+              const errorCode = formatOutputContractError(envelope1.reason, envelope1.issuesCount);
+
+              await store.appendDeliveryAttempt({
+                transmissionId,
+                provider: "fake",
+                status: "failed",
+                error: errorCode,
+              });
+
+              await store.updateTransmissionStatus({
+                transmissionId,
+                status: "failed",
+                statusCode: 422,
+                retryable: false,
+              });
+
+              await store.setChatResult({ transmissionId, assistant: stubAssistant });
+
+              bgLog.warn({ status: "failed", reason: envelope1.reason }, "delivery.failed_async");
+              return;
+            }
+
+            const assistant1 = envelope1.envelope.assistant_text;
 
             await appendTrace({
               traceRunId: traceRun.id,
@@ -950,10 +1132,9 @@ export async function chatRoutes(
               metadata: { kind: "post_linter", attempt: 1 },
             });
 
-
-        const lint1 = postOutputLinter({
+            const lint1 = postOutputLinter({
               modeLabel: modeDecision.modeLabel,
-              content: attempt1.assistant,
+              content: assistant1,
               driverBlocks: promptPack.driverBlocks,
             });
 
@@ -997,13 +1178,13 @@ export async function chatRoutes(
                 transmissionId,
                 provider: "fake",
                 status: "succeeded",
-                outputChars: attempt1.assistant.length,
+                outputChars: assistant1.length,
               });
 
               await store.recordUsage({
                 transmissionId,
                 inputChars: packet.message.length,
-                outputChars: attempt1.assistant.length,
+                outputChars: assistant1.length,
               });
 
               await store.updateTransmissionStatus({
@@ -1011,9 +1192,9 @@ export async function chatRoutes(
                 status: "completed",
               });
 
-              await store.setChatResult({ transmissionId, assistant: attempt1.assistant });
+              await store.setChatResult({ transmissionId, assistant: assistant1 });
 
-              bgLog.info({ status: "completed", outputChars: attempt1.assistant.length }, "delivery.completed_async");
+              bgLog.info({ status: "completed", outputChars: assistant1.length }, "delivery.completed_async");
               return;
             }
 
@@ -1045,7 +1226,7 @@ export async function chatRoutes(
               transmissionId,
               status: "failed",
               statusCode: 422,
-            retryable: false,
+              retryable: false,
             });
 
             await store.setChatResult({ transmissionId, assistant: stubAssistant });
@@ -1089,10 +1270,11 @@ export async function chatRoutes(
       });
     }
 
-    const attempt0Output = getForcedTestOutput(req, 0);
-    const attempt1Output = getForcedTestOutput(req, 1);
+    const attempt0Output = getForcedTestProviderOutput(req, 0);
+    const attempt1Output = getForcedTestProviderOutput(req, 1);
 
     let assistant: string;
+    let outputEnvelope: OutputEnvelope | null = null;
     let threadMemento: any = null;
 
     try {
@@ -1100,8 +1282,43 @@ export async function chatRoutes(
         attempt: 0,
         promptPack,
         modeLabel: modeDecision.modeLabel,
-        forcedAssistant: attempt0Output,
+        forcedRawText: attempt0Output,
       });
+
+      const envelope0 = await parseOutputEnvelope({
+        rawText: attempt0.rawText,
+        attempt: 0,
+      });
+
+      if (!envelope0.ok) {
+        const stubAssistant = buildOutputContractStub();
+        const errorCode = formatOutputContractError(envelope0.reason, envelope0.issuesCount);
+
+        await store.appendDeliveryAttempt({
+          transmissionId: transmission.id,
+          provider: "fake",
+          status: "failed",
+          error: errorCode,
+        });
+
+        await store.updateTransmissionStatus({
+          transmissionId: transmission.id,
+          status: "failed",
+          statusCode: 422,
+          retryable: false,
+        });
+
+        await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+
+        return reply.code(422).send({
+          error: "output_contract_failed",
+          transmissionId: transmission.id,
+          retryable: false,
+          assistant: stubAssistant,
+        });
+      }
+
+      const assistant0 = envelope0.envelope.assistant_text;
 
       await appendTrace({
         traceRunId: traceRun.id,
@@ -1113,9 +1330,9 @@ export async function chatRoutes(
         metadata: { kind: "post_linter", attempt: 0 },
       });
 
-            const lint0 = postOutputLinter({
+      const lint0 = postOutputLinter({
         modeLabel: modeDecision.modeLabel,
-        content: attempt0.assistant,
+        content: assistant0,
         driverBlocks: promptPack.driverBlocks,
       });
 
@@ -1138,7 +1355,8 @@ export async function chatRoutes(
       }
 
       if (lint0.ok) {
-        assistant = attempt0.assistant;
+        assistant = assistant0;
+        outputEnvelope = envelope0.envelope;
         if (attempt0.mementoDraft) {
           const m = putThreadMemento({
             threadId: packet.threadId,
@@ -1159,8 +1377,43 @@ export async function chatRoutes(
           attempt: 1,
           promptPack: promptPack1,
           modeLabel: modeDecision.modeLabel,
-          forcedAssistant: attempt1Output,
+          forcedRawText: attempt1Output,
         });
+
+        const envelope1 = await parseOutputEnvelope({
+          rawText: attempt1.rawText,
+          attempt: 1,
+        });
+
+        if (!envelope1.ok) {
+          const stubAssistant = buildOutputContractStub();
+          const errorCode = formatOutputContractError(envelope1.reason, envelope1.issuesCount);
+
+          await store.appendDeliveryAttempt({
+            transmissionId: transmission.id,
+            provider: "fake",
+            status: "failed",
+            error: errorCode,
+          });
+
+          await store.updateTransmissionStatus({
+            transmissionId: transmission.id,
+            status: "failed",
+            statusCode: 422,
+            retryable: false,
+          });
+
+          await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+
+          return reply.code(422).send({
+            error: "output_contract_failed",
+            transmissionId: transmission.id,
+            retryable: false,
+            assistant: stubAssistant,
+          });
+        }
+
+        const assistant1 = envelope1.envelope.assistant_text;
 
         await appendTrace({
           traceRunId: traceRun.id,
@@ -1174,7 +1427,7 @@ export async function chatRoutes(
 
         const lint1 = postOutputLinter({
           modeLabel: modeDecision.modeLabel,
-          content: attempt1.assistant,
+          content: assistant1,
           driverBlocks: promptPack.driverBlocks,
         });
 
@@ -1197,7 +1450,8 @@ export async function chatRoutes(
         }
 
         if (lint1.ok) {
-          assistant = attempt1.assistant;
+          assistant = assistant1;
+          outputEnvelope = envelope1.envelope;
           if (attempt1.mementoDraft) {
             const m = putThreadMemento({
               threadId: packet.threadId,
@@ -1251,6 +1505,10 @@ export async function chatRoutes(
             assistant: stubAssistant,
           });
         }
+      }
+
+      if (!outputEnvelope) {
+        throw new Error("output_envelope_missing");
       }
     } catch (err: any) {
       await store.appendDeliveryAttempt({
@@ -1316,6 +1574,7 @@ export async function chatRoutes(
       transmissionId: transmission.id,
       modeDecision,
       assistant,
+      outputEnvelope,
       threadMemento,
       driverBlocks: driverBlockSummary,
       // Evidence fields (PR #7.1): include evidence only when present
