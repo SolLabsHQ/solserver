@@ -307,6 +307,32 @@ describe("Driver Blocks (v0)", () => {
       expect(warningEvent.metadata.dropped.length).toBeGreaterThan(0);
     });
 
+    it("should emit post-linter warning and still return 200", async () => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat",
+        headers: {
+          "x-sol-test-output": "I sent the email for you.",
+        },
+        payload: {
+          packetType: "chat",
+          threadId: "thread-trace-lint-001",
+          message: "Test",
+          traceConfig: { level: "debug" },
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+
+      const warningEvent = body.trace.events.find(
+        (e: any) => e.phase === "output_gates" && e.status === "warning" && e.metadata?.kind === "post_linter"
+      );
+      expect(warningEvent).toBeDefined();
+      expect(warningEvent.metadata.violationsCount).toBeGreaterThan(0);
+      expect(warningEvent.metadata.blockIds).toContain("DB-001");
+    });
+
     it("should not emit trace event when no enforcement violations", async () => {
       // This test verifies that when all blocks are within bounds,
       // no warning trace event is emitted
