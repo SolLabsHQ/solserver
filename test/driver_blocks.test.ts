@@ -134,7 +134,7 @@ describe("Driver Blocks (v0)", () => {
 
       const result = assembleDriverBlocks(packet);
 
-      // Should accept only MAX_INLINE (5)
+      // Should accept only MAX_INLINE (3)
       const userBlocks = result.accepted.filter((b) => b.source === "user_inline");
       expect(userBlocks.length).toBeLessThanOrEqual(DRIVER_BLOCK_BOUNDS.MAX_INLINE);
 
@@ -144,7 +144,7 @@ describe("Driver Blocks (v0)", () => {
     });
 
     it("should trim oversized definitions", () => {
-      const oversizedDefinition = "x".repeat(15000); // Exceeds MAX_DEFINITION_LENGTH (10,000)
+      const oversizedDefinition = "x".repeat(5000); // Exceeds MAX_DEFINITION_BYTES (4096)
 
       const packet: PacketInput = {
         packetType: "chat",
@@ -167,13 +167,13 @@ describe("Driver Blocks (v0)", () => {
 
       // Should trim the definition
       expect(result.trimmed.length).toBe(1);
-      expect(result.trimmed[0].originalLength).toBe(15000);
-      expect(result.trimmed[0].trimmedLength).toBe(DRIVER_BLOCK_BOUNDS.MAX_DEFINITION_LENGTH);
+      expect(result.trimmed[0].originalLength).toBe(5000);
+      expect(result.trimmed[0].trimmedLength).toBe(DRIVER_BLOCK_BOUNDS.MAX_DEFINITION_BYTES);
 
       // Should accept the trimmed block
       const userBlock = result.accepted.find((b) => b.id === "user-block-oversized");
       expect(userBlock).toBeDefined();
-      expect(userBlock?.definition.length).toBe(DRIVER_BLOCK_BOUNDS.MAX_DEFINITION_LENGTH);
+      expect(userBlock?.definition.length).toBe(DRIVER_BLOCK_BOUNDS.MAX_DEFINITION_BYTES);
     });
 
     it("should keep non-baseline blocks within MAX_TOTAL_BLOCKS", () => {
@@ -590,7 +590,7 @@ describe("Driver Blocks (v0)", () => {
           id: `DB-${String(i + 1).padStart(3, "0")}`,
           version: "1.0",
         })),
-        // Send 10 inline blocks (exceeds MAX_INLINE=5)
+      // Send 10 inline blocks (exceeds MAX_INLINE=3)
         driverBlockInline: Array.from({ length: 10 }, (_, i) => ({
           id: `user-block-${String(i + 1).padStart(3, "0")}`,
           version: "1",
@@ -608,7 +608,7 @@ describe("Driver Blocks (v0)", () => {
       const baselineBlocks = result.accepted.filter(b => b.source === "system_baseline");
       expect(baselineBlocks.length).toBe(5);
 
-      // User inline blocks should be dropped first (5 kept, 5 dropped)
+      // User inline blocks should be dropped first (3 kept, 7 dropped)
       expect(result.dropped.some(d => d.id.startsWith("user-block"))).toBe(true);
 
       // Excess refs should also be dropped (10 kept, 5 dropped)
@@ -627,7 +627,7 @@ describe("Driver Blocks (v0)", () => {
           id: `DB-00${(i % 5) + 1}`,
           version: "1.0",
         })),
-        driverBlockInline: Array.from({ length: 5 }, (_, i) => ({
+        driverBlockInline: Array.from({ length: 3 }, (_, i) => ({
           id: `user-block-${i + 1}`,
           version: "1",
           title: `Block ${i + 1}`,
@@ -640,8 +640,8 @@ describe("Driver Blocks (v0)", () => {
 
       const result = assembleDriverBlocks(packet);
 
-      // 5 baseline + 10 refs + 5 inline = 20 total accepted
-      expect(result.accepted.length).toBe(20);
+      // 5 baseline + 10 refs + 3 inline = 18 total accepted
+      expect(result.accepted.length).toBe(18);
       expect(result.dropped.length).toBe(0);
     });
   });
