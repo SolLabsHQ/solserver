@@ -781,6 +781,7 @@ export async function chatRoutes(
           status: "failed",
         });
 
+        log.info({ evt: "chat.responded", statusCode: 400, attemptsUsed: 0 }, "chat.responded");
         return reply.code(400).send(error.toJSON());
       }
       throw error;
@@ -850,11 +851,7 @@ export async function chatRoutes(
     log.info({ evt: "gates.completed", gatesOk }, "gates.completed");
 
     // Dev/testing hook: force a 500 when requested.
-    if (simulate) {
-      log.info({ evt: "chat.accepted", simulate }, "chat.accepted");
-    } else {
-      log.info({ evt: "chat.accepted", simulate: "" }, "chat.accepted");
-    }
+    log.info({ evt: "chat.accepted", simulate: Boolean(simulate) }, "chat.accepted");
     if (simulate === "500") {
       await store.appendDeliveryAttempt({
         transmissionId: transmission.id,
@@ -983,6 +980,7 @@ export async function chatRoutes(
           threadId: packet.threadId,
           clientRequestId: packet.clientRequestId ?? undefined,
           modeLabel: modeDecision?.modeLabel ?? undefined,
+          traceRunId: traceRun.id,
           async: true,
         });
 
