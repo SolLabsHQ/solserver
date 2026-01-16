@@ -39,6 +39,8 @@ describe("OutputEnvelope v0-min", () => {
     const body = response.json();
     expect(body.outputEnvelope).toBeDefined();
     expect(body.outputEnvelope.assistant_text).toBe(body.assistant);
+    expect(response.headers["x-sol-transmission-id"]).toBeTruthy();
+    expect(response.headers["x-sol-trace-run-id"]).toBeTruthy();
   });
 
   it("omits outputEnvelope on output_contract_failed 422", async () => {
@@ -61,6 +63,8 @@ describe("OutputEnvelope v0-min", () => {
     expect(body.retryable).toBe(false);
     expect(body.assistant).toBe(OUTPUT_CONTRACT_STUB);
     expect(body.outputEnvelope).toBeUndefined();
+    expect(response.headers["x-sol-transmission-id"]).toBeTruthy();
+    expect(response.headers["x-sol-trace-run-id"]).toBeTruthy();
   });
 
   it("persists output_contract_failed in async completion", async () => {
@@ -82,6 +86,8 @@ describe("OutputEnvelope v0-min", () => {
     const body = response.json();
     const transmissionId = body.transmissionId as string;
     expect(transmissionId).toBeTruthy();
+    expect(response.headers["x-sol-transmission-id"]).toBeTruthy();
+    expect(response.headers["x-sol-trace-run-id"]).toBeTruthy();
 
     await new Promise((resolve) => setTimeout(resolve, 900));
 

@@ -91,13 +91,22 @@ describe("Gates Pipeline", () => {
     expect(intentRisk).toBeDefined();
     expect(lattice).toBeDefined();
 
-    const ordered = traceEvents.filter((event) =>
-      ["evidence_intake", "gate_normalize_modality", "gate_intent_risk", "gate_lattice"].includes(event.phase)
-    );
+    const gatePhases = [
+      "evidence_intake",
+      "gate_normalize_modality",
+      "gate_intent_risk",
+      "gate_lattice",
+    ];
+    const ordered = traceEvents.filter((event) => gatePhases.includes(event.phase));
     const seqs = ordered.map((event) => event.metadata?.seq);
     expect(seqs.every((seq) => Number.isFinite(seq))).toBe(true);
     for (let i = 1; i < seqs.length; i++) {
       expect(seqs[i]).toBeGreaterThan(seqs[i - 1]);
+    }
+    // Ensure the filtered ordering matches the order in the full trace.
+    const indices = ordered.map((event) => traceEvents.indexOf(event));
+    for (let i = 1; i < indices.length; i++) {
+      expect(indices[i]).toBeGreaterThan(indices[i - 1]);
     }
     expect(ordered.map((event) => event.phase)).toEqual([
       "evidence_intake",

@@ -467,7 +467,12 @@ export async function chatRoutes(
     }
 
     const packet = parsed.data;
+    const simulate = String((req.headers as any)["x-sol-simulate-status"] ?? "");
     const emptyEvidenceSummary = { captures: 0, supports: 0, claims: 0, warnings: 0 };
+
+    const setTransmissionHeader = (transmissionId: string) => {
+      reply.header("x-sol-transmission-id", transmissionId);
+    };
 
     // --- Idempotency + retry semantics ---
     // If clientRequestId is provided, we dedupe retries. Behavior by stored status:
@@ -483,6 +488,7 @@ export async function chatRoutes(
       if (existing) {
         // Guard: same idempotency key must not be reused for a different payload.
         if (existing.threadId !== packet.threadId || existing.message !== packet.message) {
+          setTransmissionHeader(existing.id);
           return reply.code(409).send({
             error: "idempotency_conflict",
             transmissionId: existing.id,
@@ -493,6 +499,7 @@ export async function chatRoutes(
         if (existing.status === "completed") {
           const cached = await store.getChatResult(existing.id);
           if (cached) {
+            setTransmissionHeader(existing.id);
             return {
               ok: true,
               transmissionId: existing.id,
@@ -506,6 +513,7 @@ export async function chatRoutes(
           }
 
           // Completed but no cached assistant (shouldn't happen) => treat as pending.
+          setTransmissionHeader(existing.id);
           return reply.code(202).send({
             ok: true,
             transmissionId: existing.id,
@@ -519,6 +527,7 @@ export async function chatRoutes(
 
         // Created: treat as in-flight/pending.
         if (existing.status === "created") {
+          setTransmissionHeader(existing.id);
           return reply.code(202).send({
             ok: true,
             transmissionId: existing.id,
@@ -550,7 +559,7 @@ export async function chatRoutes(
     }
 
     // Attach transmissionId for HTTP summary logs (onResponse hook reads this header).
-    reply.header("x-sol-transmission-id", transmission.id);
+    setTransmissionHeader(transmission.id);
 
     // --- Trace: Always-on (v0) ---
     // Create trace run for this transmission. Level defaults to "info", client may request "debug".
@@ -647,6 +656,7 @@ export async function chatRoutes(
       promptPack: PromptPack;
       modeLabel: string;
       forcedRawText?: string;
+      logger?: { debug: (obj: any, msg?: string) => void };
     }) => {
       await appendTrace({
         traceRunId: traceRun.id,
@@ -675,6 +685,14 @@ export async function chatRoutes(
         summary: `Model response received (Attempt ${args.attempt})`,
         metadata: { attempt: args.attempt, outputLength: rawText.length },
       });
+
+      if (args.logger) {
+        args.logger.debug({
+          evt: "model_call.completed",
+          attempt: args.attempt,
+          outputLength: rawText.length,
+        }, "model_call.completed");
+      }
 
       return { rawText, mementoDraft: meta.mementoDraft };
     };
@@ -715,6 +733,10 @@ export async function chatRoutes(
         ?.filter((s) => s.type === "text_snippet" && s.snippetText)
         .reduce((sum, s) => sum + (s.snippetText?.length || 0), 0) ?? 0;
 
+      const capturesCount = evidenceIntakeOutput.evidence.captures?.length ?? 0;
+      const supportsCount = evidenceIntakeOutput.evidence.supports?.length ?? 0;
+      const claimsCount = evidenceIntakeOutput.evidence.claims?.length ?? 0;
+
       // Trace event: Evidence intake
       await appendTrace({
         traceRunId: traceRun.id,
@@ -728,12 +750,19 @@ export async function chatRoutes(
           clientCaptures: evidenceIntakeOutput.clientCaptures,
           urlsDetectedCount: evidenceIntakeOutput.urlsDetected.length,
           warningsCount: evidenceIntakeOutput.warnings.length,
-          captureCount: evidenceIntakeOutput.evidence.captures?.length ?? 0,
-          supportCount: evidenceIntakeOutput.evidence.supports?.length ?? 0,
-          claimCount: evidenceIntakeOutput.evidence.claims?.length ?? 0,
+          captureCount: capturesCount,
+          supportCount: supportsCount,
+          claimCount: claimsCount,
           snippetCharTotal,
         },
       });
+
+      log.info({
+        evt: "evidence.intake.completed",
+        capturesCount,
+        supportsCount,
+        claimsCount,
+      }, "evidence.intake.completed");
     } catch (error) {
       // Handle EvidenceValidationError (fail closed with structured 400)
       if (error instanceof EvidenceValidationError) {
@@ -752,6 +781,7 @@ export async function chatRoutes(
           status: "failed",
         });
 
+        log.info({ evt: "chat.responded", statusCode: 400, attemptsUsed: 0 }, "chat.responded");
         return reply.code(400).send(error.toJSON());
       }
       throw error;
@@ -817,11 +847,11 @@ export async function chatRoutes(
       });
     }
 
+    const gatesOk = gatesOutput.results.every((r) => r.status === "pass");
+    log.info({ evt: "gates.completed", gatesOk }, "gates.completed");
+
     // Dev/testing hook: force a 500 when requested.
-    const simulate = String((req.headers as any)["x-sol-simulate-status"] ?? "");
-    if (simulate) {
-      log.info({ simulate }, "simulate_status");
-    }
+    log.info({ evt: "chat.accepted", simulate: Boolean(simulate) }, "chat.accepted");
     if (simulate === "500") {
       await store.appendDeliveryAttempt({
         transmissionId: transmission.id,
@@ -835,6 +865,7 @@ export async function chatRoutes(
         status: "failed",
       });
 
+      log.info({ evt: "chat.responded", statusCode: 500, attemptsUsed: 0 }, "chat.responded");
       return reply.code(500).send({
         error: "simulated_failure",
         transmissionId: transmission.id,
@@ -887,6 +918,11 @@ export async function chatRoutes(
     });
 
     log.debug(promptPackLogShape(promptPack), "control_plane.prompt_pack");
+    log.info({
+      evt: "prompt_pack.built",
+      driverBlocksCount: promptPack.driverBlocks.length,
+      retrievalCount: retrievalItems.length,
+    }, "prompt_pack.built");
 
     // Provider input for v0: one stable string with headers.
     // We do not log the content here.
@@ -944,8 +980,11 @@ export async function chatRoutes(
           threadId: packet.threadId,
           clientRequestId: packet.clientRequestId ?? undefined,
           modeLabel: modeDecision?.modeLabel ?? undefined,
+          traceRunId: traceRun.id,
           async: true,
         });
+
+        bgLog.info({ evt: "chat.async.started" }, "chat.async.started");
 
         // Small fixed delay is enough for v0 testing. We'll replace with real async provider later.
         const delayMs = 750;
@@ -972,12 +1011,29 @@ export async function chatRoutes(
               promptPack,
               modeLabel: modeDecision.modeLabel,
               forcedRawText: attempt0Output,
+              logger: bgLog,
             });
 
             const envelope0 = await parseOutputEnvelope({
               rawText: attempt0.rawText,
               attempt: 0,
             });
+
+            if (envelope0.ok) {
+              bgLog.debug({
+                evt: "output_envelope.completed",
+                attempt: 0,
+                rawLength: attempt0.rawText.length,
+              }, "output_envelope.completed");
+            } else {
+              bgLog.info({
+                evt: "output_envelope.failed",
+                attempt: 0,
+                reason: envelope0.reason,
+                rawLength: attempt0.rawText.length,
+                ...(typeof envelope0.issuesCount === "number" ? { issuesCount: envelope0.issuesCount } : {}),
+              }, "output_envelope.failed");
+            }
 
             if (!envelope0.ok) {
               const stubAssistant = buildOutputContractStub();
@@ -999,6 +1055,12 @@ export async function chatRoutes(
 
               await store.setChatResult({ transmissionId, assistant: stubAssistant });
 
+              bgLog.info({
+                evt: "simulate.persisted_failure",
+                statusCode: 422,
+                errorCode,
+              }, "simulate.persisted_failure");
+              bgLog.info({ evt: "chat.async.failed", statusCode: 422 }, "chat.async.failed");
               bgLog.warn({ status: "failed", reason: envelope0.reason }, "delivery.failed_async");
               return;
             }
@@ -1034,6 +1096,13 @@ export async function chatRoutes(
                 : `Output linter warning: ${lintMeta0.violationsCount} violations`,
               metadata: lintMeta0,
             });
+
+            bgLog.debug({
+              evt: "post_linter.completed",
+              attempt: 0,
+              ok: lint0.ok,
+              violationsCount: lintMeta0.violationsCount,
+            }, "post_linter.completed");
 
             if (lint0.ok) {
               if (attempt0.mementoDraft) {
@@ -1077,6 +1146,7 @@ export async function chatRoutes(
 
               await store.setChatResult({ transmissionId, assistant: assistant0 });
 
+              bgLog.info({ evt: "chat.async.completed", statusCode: 200, attemptsUsed: 1 }, "chat.async.completed");
               bgLog.info({ status: "completed", outputChars: assistant0.length }, "delivery.completed_async");
               return;
             }
@@ -1089,12 +1159,29 @@ export async function chatRoutes(
               promptPack: promptPack1,
               modeLabel: modeDecision.modeLabel,
               forcedRawText: attempt1Output,
+              logger: bgLog,
             });
 
             const envelope1 = await parseOutputEnvelope({
               rawText: attempt1.rawText,
               attempt: 1,
             });
+
+            if (envelope1.ok) {
+              bgLog.debug({
+                evt: "output_envelope.completed",
+                attempt: 1,
+                rawLength: attempt1.rawText.length,
+              }, "output_envelope.completed");
+            } else {
+              bgLog.info({
+                evt: "output_envelope.failed",
+                attempt: 1,
+                reason: envelope1.reason,
+                rawLength: attempt1.rawText.length,
+                ...(typeof envelope1.issuesCount === "number" ? { issuesCount: envelope1.issuesCount } : {}),
+              }, "output_envelope.failed");
+            }
 
             if (!envelope1.ok) {
               const stubAssistant = buildOutputContractStub();
@@ -1116,6 +1203,12 @@ export async function chatRoutes(
 
               await store.setChatResult({ transmissionId, assistant: stubAssistant });
 
+              bgLog.info({
+                evt: "simulate.persisted_failure",
+                statusCode: 422,
+                errorCode,
+              }, "simulate.persisted_failure");
+              bgLog.info({ evt: "chat.async.failed", statusCode: 422 }, "chat.async.failed");
               bgLog.warn({ status: "failed", reason: envelope1.reason }, "delivery.failed_async");
               return;
             }
@@ -1151,6 +1244,13 @@ export async function chatRoutes(
                 : `Output linter warning: ${lintMeta1.violationsCount} violations`,
               metadata: lintMeta1,
             });
+
+            bgLog.debug({
+              evt: "post_linter.completed",
+              attempt: 1,
+              ok: lint1.ok,
+              violationsCount: lintMeta1.violationsCount,
+            }, "post_linter.completed");
 
             if (lint1.ok) {
               if (attempt1.mementoDraft) {
@@ -1194,6 +1294,7 @@ export async function chatRoutes(
 
               await store.setChatResult({ transmissionId, assistant: assistant1 });
 
+              bgLog.info({ evt: "chat.async.completed", statusCode: 200, attemptsUsed: 2 }, "chat.async.completed");
               bgLog.info({ status: "completed", outputChars: assistant1.length }, "delivery.completed_async");
               return;
             }
@@ -1215,6 +1316,12 @@ export async function chatRoutes(
               } satisfies EnforcementFailureMetadata,
             });
 
+            bgLog.info({
+              evt: "enforcement.failed",
+              attempt: 1,
+              error: "driver_block_enforcement_failed",
+            }, "enforcement.failed");
+
             await store.appendDeliveryAttempt({
               transmissionId,
               provider: "fake",
@@ -1231,6 +1338,7 @@ export async function chatRoutes(
 
             await store.setChatResult({ transmissionId, assistant: stubAssistant });
 
+            bgLog.info({ evt: "chat.async.failed", statusCode: 422 }, "chat.async.failed");
             bgLog.warn({ status: "failed" }, "delivery.failed_async");
           } catch (err: any) {
             const msg = String(err?.message ?? err);
@@ -1247,6 +1355,7 @@ export async function chatRoutes(
               status: "failed",
             });
 
+            bgLog.info({ evt: "chat.async.failed" }, "chat.async.failed");
             bgLog.error({ error: msg }, "provider.failed_async");
           } finally {
             pendingCompletions.delete(transmissionId);
@@ -1255,6 +1364,7 @@ export async function chatRoutes(
 
       }
 
+      log.info({ evt: "chat.responded", statusCode: 202, attemptsUsed: 0 }, "chat.responded");
       return reply.code(202).send({
         ok: true,
         transmissionId,
@@ -1276,6 +1386,7 @@ export async function chatRoutes(
     let assistant: string;
     let outputEnvelope: OutputEnvelope | null = null;
     let threadMemento: any = null;
+    let attemptsUsed = 0;
 
     try {
       const attempt0 = await runModelAttempt({
@@ -1283,12 +1394,29 @@ export async function chatRoutes(
         promptPack,
         modeLabel: modeDecision.modeLabel,
         forcedRawText: attempt0Output,
+        logger: log,
       });
 
       const envelope0 = await parseOutputEnvelope({
         rawText: attempt0.rawText,
         attempt: 0,
       });
+
+      if (envelope0.ok) {
+        log.debug({
+          evt: "output_envelope.completed",
+          attempt: 0,
+          rawLength: attempt0.rawText.length,
+        }, "output_envelope.completed");
+      } else {
+        log.info({
+          evt: "output_envelope.failed",
+          attempt: 0,
+          reason: envelope0.reason,
+          rawLength: attempt0.rawText.length,
+          ...(typeof envelope0.issuesCount === "number" ? { issuesCount: envelope0.issuesCount } : {}),
+        }, "output_envelope.failed");
+      }
 
       if (!envelope0.ok) {
         const stubAssistant = buildOutputContractStub();
@@ -1310,6 +1438,7 @@ export async function chatRoutes(
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
 
+        log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 1 }, "chat.responded");
         return reply.code(422).send({
           error: "output_contract_failed",
           transmissionId: transmission.id,
@@ -1350,6 +1479,13 @@ export async function chatRoutes(
         metadata: lintMeta0,
       });
 
+      log.debug({
+        evt: "post_linter.completed",
+        attempt: 0,
+        ok: lint0.ok,
+        violationsCount: lintMeta0.violationsCount,
+      }, "post_linter.completed");
+
       if (!lint0.ok) {
         log.warn(lintMeta0, "gate.post_lint_warning");
       }
@@ -1357,6 +1493,7 @@ export async function chatRoutes(
       if (lint0.ok) {
         assistant = assistant0;
         outputEnvelope = envelope0.envelope;
+        attemptsUsed = 1;
         if (attempt0.mementoDraft) {
           const m = putThreadMemento({
             threadId: packet.threadId,
@@ -1373,21 +1510,38 @@ export async function chatRoutes(
         const correctionText = buildCorrectionText(lint0.violations, promptPack.driverBlocks);
         const promptPack1 = withCorrectionSection(promptPack, correctionText);
 
-        const attempt1 = await runModelAttempt({
-          attempt: 1,
-          promptPack: promptPack1,
-          modeLabel: modeDecision.modeLabel,
-          forcedRawText: attempt1Output,
-        });
+      const attempt1 = await runModelAttempt({
+        attempt: 1,
+        promptPack: promptPack1,
+        modeLabel: modeDecision.modeLabel,
+        forcedRawText: attempt1Output,
+        logger: log,
+      });
 
-        const envelope1 = await parseOutputEnvelope({
-          rawText: attempt1.rawText,
-          attempt: 1,
-        });
+      const envelope1 = await parseOutputEnvelope({
+        rawText: attempt1.rawText,
+        attempt: 1,
+      });
 
-        if (!envelope1.ok) {
-          const stubAssistant = buildOutputContractStub();
-          const errorCode = formatOutputContractError(envelope1.reason, envelope1.issuesCount);
+      if (envelope1.ok) {
+        log.debug({
+          evt: "output_envelope.completed",
+          attempt: 1,
+          rawLength: attempt1.rawText.length,
+        }, "output_envelope.completed");
+      } else {
+        log.info({
+          evt: "output_envelope.failed",
+          attempt: 1,
+          reason: envelope1.reason,
+          rawLength: attempt1.rawText.length,
+          ...(typeof envelope1.issuesCount === "number" ? { issuesCount: envelope1.issuesCount } : {}),
+        }, "output_envelope.failed");
+      }
+
+      if (!envelope1.ok) {
+        const stubAssistant = buildOutputContractStub();
+        const errorCode = formatOutputContractError(envelope1.reason, envelope1.issuesCount);
 
           await store.appendDeliveryAttempt({
             transmissionId: transmission.id,
@@ -1403,13 +1557,14 @@ export async function chatRoutes(
             retryable: false,
           });
 
-          await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+        await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
 
-          return reply.code(422).send({
-            error: "output_contract_failed",
-            transmissionId: transmission.id,
-            retryable: false,
-            assistant: stubAssistant,
+        log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 2 }, "chat.responded");
+        return reply.code(422).send({
+          error: "output_contract_failed",
+          transmissionId: transmission.id,
+          retryable: false,
+          assistant: stubAssistant,
           });
         }
 
@@ -1445,6 +1600,13 @@ export async function chatRoutes(
           metadata: lintMeta1,
         });
 
+        log.debug({
+          evt: "post_linter.completed",
+          attempt: 1,
+          ok: lint1.ok,
+          violationsCount: lintMeta1.violationsCount,
+        }, "post_linter.completed");
+
         if (!lint1.ok) {
           log.warn(lintMeta1, "gate.post_lint_warning");
         }
@@ -1452,6 +1614,7 @@ export async function chatRoutes(
         if (lint1.ok) {
           assistant = assistant1;
           outputEnvelope = envelope1.envelope;
+          attemptsUsed = 2;
           if (attempt1.mementoDraft) {
             const m = putThreadMemento({
               threadId: packet.threadId,
@@ -1482,6 +1645,12 @@ export async function chatRoutes(
             } satisfies EnforcementFailureMetadata,
           });
 
+          log.info({
+            evt: "enforcement.failed",
+            attempt: 1,
+            error: "driver_block_enforcement_failed",
+          }, "enforcement.failed");
+
           await store.appendDeliveryAttempt({
             transmissionId: transmission.id,
             provider: "fake",
@@ -1498,6 +1667,7 @@ export async function chatRoutes(
 
           await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
 
+          log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 2 }, "chat.responded");
           return reply.code(422).send({
             error: "driver_block_enforcement_failed",
             transmissionId: transmission.id,
@@ -1569,6 +1739,7 @@ export async function chatRoutes(
     const eventCount = traceSummary?.eventCount
       ?? (traceLevel === "debug" ? traceEvents.length : 0);
 
+    log.info({ evt: "chat.responded", statusCode: 200, attemptsUsed }, "chat.responded");
     return {
       ok: true,
       transmissionId: transmission.id,
