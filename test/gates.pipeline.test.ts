@@ -130,6 +130,9 @@ describe("Gates Pipeline", () => {
     expect(response.statusCode).toBe(200);
     const body = JSON.parse(response.body);
     expect(body.outputEnvelope?.meta?.claims?.length ?? 0).toBeGreaterThan(0);
+    expect(body.outputEnvelope?.meta?.evidence_pack_id).toBe("pack-001");
+    expect(body.outputEnvelope?.meta?.used_evidence_ids).toEqual(["ev-001"]);
+    expect(body.outputEnvelope?.meta?.claims?.[0]?.evidence_refs?.[0]?.evidence_id).toBe("ev-001");
 
     const traceEvents = await store.getTraceEvents(body.trace.traceRunId, { limit: 200 });
     const providerEvent = traceEvents.find((e) => e.metadata?.kind === "evidence_provider");
@@ -140,6 +143,38 @@ describe("Gates Pipeline", () => {
       forced: true,
       provider: "stub",
     });
+  });
+
+  it("should resolve evidence provider before compose_request starts", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      payload: {
+        threadId: "test-thread-evidence-ordering",
+        message: "hello",
+        traceConfig: { level: "debug", forceEvidence: true },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body);
+
+    const traceEvents = await store.getTraceEvents(body.trace.traceRunId, { limit: 200 });
+    const providerIndex = traceEvents.findIndex(
+      (e) => e.phase === "output_gates" && e.metadata?.kind === "evidence_provider"
+    );
+    const composeStartIndex = traceEvents.findIndex(
+      (e) => e.phase === "compose_request" && e.status === "started"
+    );
+    const composeCompleteIndex = traceEvents.findIndex(
+      (e) => e.phase === "compose_request" && e.status === "completed"
+    );
+
+    expect(providerIndex).toBeGreaterThan(-1);
+    expect(composeStartIndex).toBeGreaterThan(-1);
+    expect(composeCompleteIndex).toBeGreaterThan(-1);
+    expect(providerIndex).toBeLessThan(composeStartIndex);
+    expect(providerIndex).toBeLessThan(composeCompleteIndex);
   });
 
   it("should skip evidence provider on hello without forceEvidence", async () => {

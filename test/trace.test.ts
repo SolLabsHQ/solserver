@@ -161,6 +161,45 @@ describe("Trace (v0)", () => {
     expect(phases).toContain("compose_request");
     expect(phases).toContain("model_call");
     expect(phases).toContain("output_gates");
+
+    const modelEvents = events.filter((e: any) => e.phase === "model_call");
+    expect(modelEvents.length).toBeGreaterThan(0);
+    modelEvents.forEach((event: any) => {
+      expect(Number.isFinite(event.metadata?.attempt)).toBe(true);
+    });
+  });
+
+  it("captures model IO previews when TRACE_CAPTURE_MODEL_IO is enabled", async () => {
+    const prev = process.env.TRACE_CAPTURE_MODEL_IO;
+    process.env.TRACE_CAPTURE_MODEL_IO = "1";
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat",
+        payload: {
+          packetType: "chat",
+          threadId: "thread-trace-io-1",
+          message: "Test message for IO previews",
+          traceConfig: { level: "debug" },
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      const events = body.trace.events;
+      const modelCompleted = events.find((e: any) => e.phase === "model_call" && e.status === "completed");
+
+      expect(modelCompleted).toBeDefined();
+      expect(modelCompleted.metadata?.prompt_preview).toBeDefined();
+      expect(modelCompleted.metadata?.response_preview).toBeDefined();
+    } finally {
+      if (prev === undefined) {
+        delete process.env.TRACE_CAPTURE_MODEL_IO;
+      } else {
+        process.env.TRACE_CAPTURE_MODEL_IO = prev;
+      }
+    }
   });
 
   it("should limit debug events to 50 (bounded)", async () => {

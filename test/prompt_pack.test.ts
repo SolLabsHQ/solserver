@@ -40,3 +40,18 @@ describe("PromptPack correction section", () => {
     expect(updated.sections.map((s) => s.id)).toEqual(pack.sections.map((s) => s.id));
   });
 });
+
+describe("PromptPack evidence guidance", () => {
+  it("includes evidence claims guidance and budgets in the law section", () => {
+    const pack = buildPromptPack({
+      packet: basePacket,
+      modeDecision: baseModeDecision,
+      retrievalItems: [],
+    });
+
+    const law = pack.sections.find((s) => s.id === "law")?.content ?? "";
+    expect(law).toContain("If an EvidencePack is provided, include meta.claims[]");
+    expect(law).toContain("If no EvidencePack is provided, omit meta.claims.");
+    expect(law).toContain("Budgets: max claims=8, max refs/claim=4, max total refs=20.");
+  });
+});
