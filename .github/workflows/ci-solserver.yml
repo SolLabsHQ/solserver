@@ -36,4 +36,22 @@ jobs:
       - name: Run tests
         env:
           CI: true
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'fake' }}
+          EVIDENCE_PROVIDER: ${{ vars.EVIDENCE_PROVIDER || 'stub' }}
+          EVIDENCE_PROVIDER_FORCE: ${{ vars.EVIDENCE_PROVIDER_FORCE || '0' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || 'https://api.openai.com/v1' }}
+          RUN_OPENAI_INTEGRATION: ${{ vars.RUN_OPENAI_INTEGRATION || '0' }}
+          CONTROL_PLANE_DB_PATH: ${{ vars.CONTROL_PLANE_DB_PATH || './data/control_plane.db' }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL || 'info' }}
+          PINO_PRETTY: ${{ vars.PINO_PRETTY || '0' }}
+          TRACE_CAPTURE_MODEL_IO: ${{ vars.TRACE_CAPTURE_MODEL_IO || '0' }}
+          SOL_ENV: ${{ vars.SOL_ENV || 'local' }}
+          SOL_MODEL_DEFAULT: ${{ vars.SOL_MODEL_DEFAULT }}
+          SOL_MODEL_LOCAL: ${{ vars.SOL_MODEL_LOCAL }}
+          SOL_MODEL_FLY_DEV: ${{ vars.SOL_MODEL_FLY_DEV }}
+          SOL_MODEL_FLY_STAGING: ${{ vars.SOL_MODEL_FLY_STAGING }}
+          SOL_MODEL_PROD: ${{ vars.SOL_MODEL_PROD }}
+          SOL_ALLOW_MODEL_OVERRIDE: ${{ vars.SOL_ALLOW_MODEL_OVERRIDE || '0' }}
         run: npm test
