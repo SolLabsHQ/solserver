@@ -83,6 +83,7 @@ describe("Evidence output gates (v0)", () => {
     const body = response.json();
     expect(body.outputEnvelope?.meta?.evidence_pack_id).toBe("pack-001");
     expect(body.outputEnvelope?.meta?.used_evidence_ids).toEqual(["ev-001", "ev-002"]);
+    expect(body.outputEnvelope?.meta?.meta_version).toBe("v1");
     expect(body.evidenceSummary?.claims).toBe(body.outputEnvelope?.meta?.claims?.length ?? 0);
 
     const traceEvents = await store.getTraceEvents(body.trace.traceRunId, { limit: 200 });

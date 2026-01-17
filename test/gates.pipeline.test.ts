@@ -132,6 +132,7 @@ describe("Gates Pipeline", () => {
     expect(body.outputEnvelope?.meta?.claims?.length ?? 0).toBeGreaterThan(0);
     expect(body.outputEnvelope?.meta?.evidence_pack_id).toBe("pack-001");
     expect(body.outputEnvelope?.meta?.used_evidence_ids).toEqual(["ev-001"]);
+    expect(body.outputEnvelope?.meta?.meta_version).toBe("v1");
     expect(body.outputEnvelope?.meta?.claims?.[0]?.evidence_refs?.[0]?.evidence_id).toBe("ev-001");
 
     const traceEvents = await store.getTraceEvents(body.trace.traceRunId, { limit: 200 });

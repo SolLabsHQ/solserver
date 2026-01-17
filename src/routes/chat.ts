@@ -216,13 +216,17 @@ function applyEvidenceMeta(envelope: OutputEnvelope, evidencePack: EvidencePack 
   if (!envelope.meta && claims.length === 0 && !evidencePack) return envelope;
 
   const meta = { ...(envelope.meta ?? {}) };
-  const derivedIds = deriveUsedEvidenceIds(claims);
-  if (claims.length > 0 || envelope.meta?.used_evidence_ids) {
-    meta.used_evidence_ids = derivedIds;
+  if (claims.length > 0) {
+    meta.used_evidence_ids = deriveUsedEvidenceIds(claims);
+  } else {
+    delete meta.used_evidence_ids;
   }
   if (evidencePack) {
     meta.evidence_pack_id = evidencePack.packId;
+  } else {
+    delete meta.evidence_pack_id;
   }
+  meta.meta_version = "v1";
 
   return { ...envelope, meta };
 }

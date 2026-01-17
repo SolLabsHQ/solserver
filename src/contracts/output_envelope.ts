@@ -12,6 +12,7 @@ const ClaimSchema = z.object({
 }).strict();
 
 const OutputEnvelopeMetaSchema = z.object({
+  meta_version: z.literal("v1").optional(),
   claims: z.array(ClaimSchema).min(1).optional(),
   used_evidence_ids: z.array(z.string().min(1)).optional(),
   evidence_pack_id: z.string().min(1).optional(),
