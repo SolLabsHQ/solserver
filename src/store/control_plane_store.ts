@@ -144,6 +144,7 @@ export interface ControlPlaneStore {
   }): Promise<TraceEvent>;
 
   getTraceRun(traceRunId: string): Promise<TraceRun | null>;
+  getTraceRunByTransmission(transmissionId: string): Promise<TraceRun | null>;
   getTraceEvents(traceRunId: string, options?: { limit?: number }): Promise<TraceEvent[]>;
   getTraceSummary(traceRunId: string): Promise<TraceSummary | null>;
 
@@ -335,6 +336,17 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
 
   async getTraceRun(traceRunId: string): Promise<TraceRun | null> {
     return this.traceRuns.get(traceRunId) ?? null;
+  }
+
+  async getTraceRunByTransmission(transmissionId: string): Promise<TraceRun | null> {
+    let latest: TraceRun | null = null;
+    for (const tr of this.traceRuns.values()) {
+      if (tr.transmissionId !== transmissionId) continue;
+      if (!latest || tr.createdAt > latest.createdAt) {
+        latest = tr;
+      }
+    }
+    return latest;
   }
 
   async getTraceEvents(traceRunId: string, options?: { limit?: number }): Promise<TraceEvent[]> {

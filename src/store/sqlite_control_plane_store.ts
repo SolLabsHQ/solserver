@@ -474,6 +474,25 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     };
   }
 
+  async getTraceRunByTransmission(transmissionId: string): Promise<TraceRun | null> {
+    const stmt = this.db.prepare(`
+      SELECT * FROM trace_runs
+      WHERE transmission_id = ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `);
+
+    const row = stmt.get(transmissionId) as any;
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      transmissionId: row.transmission_id,
+      level: row.level,
+      createdAt: row.created_at,
+    };
+  }
+
   async getTraceEvents(
     traceRunId: string,
     options?: { limit?: number }

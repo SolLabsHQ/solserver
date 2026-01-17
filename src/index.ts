@@ -1,6 +1,11 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import pino from "pino";
+import { config as loadEnv } from "dotenv";
+
+if (process.env.NODE_ENV !== "production") {
+  loadEnv();
+}
 
 const isDev = process.env.NODE_ENV !== "production";
 
@@ -60,6 +65,7 @@ app.addHook("onResponse", async (req, reply) => {
 
 import { healthRoutes } from "./routes/healthz";
 import { chatRoutes } from "./routes/chat";
+import { selectModel } from "./providers/provider_config";
 import { SqliteControlPlaneStore } from "./store/sqlite_control_plane_store";
 
 const dbPath =
@@ -75,6 +81,25 @@ async function main() {
   // Routes
   app.register(healthRoutes);
   app.register(chatRoutes, { prefix: "/v1", store });
+
+  const llmProvider =
+    (process.env.LLM_PROVIDER ?? "fake").toLowerCase() === "openai" ? "openai" : "fake";
+  const modelSelection = selectModel({
+    solEnv: process.env.SOL_ENV,
+    nodeEnv: process.env.NODE_ENV,
+    defaultModel: process.env.OPENAI_MODEL ?? "gpt-5-nano",
+  });
+
+  app.log.info(
+    {
+      evt: "llm.provider.config",
+      provider: llmProvider,
+      model: modelSelection.model,
+      source: modelSelection.source,
+      ...(modelSelection.tier ? { tier: modelSelection.tier } : {}),
+    },
+    "llm.provider.config"
+  );
 
   const port = Number(process.env.PORT ?? 3333);
   await app.listen({ port, host: "0.0.0.0" });

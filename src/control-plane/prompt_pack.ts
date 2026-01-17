@@ -1,6 +1,7 @@
 
 
 import type { PacketInput, ModeDecision } from "../contracts/chat";
+import type { EvidencePack, EvidenceItem } from "../evidence/evidence_provider";
 import { assembleDriverBlocks, formatDriverBlocksForPrompt, type AssembledDriverBlock, type DriverBlockEnforcementResult } from "./driver_blocks";
 
 /**
@@ -10,7 +11,7 @@ import { assembleDriverBlocks, formatDriverBlocksForPrompt, type AssembledDriver
 
 export type PromptRole = "system" | "user";
 
-export type PromptSectionId = "law" | "correction" | "retrieval" | "user_message";
+export type PromptSectionId = "law" | "correction" | "retrieval" | "evidence_pack" | "user_message";
 
 export type RetrievalItemKind = "memento" | "bookmark" | "memory";
 
@@ -37,6 +38,7 @@ export type PromptPack = {
   sections: PromptSection[];
   driverBlocks: AssembledDriverBlock[]; // Driver Blocks in strict order
   driverBlockEnforcement: DriverBlockEnforcementResult; // Enforcement results (dropped/trimmed)
+  evidencePack?: EvidencePack | null;
 };
 
 /**
@@ -62,9 +64,18 @@ function buildMountedLaw(modeDecision: ModeDecision, driverBlocksText: string): 
   lines.push("");
 
   lines.push("Output contract (v0 placeholder):");
-  lines.push("- Return a helpful assistant reply.");
-  lines.push("- Prefer explicit assumptions and unknowns when needed.");
-  lines.push("- This will become an OutputEnvelope in Step 7.");
+  lines.push("- Return ONLY a JSON object matching OutputEnvelope.");
+  lines.push("- Required field: assistant_text (string).");
+  lines.push("- assistant_text MUST start with a 'shape' section (3–6 bullets) and include:");
+  lines.push("  Arc | Active | Parked | Decisions | Next (as bullet labels).");
+  lines.push("- If an EvidencePack is provided, include meta.claims[] with evidence_refs.");
+  lines.push("- Each evidence_ref must use evidence_id from the pack; do not invent ids.");
+  lines.push("- If no EvidencePack is provided, omit meta.claims.");
+  lines.push("- Budgets: max claims=8, max refs/claim=4, max total refs=20.");
+  lines.push("Example OutputEnvelope (with evidence):");
+  lines.push('{"assistant_text":"shape:\\n- Arc: ...\\n- Active: ...\\n- Parked: ...\\n- Decisions: ...\\n- Next: ...\\n\\nReceipt: ...\\nRelease: ...\\nNext: ...\\nAssumption: ...","meta":{"claims":[{"claim_id":"cl-1","claim_text":"...","evidence_refs":[{"evidence_id":"ev-001","span_id":"sp-001"}]}]}}');
+  lines.push("Example OutputEnvelope (no evidence):");
+  lines.push('{"assistant_text":"shape:\\n- Arc: ...\\n- Active: ...\\n- Parked: ...\\n- Decisions: ...\\n- Next: ...\\n\\nReceipt: ...\\nRelease: ...\\nNext: ...\\nAssumption: ..."}');
   lines.push("");
 
   lines.push("ModeDecision:");
@@ -88,6 +99,39 @@ function formatRetrievalSection(items: RetrievalItem[]): { content: string; used
   }
 
   return { content: lines.join("\n"), usedIds };
+}
+
+function formatEvidenceItem(item: EvidenceItem): string {
+  const lines: string[] = [];
+  lines.push(`- evidence_id: ${item.evidenceId}`);
+  lines.push(`  kind: ${item.kind}`);
+  if (item.title) lines.push(`  title: ${item.title}`);
+  if (item.sourceUrl) lines.push(`  source_url: ${item.sourceUrl}`);
+  if (item.excerptText) lines.push(`  excerpt_text: ${item.excerptText}`);
+  if (item.spans && item.spans.length > 0) {
+    lines.push("  spans:");
+    for (const span of item.spans) {
+      const spanLine = span.text
+        ? `    - span_id: ${span.spanId} | text: ${span.text}`
+        : `    - span_id: ${span.spanId}`;
+      lines.push(spanLine);
+    }
+  }
+  return lines.join("\n");
+}
+
+function formatEvidencePackForPrompt(pack: EvidencePack | null | undefined): string {
+  if (!pack || pack.items.length === 0) {
+    return "(no evidence pack)";
+  }
+
+  const lines: string[] = [];
+  lines.push(`pack_id: ${pack.packId}`);
+  lines.push("items:");
+  for (const item of pack.items) {
+    lines.push(formatEvidenceItem(item));
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -121,8 +165,9 @@ export function buildPromptPack(args: {
   packet: PacketInput;
   modeDecision: ModeDecision;
   retrievalItems: RetrievalItem[];
+  evidencePack?: EvidencePack | null;
 }): PromptPack {
-  const { packet, modeDecision, retrievalItems } = args;
+  const { packet, modeDecision, retrievalItems, evidencePack } = args;
 
   // Assemble Driver Blocks with enforcement
   const driverBlockEnforcement = assembleDriverBlocks(packet);
@@ -130,6 +175,7 @@ export function buildPromptPack(args: {
 
   const law = buildMountedLaw(modeDecision, driverBlocksText);
   const retrieval = formatRetrievalSection(retrievalItems);
+  const evidencePackText = formatEvidencePackForPrompt(evidencePack);
 
   const sections: PromptSection[] = [
     {
@@ -146,6 +192,12 @@ export function buildPromptPack(args: {
       meta: { used_context_ids: retrieval.usedIds }
     },
     {
+      id: "evidence_pack",
+      role: "system",
+      title: "Evidence Pack",
+      content: evidencePackText
+    },
+    {
       id: "user_message",
       role: "user",
       title: "User message",
@@ -160,6 +212,7 @@ export function buildPromptPack(args: {
     sections,
     driverBlocks: driverBlockEnforcement.accepted,
     driverBlockEnforcement,
+    evidencePack,
   };
 }
 
