@@ -4,9 +4,17 @@ import type { EvidenceSummary, EvidenceWarning } from "./evidence_warning";
 
 export const TraceConfig = z.object({
   level: z.enum(["info", "debug"]).default("info"),
+  forceEvidence: z.boolean().optional(),
 }).strict();
 
 export type TraceConfig = z.infer<typeof TraceConfig>;
+
+export const ProviderHints = z.object({
+  model: z.string().min(1).optional(),
+  tier: z.enum(["nano", "mini", "full"]).optional(),
+}).strict();
+
+export type ProviderHints = z.infer<typeof ProviderHints>;
 
 // Driver Block reference (for system defaults)
 export const DriverBlockRef = z.object({
@@ -97,6 +105,7 @@ export const PacketInput = z.object({
   clientRequestId: z.string().min(1).optional(),
   message: z.string().min(1).max(20_000),
   traceConfig: TraceConfig.optional(),
+  providerHints: ProviderHints.optional(),
   // Driver Blocks (v0) - always additive
   driverBlockRefs: z.array(DriverBlockRef).optional(), // Bounded by enforcement logic
   driverBlockInline: z.array(DriverBlockInline).optional(), // Bounded by enforcement logic

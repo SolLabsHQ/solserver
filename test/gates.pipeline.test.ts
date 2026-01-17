@@ -116,6 +116,134 @@ describe("Gates Pipeline", () => {
     ]);
   });
 
+  it("should force evidence provider on hello when requested", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      payload: {
+        threadId: "test-thread-evidence-force",
+        message: "hello",
+        traceConfig: { level: "debug", forceEvidence: true },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body);
+    expect(body.outputEnvelope?.meta?.claims?.length ?? 0).toBeGreaterThan(0);
+    expect(body.outputEnvelope?.meta?.evidence_pack_id).toBe("pack-001");
+    expect(body.outputEnvelope?.meta?.used_evidence_ids).toEqual(["ev-001"]);
+    expect(body.outputEnvelope?.meta?.meta_version).toBe("v1");
+    expect(body.outputEnvelope?.meta?.claims?.[0]?.evidence_refs?.[0]?.evidence_id).toBe("ev-001");
+
+    const traceEvents = await store.getTraceEvents(body.trace.traceRunId, { limit: 200 });
+    const providerEvent = traceEvents.find((e) => e.metadata?.kind === "evidence_provider");
+    expect(providerEvent).toBeDefined();
+    expect(providerEvent!.metadata).toMatchObject({
+      allowed: true,
+      allowed_reason: "forced_request",
+      forced: true,
+      provider: "stub",
+    });
+  });
+
+  it("should resolve evidence provider before compose_request starts", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      payload: {
+        threadId: "test-thread-evidence-ordering",
+        message: "hello",
+        traceConfig: { level: "debug", forceEvidence: true },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body);
+
+    const traceEvents = await store.getTraceEvents(body.trace.traceRunId, { limit: 200 });
+    const providerIndex = traceEvents.findIndex(
+      (e) => e.phase === "output_gates" && e.metadata?.kind === "evidence_provider"
+    );
+    const composeStartIndex = traceEvents.findIndex(
+      (e) => e.phase === "compose_request" && e.status === "started"
+    );
+    const composeCompleteIndex = traceEvents.findIndex(
+      (e) => e.phase === "compose_request" && e.status === "completed"
+    );
+
+    expect(providerIndex).toBeGreaterThan(-1);
+    expect(composeStartIndex).toBeGreaterThan(-1);
+    expect(composeCompleteIndex).toBeGreaterThan(-1);
+    expect(providerIndex).toBeLessThan(composeStartIndex);
+    expect(providerIndex).toBeLessThan(composeCompleteIndex);
+  });
+
+  it("should skip evidence provider on hello without forceEvidence", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      payload: {
+        threadId: "test-thread-evidence-skip",
+        message: "hello",
+        traceConfig: { level: "debug" },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body);
+    expect(body.outputEnvelope?.meta?.claims).toBeUndefined();
+
+    const traceEvents = await store.getTraceEvents(body.trace.traceRunId, { limit: 200 });
+    const providerEvent = traceEvents.find((e) => e.metadata?.kind === "evidence_provider");
+    expect(providerEvent).toBeDefined();
+    expect(providerEvent!.metadata).toMatchObject({
+      allowed: false,
+      allowed_reason: "no_intent",
+      forced: false,
+      provider: "skipped",
+    });
+  });
+
+  it("should ignore forceEvidence in production", async () => {
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevForce = process.env.EVIDENCE_PROVIDER_FORCE;
+    try {
+      process.env.NODE_ENV = "production";
+      process.env.EVIDENCE_PROVIDER_FORCE = "1";
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat",
+        payload: {
+          threadId: "test-thread-evidence-prod",
+          message: "hello",
+          traceConfig: { level: "debug", forceEvidence: true },
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.outputEnvelope?.meta?.claims).toBeUndefined();
+
+      const traceEvents = await store.getTraceEvents(body.trace.traceRunId, { limit: 200 });
+      const providerEvent = traceEvents.find((e) => e.metadata?.kind === "evidence_provider");
+      expect(providerEvent).toBeDefined();
+      expect(providerEvent!.metadata).toMatchObject({
+        allowed: false,
+        allowed_reason: "forced_ignored_prod",
+        forced: true,
+        provider: "skipped",
+      });
+    } finally {
+      process.env.NODE_ENV = prevNodeEnv;
+      if (prevForce === undefined) {
+        delete process.env.EVIDENCE_PROVIDER_FORCE;
+      } else {
+        process.env.EVIDENCE_PROVIDER_FORCE = prevForce;
+      }
+    }
+  });
+
   it("should validate evidence schema and accept valid evidence", async () => {
     const response = await app.inject({
       method: "POST",
@@ -343,7 +471,7 @@ describe("Gates Pipeline", () => {
     expect(body.evidenceSummary).toEqual({
       captures: 1,
       supports: 1,
-      claims: 0,
+      claims: 1,
       warnings: 0,
     });
 

@@ -19,7 +19,22 @@ import {
 import { postOutputLinter, type PostLinterViolation } from "../gates/post_linter";
 import { runEvidenceIntake } from "../gates/evidence_intake";
 import { EvidenceValidationError } from "../gates/evidence_validation_error";
+import {
+  deriveUsedEvidenceIds,
+  extractClaims,
+  runEvidenceBindingGate,
+  runEvidenceBudgetGate,
+  type EvidenceGateErrorCode,
+} from "../gates/evidence_output_gates";
+import {
+  EvidenceProviderError,
+  type EvidencePack,
+  selectEvidenceProvider,
+  validateEvidencePack,
+} from "../evidence/evidence_provider";
 import { fakeModelReplyWithMeta } from "../providers/fake_model";
+import { openAIModelReplyWithMeta, OpenAIProviderError } from "../providers/openai_model";
+import { selectModel } from "../providers/provider_config";
 import type { ControlPlaneStore } from "../store/control_plane_store";
 import { MemoryControlPlaneStore } from "../store/control_plane_store";
 
@@ -74,6 +89,43 @@ function buildPostLinterMetadata(violations: PostLinterViolation[], attempt: 0 |
         }
       : undefined,
   };
+}
+
+type EvidenceIntentSummary = {
+  captures: number;
+  supports: number;
+  claims: number;
+};
+
+type EvidenceProviderDecision = {
+  allowed: boolean;
+  allowedReason: "forced_request" | "forced_env" | "intent_detected" | "no_intent" | "forced_ignored_prod";
+  forced: boolean;
+};
+
+function resolveEvidenceProviderDecision(args: {
+  intakeSummary: EvidenceIntentSummary;
+  traceConfig?: { forceEvidence?: boolean };
+  nodeEnv?: string;
+  env?: NodeJS.ProcessEnv;
+}): EvidenceProviderDecision {
+  const env = args.env ?? process.env;
+  const nodeEnv = args.nodeEnv ?? env.NODE_ENV;
+  const requestForced = args.traceConfig?.forceEvidence === true;
+  const envForced = env.EVIDENCE_PROVIDER_FORCE === "1";
+  const forced = requestForced || envForced;
+  const allowIntent =
+    args.intakeSummary.captures > 0
+    || args.intakeSummary.supports > 0
+    || args.intakeSummary.claims > 0;
+
+  if (forced && nodeEnv === "production") {
+    return { allowed: false, allowedReason: "forced_ignored_prod", forced: true };
+  }
+  if (requestForced) return { allowed: true, allowedReason: "forced_request", forced: true };
+  if (envForced) return { allowed: true, allowedReason: "forced_env", forced: true };
+  if (allowIntent) return { allowed: true, allowedReason: "intent_detected", forced: false };
+  return { allowed: false, allowedReason: "no_intent", forced: false };
 }
 
 type OutputEnvelopeMetadata = {
@@ -159,6 +211,46 @@ function formatOutputContractError(reason: "invalid_json" | "schema_invalid", is
   return `output_contract_failed:schema_invalid:issues=${count}`;
 }
 
+function applyEvidenceMeta(envelope: OutputEnvelope, evidencePack: EvidencePack | null): OutputEnvelope {
+  const claims = extractClaims(envelope);
+  if (!envelope.meta && claims.length === 0 && !evidencePack) return envelope;
+
+  const meta = { ...(envelope.meta ?? {}) };
+  if (claims.length > 0) {
+    meta.used_evidence_ids = deriveUsedEvidenceIds(claims);
+  } else {
+    delete meta.used_evidence_ids;
+  }
+  if (evidencePack) {
+    meta.evidence_pack_id = evidencePack.packId;
+  } else {
+    delete meta.evidence_pack_id;
+  }
+  meta.meta_version = "v1";
+
+  return { ...envelope, meta };
+}
+
+function buildEvidenceGateFailureResponse(args: {
+  code: EvidenceGateErrorCode;
+  transmissionId: string;
+  traceRunId?: string;
+}): {
+  error: EvidenceGateErrorCode;
+  transmissionId: string;
+  traceRunId?: string;
+  retryable: false;
+  assistant: string;
+} {
+  return {
+    error: args.code,
+    transmissionId: args.transmissionId,
+    ...(args.traceRunId ? { traceRunId: args.traceRunId } : {}),
+    retryable: false,
+    assistant: buildOutputContractStub(),
+  };
+}
+
 export async function chatRoutes(
   app: FastifyInstance,
   opts: { store?: ControlPlaneStore } = {}
@@ -192,6 +284,8 @@ export async function chatRoutes(
     const attempts = await store.getDeliveryAttempts(id);
     const usage = await store.getUsage(id);
     const result = await store.getChatResult(id);
+    const traceRun = await store.getTraceRunByTransmission(id);
+    const traceSummary = traceRun ? await store.getTraceSummary(traceRun.id) : null;
 
     const threadMemento = getLatestThreadMemento(transmission.threadId, { includeDraft: true });
 
@@ -202,6 +296,14 @@ export async function chatRoutes(
       assistant: result?.assistant ?? null,
       attempts,
       usage,
+      trace: traceRun
+        ? {
+            traceRunId: traceRun.id,
+            level: traceRun.level,
+            eventCount: traceSummary?.eventCount ?? 0,
+            phaseCounts: traceSummary?.phaseCounts ?? {},
+          }
+        : null,
       threadMemento,
     };
   });
@@ -577,6 +679,17 @@ export async function chatRoutes(
       return store.appendTraceEvent({ ...event, metadata });
     };
 
+    const llmProvider = (process.env.LLM_PROVIDER ?? "fake").toLowerCase() === "openai"
+      ? "openai"
+      : "fake";
+
+    const modelSelection = selectModel({
+      solEnv: process.env.SOL_ENV,
+      nodeEnv: process.env.NODE_ENV,
+      requestHints: packet.providerHints,
+      defaultModel: process.env.OPENAI_MODEL ?? "gpt-5-nano",
+    });
+
     const parseOutputEnvelope = async (args: {
       rawText: string;
       attempt: 0 | 1;
@@ -651,12 +764,85 @@ export async function chatRoutes(
       return { ok: true, envelope: result.data };
     };
 
+    const runEvidenceOutputGates = async (args: {
+      envelope: OutputEnvelope;
+      attempt: 0 | 1;
+      evidencePack: EvidencePack | null;
+    }): Promise<{ ok: true; envelope: OutputEnvelope } | { ok: false; code: EvidenceGateErrorCode }> => {
+      const normalized = applyEvidenceMeta(args.envelope, args.evidencePack);
+      const claims = extractClaims(normalized);
+
+      const binding = runEvidenceBindingGate(claims, args.evidencePack);
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: binding.ok ? "completed" : "failed",
+        summary: binding.ok ? "Evidence binding passed" : "Evidence binding failed",
+        metadata: {
+          kind: "evidence_binding",
+          ok: binding.ok,
+          attempt: args.attempt,
+          invalidRefsCount: binding.invalidRefsCount,
+          ...(binding.reason ? { reason: binding.reason } : {}),
+        },
+      });
+
+      if (!binding.ok) {
+        return {
+          ok: false,
+          code: binding.reason === "claims_without_evidence"
+            ? "claims_without_evidence"
+            : "evidence_binding_failed",
+        };
+      }
+
+      const budget = runEvidenceBudgetGate(normalized, claims, args.evidencePack);
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: budget.ok ? "completed" : "failed",
+        summary: budget.ok ? "Evidence budget passed" : "Evidence budget failed",
+        metadata: {
+          kind: "evidence_budget",
+          ok: budget.ok,
+          attempt: args.attempt,
+          ...(budget.reason ? { reason: budget.reason } : {}),
+          limits: budget.limits,
+          counts: budget.counts,
+          metaBytes: budget.metaBytes,
+          evidenceBytes: budget.evidenceBytes,
+        },
+      });
+
+      if (!budget.ok) {
+        return { ok: false, code: "evidence_budget_exceeded" };
+      }
+
+      return { ok: true, envelope: normalized };
+    };
+
+    const shouldCaptureModelIo =
+      process.env.TRACE_CAPTURE_MODEL_IO === "1" && process.env.NODE_ENV !== "production";
+
+    const truncatePreview = (value: string, max = 4096) =>
+      value.length > max ? value.slice(0, max) : value;
+
     const runModelAttempt = async (args: {
       attempt: 0 | 1;
       promptPack: PromptPack;
       modeLabel: string;
+      evidencePack?: EvidencePack | null;
       forcedRawText?: string;
-      logger?: { debug: (obj: any, msg?: string) => void };
+      logger?: {
+        debug: (obj: any, msg?: string) => void;
+        info?: (obj: any, msg?: string) => void;
+        warn?: (obj: any, msg?: string) => void;
+        error?: (obj: any, msg?: string) => void;
+      };
     }) => {
       await appendTrace({
         traceRunId: traceRun.id,
@@ -669,12 +855,22 @@ export async function chatRoutes(
       });
 
       const providerInputText = toSinglePromptText(args.promptPack);
-      const meta = await fakeModelReplyWithMeta({
-        userText: providerInputText,
-        modeLabel: args.modeLabel,
-      });
+      const meta = llmProvider === "openai"
+        ? await openAIModelReplyWithMeta({
+            promptText: providerInputText,
+            modeLabel: args.modeLabel,
+            model: modelSelection.model,
+            logger: args.logger,
+          })
+        : await fakeModelReplyWithMeta({
+            userText: providerInputText,
+            modeLabel: args.modeLabel,
+            evidencePack: args.evidencePack,
+          });
 
       const rawText = args.forcedRawText ?? meta.rawText;
+      const promptPreview = shouldCaptureModelIo ? truncatePreview(providerInputText) : undefined;
+      const responsePreview = shouldCaptureModelIo ? truncatePreview(rawText) : undefined;
 
       await appendTrace({
         traceRunId: traceRun.id,
@@ -683,7 +879,13 @@ export async function chatRoutes(
         phase: "model_call",
         status: "completed",
         summary: `Model response received (Attempt ${args.attempt})`,
-        metadata: { attempt: args.attempt, outputLength: rawText.length },
+        metadata: {
+          attempt: args.attempt,
+          outputLength: rawText.length,
+          ...(shouldCaptureModelIo
+            ? { prompt_preview: promptPreview, response_preview: responsePreview }
+            : {}),
+        },
       });
 
       if (args.logger) {
@@ -706,6 +908,21 @@ export async function chatRoutes(
       modeLabel: modeDecision?.modeLabel ?? undefined,
       traceRunId: traceRun.id,
     });
+
+    if (llmProvider === "openai" && !process.env.OPENAI_MODEL) {
+      await store.updateTransmissionStatus({
+        transmissionId: transmission.id,
+        status: "failed",
+      });
+
+      log.info({ evt: "chat.responded", statusCode: 500, attemptsUsed: 0 }, "chat.responded");
+      return reply.code(500).send({
+        error: "openai_model_missing",
+        transmissionId: transmission.id,
+        traceRunId: traceRun.id,
+        retryable: false,
+      });
+    }
 
     log.debug({
       idempotency: Boolean(packet.clientRequestId),
@@ -799,8 +1016,18 @@ export async function chatRoutes(
         modeLabel: modeDecision.modeLabel,
         domainFlags: modeDecision.domainFlags,
         confidence: modeDecision.confidence,
+        modelSelected: modelSelection.model,
+        modelSource: modelSelection.source,
+        ...(modelSelection.tier ? { modelTier: modelSelection.tier } : {}),
       },
     });
+    log.info({
+      evt: "llm.provider.selected",
+      provider: llmProvider,
+      model: modelSelection.model,
+      source: modelSelection.source,
+      ...(modelSelection.tier ? { tier: modelSelection.tier } : {}),
+    }, "llm.provider.selected");
 
     // Run gates pipeline
     const gatesOutput = runGatesPipeline(packet);
@@ -855,7 +1082,7 @@ export async function chatRoutes(
     if (simulate === "500") {
       await store.appendDeliveryAttempt({
         transmissionId: transmission.id,
-        provider: "fake",
+        provider: llmProvider,
         status: "failed",
         error: "simulated_500",
       });
@@ -869,6 +1096,7 @@ export async function chatRoutes(
       return reply.code(500).send({
         error: "simulated_failure",
         transmissionId: transmission.id,
+        traceRunId: traceRun.id,
         retryable: true,
       });
     }
@@ -902,6 +1130,71 @@ export async function chatRoutes(
       metadata: { itemCount: retrievalItems.length },
     });
 
+    const evidenceDecision = resolveEvidenceProviderDecision({
+      intakeSummary: evidenceSummary,
+      traceConfig: packet.traceConfig,
+      nodeEnv: process.env.NODE_ENV,
+      env: process.env,
+    });
+    const allowEvidencePack = evidenceDecision.allowed;
+    const evidenceProviderName = (process.env.EVIDENCE_PROVIDER ?? "stub").toLowerCase();
+    const evidenceProvider = selectEvidenceProvider();
+    let evidencePack: EvidencePack | null = null;
+    try {
+      if (allowEvidencePack) {
+        evidencePack = await evidenceProvider.getEvidencePack({
+          threadId: packet.threadId,
+          query: packet.message,
+          modeLabel: modeDecision.modeLabel,
+        });
+        if (evidencePack) validateEvidencePack(evidencePack);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const errorCode = error instanceof EvidenceProviderError
+        ? "evidence_provider_contract_failed"
+        : "evidence_provider_failed";
+
+      await store.appendDeliveryAttempt({
+        transmissionId: transmission.id,
+        provider: llmProvider,
+        status: "failed",
+        error: errorCode,
+      });
+
+      await store.updateTransmissionStatus({
+        transmissionId: transmission.id,
+        status: "failed",
+      });
+
+      log.error({ error: message, errorCode }, "evidence_provider.failed");
+      log.info({ evt: "chat.responded", statusCode: 500, attemptsUsed: 0 }, "chat.responded");
+      return reply.code(500).send({
+        error: "evidence_provider_failed",
+        transmissionId: transmission.id,
+        traceRunId: traceRun.id,
+        retryable: true,
+      });
+    }
+
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "output_gates",
+      status: "completed",
+      summary: "Evidence provider resolved",
+      metadata: {
+        kind: "evidence_provider",
+        provider: allowEvidencePack ? evidenceProviderName : "skipped",
+        allowed: allowEvidencePack,
+        allowed_reason: evidenceDecision.allowedReason,
+        forced: evidenceDecision.forced,
+        packId: evidencePack?.packId,
+        itemCount: evidencePack?.items.length ?? 0,
+      },
+    });
+
     await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
@@ -915,6 +1208,7 @@ export async function chatRoutes(
       packet,
       modeDecision,
       retrievalItems,
+      evidencePack,
     });
 
     log.debug(promptPackLogShape(promptPack), "control_plane.prompt_pack");
@@ -1010,6 +1304,7 @@ export async function chatRoutes(
               attempt: 0,
               promptPack,
               modeLabel: modeDecision.modeLabel,
+              evidencePack,
               forcedRawText: attempt0Output,
               logger: bgLog,
             });
@@ -1041,7 +1336,7 @@ export async function chatRoutes(
 
               await store.appendDeliveryAttempt({
                 transmissionId,
-                provider: "fake",
+                provider: llmProvider,
                 status: "failed",
                 error: errorCode,
               });
@@ -1065,7 +1360,42 @@ export async function chatRoutes(
               return;
             }
 
-            const assistant0 = envelope0.envelope.assistant_text;
+            const evidenceGate0 = await runEvidenceOutputGates({
+              envelope: envelope0.envelope,
+              attempt: 0,
+              evidencePack,
+            });
+
+            if (!evidenceGate0.ok) {
+              const stubAssistant = buildOutputContractStub();
+
+              await store.appendDeliveryAttempt({
+                transmissionId,
+                provider: llmProvider,
+                status: "failed",
+                error: evidenceGate0.code,
+              });
+
+              await store.updateTransmissionStatus({
+                transmissionId,
+                status: "failed",
+                statusCode: 422,
+                retryable: false,
+              });
+
+              await store.setChatResult({ transmissionId, assistant: stubAssistant });
+
+              bgLog.info({
+                evt: "simulate.persisted_failure",
+                statusCode: 422,
+                errorCode: evidenceGate0.code,
+              }, "simulate.persisted_failure");
+              bgLog.info({ evt: "chat.async.failed", statusCode: 422 }, "chat.async.failed");
+              bgLog.warn({ status: "failed", reason: evidenceGate0.code }, "delivery.failed_async");
+              return;
+            }
+
+            const assistant0 = evidenceGate0.envelope.assistant_text;
 
             await appendTrace({
               traceRunId: traceRun.id,
@@ -1128,7 +1458,7 @@ export async function chatRoutes(
 
               await store.appendDeliveryAttempt({
                 transmissionId,
-                provider: "fake",
+                provider: llmProvider,
                 status: "succeeded",
                 outputChars: assistant0.length,
               });
@@ -1158,6 +1488,7 @@ export async function chatRoutes(
               attempt: 1,
               promptPack: promptPack1,
               modeLabel: modeDecision.modeLabel,
+              evidencePack,
               forcedRawText: attempt1Output,
               logger: bgLog,
             });
@@ -1189,7 +1520,7 @@ export async function chatRoutes(
 
               await store.appendDeliveryAttempt({
                 transmissionId,
-                provider: "fake",
+                provider: llmProvider,
                 status: "failed",
                 error: errorCode,
               });
@@ -1213,7 +1544,42 @@ export async function chatRoutes(
               return;
             }
 
-            const assistant1 = envelope1.envelope.assistant_text;
+            const evidenceGate1 = await runEvidenceOutputGates({
+              envelope: envelope1.envelope,
+              attempt: 1,
+              evidencePack,
+            });
+
+            if (!evidenceGate1.ok) {
+              const stubAssistant = buildOutputContractStub();
+
+              await store.appendDeliveryAttempt({
+                transmissionId,
+                provider: llmProvider,
+                status: "failed",
+                error: evidenceGate1.code,
+              });
+
+              await store.updateTransmissionStatus({
+                transmissionId,
+                status: "failed",
+                statusCode: 422,
+                retryable: false,
+              });
+
+              await store.setChatResult({ transmissionId, assistant: stubAssistant });
+
+              bgLog.info({
+                evt: "simulate.persisted_failure",
+                statusCode: 422,
+                errorCode: evidenceGate1.code,
+              }, "simulate.persisted_failure");
+              bgLog.info({ evt: "chat.async.failed", statusCode: 422 }, "chat.async.failed");
+              bgLog.warn({ status: "failed", reason: evidenceGate1.code }, "delivery.failed_async");
+              return;
+            }
+
+            const assistant1 = evidenceGate1.envelope.assistant_text;
 
             await appendTrace({
               traceRunId: traceRun.id,
@@ -1276,7 +1642,7 @@ export async function chatRoutes(
 
               await store.appendDeliveryAttempt({
                 transmissionId,
-                provider: "fake",
+                provider: llmProvider,
                 status: "succeeded",
                 outputChars: assistant1.length,
               });
@@ -1324,7 +1690,7 @@ export async function chatRoutes(
 
             await store.appendDeliveryAttempt({
               transmissionId,
-              provider: "fake",
+              provider: llmProvider,
               status: "failed",
               error: "driver_block_enforcement_failed",
             });
@@ -1345,7 +1711,7 @@ export async function chatRoutes(
 
             await store.appendDeliveryAttempt({
               transmissionId,
-              provider: "fake",
+              provider: llmProvider,
               status: "failed",
               error: msg,
             });
@@ -1393,6 +1759,7 @@ export async function chatRoutes(
         attempt: 0,
         promptPack,
         modeLabel: modeDecision.modeLabel,
+        evidencePack,
         forcedRawText: attempt0Output,
         logger: log,
       });
@@ -1424,7 +1791,7 @@ export async function chatRoutes(
 
         await store.appendDeliveryAttempt({
           transmissionId: transmission.id,
-          provider: "fake",
+          provider: llmProvider,
           status: "failed",
           error: errorCode,
         });
@@ -1442,12 +1809,47 @@ export async function chatRoutes(
         return reply.code(422).send({
           error: "output_contract_failed",
           transmissionId: transmission.id,
+          traceRunId: traceRun.id,
           retryable: false,
           assistant: stubAssistant,
         });
       }
 
-      const assistant0 = envelope0.envelope.assistant_text;
+      const evidenceGate0 = await runEvidenceOutputGates({
+        envelope: envelope0.envelope,
+        attempt: 0,
+        evidencePack,
+      });
+
+      if (!evidenceGate0.ok) {
+        const stubAssistant = buildOutputContractStub();
+
+        await store.appendDeliveryAttempt({
+          transmissionId: transmission.id,
+          provider: llmProvider,
+          status: "failed",
+          error: evidenceGate0.code,
+        });
+
+        await store.updateTransmissionStatus({
+          transmissionId: transmission.id,
+          status: "failed",
+          statusCode: 422,
+          retryable: false,
+        });
+
+        await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+
+        log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 1 }, "chat.responded");
+        return reply.code(422).send(buildEvidenceGateFailureResponse({
+          code: evidenceGate0.code,
+          transmissionId: transmission.id,
+          traceRunId: traceRun.id,
+        }));
+      }
+
+      const assistant0 = evidenceGate0.envelope.assistant_text;
+      const envelope0Normalized = evidenceGate0.envelope;
 
       await appendTrace({
         traceRunId: traceRun.id,
@@ -1492,7 +1894,7 @@ export async function chatRoutes(
 
       if (lint0.ok) {
         assistant = assistant0;
-        outputEnvelope = envelope0.envelope;
+        outputEnvelope = envelope0Normalized;
         attemptsUsed = 1;
         if (attempt0.mementoDraft) {
           const m = putThreadMemento({
@@ -1514,6 +1916,7 @@ export async function chatRoutes(
         attempt: 1,
         promptPack: promptPack1,
         modeLabel: modeDecision.modeLabel,
+        evidencePack,
         forcedRawText: attempt1Output,
         logger: log,
       });
@@ -1545,7 +1948,7 @@ export async function chatRoutes(
 
           await store.appendDeliveryAttempt({
             transmissionId: transmission.id,
-            provider: "fake",
+            provider: llmProvider,
             status: "failed",
             error: errorCode,
           });
@@ -1563,12 +1966,47 @@ export async function chatRoutes(
         return reply.code(422).send({
           error: "output_contract_failed",
           transmissionId: transmission.id,
+          traceRunId: traceRun.id,
           retryable: false,
           assistant: stubAssistant,
           });
         }
 
-        const assistant1 = envelope1.envelope.assistant_text;
+        const evidenceGate1 = await runEvidenceOutputGates({
+          envelope: envelope1.envelope,
+          attempt: 1,
+          evidencePack,
+        });
+
+        if (!evidenceGate1.ok) {
+          const stubAssistant = buildOutputContractStub();
+
+          await store.appendDeliveryAttempt({
+            transmissionId: transmission.id,
+            provider: llmProvider,
+            status: "failed",
+            error: evidenceGate1.code,
+          });
+
+          await store.updateTransmissionStatus({
+            transmissionId: transmission.id,
+            status: "failed",
+            statusCode: 422,
+            retryable: false,
+          });
+
+          await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+
+          log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 2 }, "chat.responded");
+          return reply.code(422).send(buildEvidenceGateFailureResponse({
+            code: evidenceGate1.code,
+            transmissionId: transmission.id,
+            traceRunId: traceRun.id,
+          }));
+        }
+
+        const assistant1 = evidenceGate1.envelope.assistant_text;
+        const envelope1Normalized = evidenceGate1.envelope;
 
         await appendTrace({
           traceRunId: traceRun.id,
@@ -1613,7 +2051,7 @@ export async function chatRoutes(
 
         if (lint1.ok) {
           assistant = assistant1;
-          outputEnvelope = envelope1.envelope;
+          outputEnvelope = envelope1Normalized;
           attemptsUsed = 2;
           if (attempt1.mementoDraft) {
             const m = putThreadMemento({
@@ -1653,7 +2091,7 @@ export async function chatRoutes(
 
           await store.appendDeliveryAttempt({
             transmissionId: transmission.id,
-            provider: "fake",
+            provider: llmProvider,
             status: "failed",
             error: "driver_block_enforcement_failed",
           });
@@ -1671,6 +2109,7 @@ export async function chatRoutes(
           return reply.code(422).send({
             error: "driver_block_enforcement_failed",
             transmissionId: transmission.id,
+            traceRunId: traceRun.id,
             retryable: false,
             assistant: stubAssistant,
           });
@@ -1683,7 +2122,7 @@ export async function chatRoutes(
     } catch (err: any) {
       await store.appendDeliveryAttempt({
         transmissionId: transmission.id,
-        provider: "fake",
+        provider: llmProvider,
         status: "failed",
         error: String(err?.message ?? err),
       });
@@ -1693,11 +2132,15 @@ export async function chatRoutes(
         status: "failed",
       });
 
+      const statusCode = err instanceof OpenAIProviderError ? err.statusCode : 500;
+      const errorTag = statusCode === 502 ? "provider_upstream_failed" : "provider_failed";
+
       log.error({ error: String(err?.message ?? err) }, "provider.failed");
 
-      return reply.code(500).send({
-        error: "provider_failed",
+      return reply.code(statusCode).send({
+        error: errorTag,
         transmissionId: transmission.id,
+        traceRunId: traceRun.id,
         retryable: true,
       });
     }
@@ -1705,7 +2148,7 @@ export async function chatRoutes(
 
     await store.appendDeliveryAttempt({
       transmissionId: transmission.id,
-      provider: "fake",
+      provider: llmProvider,
       status: "succeeded",
       outputChars: assistant.length,
     });
@@ -1739,6 +2182,11 @@ export async function chatRoutes(
     const eventCount = traceSummary?.eventCount
       ?? (traceLevel === "debug" ? traceEvents.length : 0);
 
+    const responseEvidenceSummary = {
+      ...evidenceSummary,
+      claims: outputEnvelope?.meta?.claims?.length ?? 0,
+    };
+
     log.info({ evt: "chat.responded", statusCode: 200, attemptsUsed }, "chat.responded");
     return {
       ok: true,
@@ -1750,7 +2198,7 @@ export async function chatRoutes(
       driverBlocks: driverBlockSummary,
       // Evidence fields (PR #7.1): include evidence only when present
       ...(hasEvidence ? { evidence: effectiveEvidence } : {}),
-      evidenceSummary,
+      evidenceSummary: responseEvidenceSummary,
       ...(effectiveWarnings.length > 0 ? { evidenceWarnings: effectiveWarnings } : {}),
       trace: {
         traceRunId: traceRun.id,

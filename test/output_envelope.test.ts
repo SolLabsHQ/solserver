@@ -67,6 +67,29 @@ describe("OutputEnvelope v0-min", () => {
     expect(response.headers["x-sol-trace-run-id"]).toBeTruthy();
   });
 
+  it("fails when claims are present but empty", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": JSON.stringify({
+          assistant_text: "shape\nReceipt: ok\nRelease: ok\nNext: ok\nAssumption: ok",
+          meta: { claims: [] },
+        }),
+      },
+      payload: {
+        packetType: "chat",
+        threadId: "thread-output-envelope-004",
+        message: "Test message",
+      },
+    });
+
+    expect(response.statusCode).toBe(422);
+    const body = response.json();
+    expect(body.error).toBe("output_contract_failed");
+    expect(body.outputEnvelope).toBeUndefined();
+  });
+
   it("persists output_contract_failed in async completion", async () => {
     const response = await app.inject({
       method: "POST",
