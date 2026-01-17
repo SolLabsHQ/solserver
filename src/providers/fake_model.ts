@@ -1,16 +1,9 @@
-import type { EvidencePack } from "../evidence/evidence_provider";
-
 export async function fakeModelReply(input: {
   userText: string;
   modeLabel: string;
 }): Promise<string> {
   const lines = [
-    "shape:",
-    `- Arc: ${input.modeLabel} session`,
-    "- Active: Provide a concise response.",
-    "- Parked: None.",
-    "- Decisions: None.",
-    "- Next: Ask for the next request.",
+    `[${input.modeLabel}] shape`,
     "Receipt: Acknowledged.",
     "Release: You are not required to take external actions.",
     "Next: Tell me if you want a draft or steps.",
@@ -84,30 +77,9 @@ function proposeMementoFromPrompt(promptText: string): ThreadMementoDraft | null
 export async function fakeModelReplyWithMeta(input: {
   userText: string;
   modeLabel: string;
-  evidencePack?: EvidencePack | null;
 }): Promise<FakeModelReplyWithMeta> {
   const assistant = await fakeModelReply(input);
-  const claims = input.evidencePack?.items?.length
-    ? [
-        {
-          claim_id: "claim-001",
-          claim_text: "Claim derived from the provided evidence pack.",
-          evidence_refs: [
-            {
-              evidence_id: input.evidencePack.items[0].evidenceId,
-              ...(input.evidencePack.items[0].spans?.[0]?.spanId
-                ? { span_id: input.evidencePack.items[0].spans?.[0]?.spanId }
-                : {}),
-            },
-          ],
-        },
-      ]
-    : undefined;
-
-  const rawText = JSON.stringify({
-    assistant_text: assistant,
-    ...(claims ? { meta: { claims } } : {}),
-  });
+  const rawText = JSON.stringify({ assistant_text: assistant });
   const mementoDraft = proposeMementoFromPrompt(input.userText);
   return { rawText, mementoDraft };
 }

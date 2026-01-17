@@ -44,8 +44,8 @@ describe("Step 6 - PromptPack", () => {
     });
 
     expect(pack.version).toBe("prompt-pack-v0");
-    expect(pack.sections.map((s) => s.id)).toEqual(["law", "retrieval", "evidence_pack", "user_message"]);
-    expect(pack.sections.map((s) => s.role)).toEqual(["system", "system", "system", "user"]);
+    expect(pack.sections.map((s) => s.id)).toEqual(["law", "retrieval", "user_message"]);
+    expect(pack.sections.map((s) => s.role)).toEqual(["system", "system", "user"]);
   });
 
   it("retrieval section is present even when empty", () => {
@@ -78,7 +78,6 @@ describe("Step 6 - PromptPack", () => {
     // Keep this intentionally light so we do not lock to exact law text yet.
     expect(text).toContain("## Mounted law");
     expect(text).toContain("## Retrieved context");
-    expect(text).toContain("## Evidence Pack");
     expect(text).toContain("## User message");
 
     // The packed prompt should be larger than the raw user message.
