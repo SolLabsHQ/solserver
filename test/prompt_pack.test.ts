@@ -26,7 +26,7 @@ describe("PromptPack correction section", () => {
 
     const updated = withCorrectionSection(pack, "Fix the output.");
     const ids = updated.sections.map((s) => s.id);
-    expect(ids).toEqual(["law", "correction", "retrieval", "evidence_pack", "user_message"]);
+    expect(ids).toEqual(["law", "correction", "retrieval", "user_message"]);
   });
 
   it("should return original pack when correction text is empty", () => {
