@@ -62,6 +62,9 @@ export function selectModel(args: SelectModelArgs): ModelSelection {
 
   const laneDefault = DEFAULTS_BY_ENV[solEnv] ?? DEFAULTS_BY_ENV.local;
   let model = envDefault || envLane || args.defaultModel || laneDefault;
+  if (!model) {
+    model = DEFAULTS_BY_ENV.local;
+  }
   let source: ModelSelection["source"] = envDefault || envLane ? "env" : "default";
   let tier: ModelTier | undefined;
 
