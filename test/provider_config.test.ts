@@ -1,7 +1,38 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { selectModel } from "../src/providers/provider_config";
 
+const ENV_KEYS = [
+  "SOL_MODEL_DEFAULT",
+  "SOL_MODEL_LOCAL",
+  "SOL_MODEL_FLY_DEV",
+  "SOL_MODEL_FLY_STAGING",
+  "SOL_MODEL_PROD",
+  "SOL_ALLOW_MODEL_OVERRIDE",
+  "SOL_ENV",
+];
+
 describe("selectModel", () => {
+  let previousEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    previousEnv = {};
+    for (const key of ENV_KEYS) {
+      previousEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      const value = previousEnv[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  });
+
   it("uses lane defaults when no overrides are set", () => {
     const result = selectModel({
       solEnv: "local",
