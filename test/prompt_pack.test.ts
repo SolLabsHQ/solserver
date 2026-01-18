@@ -50,6 +50,7 @@ describe("PromptPack evidence guidance", () => {
     });
 
     const law = pack.sections.find((s) => s.id === "law")?.content ?? "";
+    expect(law).toContain("Return ONLY a JSON object matching OutputEnvelope.");
     expect(law).toContain("If an EvidencePack is provided, include meta.claims[]");
     expect(law).toContain("If no EvidencePack is provided, omit meta.claims.");
     expect(law).toContain("Budgets: max claims=8, max refs/claim=4, max total refs=20.");

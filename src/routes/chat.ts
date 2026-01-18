@@ -133,7 +133,7 @@ type OutputEnvelopeMetadata = {
   ok: boolean;
   attempt: 0 | 1;
   rawLength: number;
-  reason?: "invalid_json" | "schema_invalid";
+  reason?: "invalid_json" | "schema_invalid" | "payload_too_large";
   errorSummary?: string;
   issuesCount?: number;
 };
@@ -142,7 +142,7 @@ function buildOutputEnvelopeMetadata(args: {
   attempt: 0 | 1;
   ok: boolean;
   rawLength: number;
-  reason?: "invalid_json" | "schema_invalid";
+  reason?: "invalid_json" | "schema_invalid" | "payload_too_large";
   issuesCount?: number;
   error?: unknown;
 }): OutputEnvelopeMetadata {
@@ -205,8 +205,12 @@ function buildOutputContractStub(): string {
   return "I can't do that directly from here. Tell me what you're trying to accomplish and I'll give you a safe draft or step-by-step instructions.";
 }
 
-function formatOutputContractError(reason: "invalid_json" | "schema_invalid", issuesCount?: number): string {
+function formatOutputContractError(
+  reason: "invalid_json" | "schema_invalid" | "payload_too_large",
+  issuesCount?: number
+): string {
   if (reason === "invalid_json") return "output_contract_failed:invalid_json";
+  if (reason === "payload_too_large") return "output_contract_failed:payload_too_large";
   const count = typeof issuesCount === "number" ? issuesCount : 0;
   return `output_contract_failed:schema_invalid:issues=${count}`;
 }
@@ -231,6 +235,23 @@ function applyEvidenceMeta(envelope: OutputEnvelope, evidencePack: EvidencePack 
   return { ...envelope, meta };
 }
 
+function normalizeOutputEnvelopeForResponse(envelope: OutputEnvelope): OutputEnvelope {
+  if (!envelope.meta) return envelope;
+
+  const allowedKeys = ["meta_version", "claims", "used_evidence_ids", "evidence_pack_id"] as const;
+  const meta: Partial<OutputEnvelope["meta"]> = {};
+
+  for (const key of allowedKeys) {
+    const value = envelope.meta[key];
+    if (value !== undefined) {
+      meta[key] = value;
+    }
+  }
+
+  return Object.keys(meta).length > 0
+    ? { ...envelope, meta: meta as OutputEnvelope["meta"] }
+    : { ...envelope, meta: undefined };
+}
 function buildEvidenceGateFailureResponse(args: {
   code: EvidenceGateErrorCode;
   transmissionId: string;
@@ -690,11 +711,47 @@ export async function chatRoutes(
       defaultModel: process.env.OPENAI_MODEL ?? "gpt-5-nano",
     });
 
+    const MAX_OUTPUT_ENVELOPE_BYTES = 64 * 1024;
+
+    const getRawByteLength = (text: string): number => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const anyGlobal: any = globalThis as any;
+        if (anyGlobal.Buffer?.byteLength) return anyGlobal.Buffer.byteLength(text, "utf8");
+      } catch {}
+
+      try {
+        return new TextEncoder().encode(text).length;
+      } catch {
+        return text.length;
+      }
+    };
     const parseOutputEnvelope = async (args: {
       rawText: string;
       attempt: 0 | 1;
-    }): Promise<{ ok: true; envelope: OutputEnvelope } | { ok: false; reason: "invalid_json" | "schema_invalid"; issuesCount?: number }> => {
-      const rawLength = args.rawText.length;
+    }): Promise<{ ok: true; envelope: OutputEnvelope } | { ok: false; reason: "invalid_json" | "schema_invalid" | "payload_too_large"; issuesCount?: number }> => {
+      const rawLength = getRawByteLength(args.rawText);
+
+      if (rawLength > MAX_OUTPUT_ENVELOPE_BYTES) {
+        const meta = buildOutputEnvelopeMetadata({
+          attempt: args.attempt,
+          ok: false,
+          rawLength,
+          reason: "payload_too_large",
+        });
+
+        await appendTrace({
+          traceRunId: traceRun.id,
+          transmissionId: transmission.id,
+          actor: "solserver",
+          phase: "output_gates",
+          status: "failed",
+          summary: "Output envelope payload too large",
+          metadata: meta,
+        });
+
+        return { ok: false, reason: "payload_too_large" };
+      }
 
       let parsed: unknown;
       try {
@@ -1773,14 +1830,14 @@ export async function chatRoutes(
         log.debug({
           evt: "output_envelope.completed",
           attempt: 0,
-          rawLength: attempt0.rawText.length,
+          rawLength: getRawByteLength(attempt0.rawText),
         }, "output_envelope.completed");
       } else {
         log.info({
           evt: "output_envelope.failed",
           attempt: 0,
           reason: envelope0.reason,
-          rawLength: attempt0.rawText.length,
+          rawLength: getRawByteLength(attempt0.rawText),
           ...(typeof envelope0.issuesCount === "number" ? { issuesCount: envelope0.issuesCount } : {}),
         }, "output_envelope.failed");
       }
@@ -1849,7 +1906,7 @@ export async function chatRoutes(
       }
 
       const assistant0 = evidenceGate0.envelope.assistant_text;
-      const envelope0Normalized = evidenceGate0.envelope;
+      const envelope0Normalized = normalizeOutputEnvelopeForResponse(evidenceGate0.envelope);
 
       await appendTrace({
         traceRunId: traceRun.id,
@@ -1930,14 +1987,14 @@ export async function chatRoutes(
         log.debug({
           evt: "output_envelope.completed",
           attempt: 1,
-          rawLength: attempt1.rawText.length,
+          rawLength: getRawByteLength(attempt1.rawText),
         }, "output_envelope.completed");
       } else {
         log.info({
           evt: "output_envelope.failed",
           attempt: 1,
           reason: envelope1.reason,
-          rawLength: attempt1.rawText.length,
+          rawLength: getRawByteLength(attempt1.rawText),
           ...(typeof envelope1.issuesCount === "number" ? { issuesCount: envelope1.issuesCount } : {}),
         }, "output_envelope.failed");
       }
@@ -2006,7 +2063,7 @@ export async function chatRoutes(
         }
 
         const assistant1 = evidenceGate1.envelope.assistant_text;
-        const envelope1Normalized = evidenceGate1.envelope;
+        const envelope1Normalized = normalizeOutputEnvelopeForResponse(evidenceGate1.envelope);
 
         await appendTrace({
           traceRunId: traceRun.id,

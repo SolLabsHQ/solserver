@@ -7,6 +7,19 @@ import { MemoryControlPlaneStore } from "../src/store/control_plane_store";
 
 const OUTPUT_CONTRACT_STUB =
   "I can't do that directly from here. Tell me what you're trying to accomplish and I'll give you a safe draft or step-by-step instructions.";
+const SHAPE_ASSISTANT_TEXT = [
+  "shape:",
+  "- Arc: ok",
+  "- Active: ok",
+  "- Parked: ok",
+  "- Decisions: ok",
+  "- Next: ok",
+  "",
+  "Receipt: ok",
+  "Release: ok",
+  "Next: ok",
+  "Assumption: ok",
+].join("\n");
 
 describe("OutputEnvelope v0-min", () => {
   let app: any;
@@ -90,6 +103,62 @@ describe("OutputEnvelope v0-min", () => {
     expect(body.outputEnvelope).toBeUndefined();
   });
 
+  it("drops unknown meta keys from the response payload", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": JSON.stringify({
+          assistant_text: SHAPE_ASSISTANT_TEXT,
+          meta: { meta_version: "v1", unexpected_key: "nope" },
+        }),
+      },
+      payload: {
+        packetType: "chat",
+        threadId: "thread-output-envelope-005",
+        message: "Test message",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.outputEnvelope.meta.meta_version).toBe("v1");
+    expect(body.outputEnvelope.meta.unexpected_key).toBeUndefined();
+  });
+
+  it("fails when raw output exceeds max bytes and records trace reason", async () => {
+    const largeText = "a".repeat(100 * 1024);
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": JSON.stringify({
+          assistant_text: largeText,
+        }),
+      },
+      payload: {
+        packetType: "chat",
+        threadId: "thread-output-envelope-006",
+        message: "Test message",
+        traceConfig: { level: "debug" },
+      },
+    });
+
+    expect(response.statusCode).toBe(422);
+    const body = response.json();
+    expect(body.error).toBe("output_contract_failed");
+    expect(body.outputEnvelope).toBeUndefined();
+
+    const traceRunId = response.headers["x-sol-trace-run-id"] as string;
+    expect(traceRunId).toBeTruthy();
+    const events = await store.getTraceEvents(traceRunId, { limit: 50 });
+    const payloadTooLarge = events.find((e: any) =>
+      e.phase === "output_gates"
+      && e.metadata?.kind === "output_envelope"
+      && e.metadata?.reason === "payload_too_large"
+    );
+    expect(payloadTooLarge).toBeTruthy();
+  });
   it("persists output_contract_failed in async completion", async () => {
     const response = await app.inject({
       method: "POST",
