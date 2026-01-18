@@ -1086,6 +1086,12 @@ export async function chatRoutes(
       ...(modelSelection.tier ? { tier: modelSelection.tier } : {}),
     }, "llm.provider.selected");
 
+    // Ordering Contract (v0): route-level phase sequence is authoritative.
+    // Phases must appear in this order in trace (not necessarily contiguous):
+    // evidence_intake → gate_normalize_modality → gate_intent_risk → gate_lattice
+    // → model_call → output_gates (post_linter + driver_block per-block events).
+    // Tests assert this sequence from persisted trace events.
+    // Note: metadata.seq is global and monotonic; it is not reset per gate.
     // Run gates pipeline
     const gatesOutput = runGatesPipeline(packet);
 
