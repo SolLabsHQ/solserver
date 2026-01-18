@@ -115,7 +115,7 @@ export function postOutputLinter(args: {
       const patternLower = rule.pattern.toLowerCase();
       if (rule.rule === "must-not") {
         if (contentLower.includes(patternLower)) {
-          const violation = {
+          const violation: PostLinterViolation = {
             blockId: block.id,
             rule: "must-not",
             pattern: rule.pattern,
@@ -125,7 +125,7 @@ export function postOutputLinter(args: {
         }
       } else {
         if (!contentLower.includes(patternLower)) {
-          const violation = {
+          const violation: PostLinterViolation = {
             blockId: block.id,
             rule: "must-have",
             pattern: rule.pattern,

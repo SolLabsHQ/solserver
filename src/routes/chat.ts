@@ -286,14 +286,21 @@ function applyEvidenceMeta(
 function normalizeOutputEnvelopeForResponse(envelope: OutputEnvelope): OutputEnvelope {
   if (!envelope.meta) return envelope;
 
-  const allowedKeys = ["meta_version", "claims", "used_evidence_ids", "evidence_pack_id", "capture_suggestion"] as const;
   const meta: Partial<OutputEnvelope["meta"]> = {};
-
-  for (const key of allowedKeys) {
-    const value = envelope.meta[key];
-    if (value !== undefined) {
-      meta[key] = value;
-    }
+  if (envelope.meta.meta_version !== undefined) {
+    meta.meta_version = envelope.meta.meta_version;
+  }
+  if (envelope.meta.claims !== undefined) {
+    meta.claims = envelope.meta.claims;
+  }
+  if (envelope.meta.used_evidence_ids !== undefined) {
+    meta.used_evidence_ids = envelope.meta.used_evidence_ids;
+  }
+  if (envelope.meta.evidence_pack_id !== undefined) {
+    meta.evidence_pack_id = envelope.meta.evidence_pack_id;
+  }
+  if (envelope.meta.capture_suggestion !== undefined) {
+    meta.capture_suggestion = envelope.meta.capture_suggestion;
   }
 
   return Object.keys(meta).length > 0
@@ -329,6 +336,21 @@ export async function chatRoutes(
   // Dev-only async completion guard for simulated 202 (prevents duplicate background timers per transmission).
   const pendingCompletions = new Set<string>();
 
+  app.addHook("preHandler", async (req, reply) => {
+    const apiKey = process.env.SOLSERVER_API_KEY;
+    if (!apiKey) return;
+    if (req.method === "OPTIONS") return;
+
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length).trim()
+      : undefined;
+    if (!token || token !== apiKey) {
+      reply.header("WWW-Authenticate", "Bearer");
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+  });
+
   // Explicit OPTIONS handler for predictable CORS preflight behavior.
   app.options("/chat", async (_req, reply) => reply.code(204).send());
 
@@ -355,6 +377,10 @@ export async function chatRoutes(
     const result = await store.getChatResult(id);
     const traceRun = await store.getTraceRunByTransmission(id);
     const traceSummary = traceRun ? await store.getTraceSummary(traceRun.id) : null;
+
+    if (traceRun) {
+      reply.header("x-sol-trace-run-id", traceRun.id);
+    }
 
     const threadMemento = getLatestThreadMemento(transmission.threadId, { includeDraft: true });
 
