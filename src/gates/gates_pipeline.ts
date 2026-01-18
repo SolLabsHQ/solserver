@@ -4,6 +4,7 @@ import { runNormalizeModality, type NormalizeModalityOutput } from "./normalize_
 import { runIntentRisk, type IntentRiskOutput } from "./intent_risk";
 import { runLattice, type LatticeOutput } from "./lattice";
 import type { GateOutput } from "./gate_interfaces";
+import { extractUrls } from "./url_extraction";
 
 export type GatesPipelineOutput = {
   results: GateOutput[];
@@ -18,22 +19,33 @@ export type GatesPipelineOutput = {
   };
 };
 
-/**
- * Extract URLs from message text using simple regex
- */
-function extractUrlsFromText(text: string): string[] {
-  const urlRegex = /https?:\/\/[^\s]+/gi;
-  return text.match(urlRegex) || [];
+function redactUrlForTrace(urlString: string): string | null {
+  try {
+    const url = new URL(urlString);
+    const hostAndPath = url.host + url.pathname;
+    if (hostAndPath.length > 50) {
+      return hostAndPath.substring(0, 47) + "...";
+    }
+    return hostAndPath;
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Build gate input from packet
  */
-function buildGateInput(packet: PacketInput): GateInput {
+function buildGateInput(packet: PacketInput): {
+  gateInput: GateInput;
+  inlineUrls: string[];
+  urlWarningsCount: number;
+} {
   const messageText = packet.message;
 
-  // Extract URLs from message text
-  const inlineUrls = extractUrlsFromText(messageText);
+  // Extract URLs from message text (robust, fail-open)
+  const extracted = extractUrls(messageText);
+  const inlineUrls = extracted.urls;
+  const urlWarningsCount = extracted.warnings.length;
 
   // Extract URLs from evidence captures
   const captureUrls = packet.evidence?.captures?.map((c) => c.url) || [];
@@ -53,14 +65,18 @@ function buildGateInput(packet: PacketInput): GateInput {
       .reduce((sum, s) => sum + (s.snippetText?.length || 0), 0) || 0;
 
   return {
-    messageText,
-    urls: allUrls,
-    evidenceCounts: {
-      captureCount,
-      supportCount,
-      claimCount,
-      snippetCharTotal,
+    gateInput: {
+      messageText,
+      urls: allUrls,
+      evidenceCounts: {
+        captureCount,
+        supportCount,
+        claimCount,
+        snippetCharTotal,
+      },
     },
+    inlineUrls,
+    urlWarningsCount,
   };
 }
 
@@ -69,11 +85,17 @@ function buildGateInput(packet: PacketInput): GateInput {
  *
  * Ordering:
  * 1. Normalize/Modality
- * 2. Intent/Risk
- * 3. Lattice (stub)
+ * 2. URL Extraction
+ * 3. Intent/Risk
+ * 4. Lattice (stub)
  */
 export function runGatesPipeline(packet: PacketInput): GatesPipelineOutput {
-  const gateInput = buildGateInput(packet);
+  const { gateInput, inlineUrls, urlWarningsCount } = buildGateInput(packet);
+  const captureUrls = packet.evidence?.captures?.map((c) => c.url) || [];
+  const urlPreviews = inlineUrls
+    .map((url) => redactUrlForTrace(url))
+    .filter((url): url is string => Boolean(url))
+    .slice(0, 10);
 
   // Run gates in order
   const normalizeModality = runNormalizeModality(gateInput);
@@ -89,6 +111,18 @@ export function runGatesPipeline(packet: PacketInput): GatesPipelineOutput {
         modalities: normalizeModality.modalities,
         modalitySummary: normalizeModality.modalitySummary,
         evidenceCounts: gateInput.evidenceCounts,
+      },
+    },
+    {
+      gateName: "url_extraction",
+      status: "pass",
+      summary: `URLs: inline=${inlineUrls.length}, captures=${captureUrls.length}, total=${gateInput.urls.length}`,
+      metadata: {
+        inlineUrlCount: inlineUrls.length,
+        captureUrlCount: captureUrls.length,
+        totalUrlCount: gateInput.urls.length,
+        warningsCount: urlWarningsCount,
+        urlPreviews,
       },
     },
     {
@@ -117,4 +151,3 @@ export function runGatesPipeline(packet: PacketInput): GatesPipelineOutput {
     evidenceCounts: gateInput.evidenceCounts,
   };
 }
-

@@ -6,9 +6,19 @@ export type PostLinterViolation = {
   pattern: string;
 };
 
+export type PostLinterBlockResult = {
+  blockId: string;
+  ok: boolean;
+  reason?: {
+    rule: "must-not" | "must-have";
+    pattern: string;
+  };
+  durationMs: number;
+};
+
 export type PostLinterResult =
-  | { ok: true }
-  | { ok: false; violations: PostLinterViolation[] };
+  | { ok: true; blockResults: PostLinterBlockResult[] }
+  | { ok: false; violations: PostLinterViolation[]; blockResults: PostLinterBlockResult[] };
 
 type ParsedRule = {
   rule: "must-not" | "must-have";
@@ -95,34 +105,51 @@ export function postOutputLinter(args: {
 }): PostLinterResult {
   const contentLower = args.content.toLowerCase();
   const violations: PostLinterViolation[] = [];
+  const blockResults: PostLinterBlockResult[] = [];
 
   for (const block of args.driverBlocks) {
+    const startedAt = Date.now();
+    const blockViolations: PostLinterViolation[] = [];
     const rules = parseValidatorsFromDefinition(block.definition);
     for (const rule of rules) {
       const patternLower = rule.pattern.toLowerCase();
       if (rule.rule === "must-not") {
         if (contentLower.includes(patternLower)) {
-          violations.push({
+          const violation = {
             blockId: block.id,
             rule: "must-not",
             pattern: rule.pattern,
-          });
+          };
+          violations.push(violation);
+          blockViolations.push(violation);
         }
       } else {
         if (!contentLower.includes(patternLower)) {
-          violations.push({
+          const violation = {
             blockId: block.id,
             rule: "must-have",
             pattern: rule.pattern,
-          });
+          };
+          violations.push(violation);
+          blockViolations.push(violation);
         }
       }
     }
+    const durationMs = Date.now() - startedAt;
+    const firstViolation = blockViolations[0];
+    blockResults.push({
+      blockId: block.id,
+      ok: blockViolations.length === 0,
+      reason: firstViolation
+        ? { rule: firstViolation.rule, pattern: firstViolation.pattern }
+        : undefined,
+      durationMs,
+    });
   }
 
   if (violations.length === 0) {
-    return { ok: true };
+    return { ok: true, blockResults };
   }
 
-  return { ok: false, violations };
+  return { ok: false, violations, blockResults };
 }
