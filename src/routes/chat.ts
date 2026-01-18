@@ -16,7 +16,7 @@ import {
   retrieveContext,
   retrievalLogShape,
 } from "../control-plane/retrieval";
-import { postOutputLinter, type PostLinterViolation } from "../gates/post_linter";
+import { postOutputLinter, type PostLinterViolation, type PostLinterBlockResult } from "../gates/post_linter";
 import { runEvidenceIntake } from "../gates/evidence_intake";
 import { EvidenceValidationError } from "../gates/evidence_validation_error";
 import {
@@ -89,6 +89,44 @@ function buildPostLinterMetadata(violations: PostLinterViolation[], attempt: 0 |
         }
       : undefined,
   };
+}
+
+type DriverBlockTraceMetadata = {
+  kind: "driver_block";
+  attempt: 0 | 1;
+  block_id: string;
+  block_name: string;
+  ok: boolean;
+  reason?: string;
+  duration_ms: number;
+};
+
+function buildDriverBlockTraceEvents(args: {
+  blockResults: PostLinterBlockResult[];
+  driverBlocks: PromptPack["driverBlocks"];
+  attempt: 0 | 1;
+}): Array<{ status: "completed" | "warning"; summary: string; metadata: DriverBlockTraceMetadata }> {
+  const byId = new Map(args.driverBlocks.map((block) => [block.id, block]));
+  return args.blockResults.map((result) => {
+    const block = byId.get(result.blockId);
+    const blockName = block?.title || result.blockId;
+    const reason = result.reason ? `${result.reason.rule}:${result.reason.pattern}` : undefined;
+    return {
+      status: result.ok ? "completed" : "warning",
+      summary: result.ok
+        ? `Driver block ${blockName} passed`
+        : `Driver block ${blockName} violated`,
+      metadata: {
+        kind: "driver_block",
+        attempt: args.attempt,
+        block_id: result.blockId,
+        block_name: blockName,
+        ok: result.ok,
+        reason,
+        duration_ms: result.durationMs,
+      },
+    };
+  });
 }
 
 type EvidenceIntentSummary = {
@@ -1088,7 +1126,7 @@ export async function chatRoutes(
 
     // Ordering Contract (v0): route-level phase sequence is authoritative.
     // Phases must appear in this order in trace (not necessarily contiguous):
-    // evidence_intake → gate_normalize_modality → gate_intent_risk → gate_lattice
+    // evidence_intake → gate_normalize_modality → url_extraction → gate_intent_risk → gate_lattice
     // → model_call → output_gates (post_linter + driver_block per-block events).
     // Tests assert this sequence from persisted trace events.
     // Note: metadata.seq is global and monotonic; it is not reset per gate.
@@ -1108,8 +1146,12 @@ export async function chatRoutes(
     const hasEvidence =
       evidenceSummary.captures > 0 || evidenceSummary.supports > 0 || evidenceSummary.claims > 0;
 
-    const phaseByGateName: Record<string, "gate_normalize_modality" | "gate_intent_risk" | "gate_lattice"> = {
+    const phaseByGateName: Record<
+      string,
+      "gate_normalize_modality" | "url_extraction" | "gate_intent_risk" | "gate_lattice"
+    > = {
       normalize_modality: "gate_normalize_modality",
+      url_extraction: "url_extraction",
       intent_risk: "gate_intent_risk",
       lattice: "gate_lattice",
     };
@@ -1490,6 +1532,23 @@ export async function chatRoutes(
               metadata: lintMeta0,
             });
 
+            const driverBlockEvents0 = buildDriverBlockTraceEvents({
+              blockResults: lint0.blockResults ?? [],
+              driverBlocks: promptPack.driverBlocks,
+              attempt: 0,
+            });
+            for (const event of driverBlockEvents0) {
+              await appendTrace({
+                traceRunId: traceRun.id,
+                transmissionId: transmission.id,
+                actor: "solserver",
+                phase: "output_gates",
+                status: event.status,
+                summary: event.summary,
+                metadata: event.metadata,
+              });
+            }
+
             bgLog.debug({
               evt: "post_linter.completed",
               attempt: 0,
@@ -1673,6 +1732,23 @@ export async function chatRoutes(
                 : `Output linter warning: ${lintMeta1.violationsCount} violations`,
               metadata: lintMeta1,
             });
+
+            const driverBlockEvents1 = buildDriverBlockTraceEvents({
+              blockResults: lint1.blockResults ?? [],
+              driverBlocks: promptPack1.driverBlocks,
+              attempt: 1,
+            });
+            for (const event of driverBlockEvents1) {
+              await appendTrace({
+                traceRunId: traceRun.id,
+                transmissionId: transmission.id,
+                actor: "solserver",
+                phase: "output_gates",
+                status: event.status,
+                summary: event.summary,
+                metadata: event.metadata,
+              });
+            }
 
             bgLog.debug({
               evt: "post_linter.completed",
@@ -1944,6 +2020,23 @@ export async function chatRoutes(
         metadata: lintMeta0,
       });
 
+      const driverBlockEvents0 = buildDriverBlockTraceEvents({
+        blockResults: lint0.blockResults ?? [],
+        driverBlocks: promptPack.driverBlocks,
+        attempt: 0,
+      });
+      for (const event of driverBlockEvents0) {
+        await appendTrace({
+          traceRunId: traceRun.id,
+          transmissionId: transmission.id,
+          actor: "solserver",
+          phase: "output_gates",
+          status: event.status,
+          summary: event.summary,
+          metadata: event.metadata,
+        });
+      }
+
       log.debug({
         evt: "post_linter.completed",
         attempt: 0,
@@ -2100,6 +2193,23 @@ export async function chatRoutes(
             : `Output linter warning: ${lintMeta1.violationsCount} violations`,
           metadata: lintMeta1,
         });
+
+        const driverBlockEvents1 = buildDriverBlockTraceEvents({
+          blockResults: lint1.blockResults ?? [],
+          driverBlocks: promptPack1.driverBlocks,
+          attempt: 1,
+        });
+        for (const event of driverBlockEvents1) {
+          await appendTrace({
+            traceRunId: traceRun.id,
+            transmissionId: transmission.id,
+            actor: "solserver",
+            phase: "output_gates",
+            status: event.status,
+            summary: event.summary,
+            metadata: event.metadata,
+          });
+        }
 
         log.debug({
           evt: "post_linter.completed",
