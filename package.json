@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "test": "vitest",
+    "build": "tsc -p tsconfig.json",
     "deploy:staging": "fly deploy -a solserver-staging"
   },
   "repository": {
