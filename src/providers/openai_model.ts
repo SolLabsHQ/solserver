@@ -12,7 +12,12 @@ export async function openAIModelReplyWithMeta(input: {
   promptText: string;
   modeLabel: string;
   model?: string;
-  logger?: { error: (obj: any, msg?: string) => void };
+  logger?: {
+    error?: (obj: any, msg?: string) => void;
+    warn?: (obj: any, msg?: string) => void;
+    info?: (obj: any, msg?: string) => void;
+    debug?: (obj: any, msg?: string) => void;
+  };
 }): Promise<{ rawText: string; mementoDraft: null }> {
   const apiKey = process.env.OPENAI_API_KEY;
   const model = input.model ?? process.env.OPENAI_MODEL;
@@ -47,7 +52,7 @@ export async function openAIModelReplyWithMeta(input: {
     const text = await res.text();
     const requestId = res.headers.get("x-request-id") ?? undefined;
     const bodySnippet = text.slice(0, 500);
-    input.logger?.error(
+    input.logger?.error?.(
       { statusCode: res.status, requestId, bodySnippet },
       "openai.request_failed"
     );

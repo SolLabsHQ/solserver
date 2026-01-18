@@ -17,6 +17,7 @@ import type {
   TraceEventActor,
   TraceEventPhase,
   TraceEventStatus,
+  TraceSummary,
 } from "./control_plane_store";
 import type { PacketInput, ModeDecision, Evidence } from "../contracts/chat";
 
@@ -562,7 +563,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       WHERE trace_run_id = ?
       GROUP BY phase
     `);
-    const phaseRows = phaseStmt.all(traceRunId) as any[];
+    const phaseRows = phaseStmt.all(traceRunId) as Array<{ phase: TraceEventPhase; count: number }>;
 
     const phaseCounts: Record<TraceEventPhase, number> = {} as Record<TraceEventPhase, number>;
     for (const row of phaseRows) {
