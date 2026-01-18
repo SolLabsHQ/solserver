@@ -11,6 +11,7 @@ const ClaimSchema = z.object({
   evidence_refs: z.array(EvidenceRefSchema).min(1),
 }).strict();
 
+// Meta is passthrough on ingest for forward-compatibility; response egress is allowlisted.
 const OutputEnvelopeMetaSchema = z.object({
   meta_version: z.literal("v1").optional(),
   claims: z.array(ClaimSchema).min(1).optional(),
@@ -23,6 +24,7 @@ export const OutputEnvelopeSchema = z.object({
   assumptions: z.array(z.string()).optional(),
   unknowns: z.array(z.string()).optional(),
   used_context_ids: z.array(z.string()).optional(),
+  // Future structured outputs (e.g., capture_suggestion) live under meta.
   meta: OutputEnvelopeMetaSchema.optional(),
 }).strict();
 

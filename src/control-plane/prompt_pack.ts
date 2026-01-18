@@ -3,6 +3,7 @@
 import type { PacketInput, ModeDecision } from "../contracts/chat";
 import type { EvidencePack, EvidenceItem } from "../evidence/evidence_provider";
 import { assembleDriverBlocks, formatDriverBlocksForPrompt, type AssembledDriverBlock, type DriverBlockEnforcementResult } from "./driver_blocks";
+import { buildSpineV1OutputContract } from "./spine_v1";
 
 /**
  * PromptPack is the deterministic "spine" for provider calls.
@@ -62,20 +63,7 @@ function buildMountedLaw(modeDecision: ModeDecision, driverBlocksText: string): 
   lines.push("If you do not know something, say so plainly.");
   lines.push("Do not fabricate facts.");
   lines.push("");
-
-  lines.push("Output contract (v0 placeholder):");
-  lines.push("- Return ONLY a JSON object matching OutputEnvelope.");
-  lines.push("- Required field: assistant_text (string).");
-  lines.push("- assistant_text MUST start with a 'shape' section (3–6 bullets) and include:");
-  lines.push("  Arc | Active | Parked | Decisions | Next (as bullet labels).");
-  lines.push("- If an EvidencePack is provided, include meta.claims[] with evidence_refs.");
-  lines.push("- Each evidence_ref must use evidence_id from the pack; do not invent ids.");
-  lines.push("- If no EvidencePack is provided, omit meta.claims.");
-  lines.push("- Budgets: max claims=8, max refs/claim=4, max total refs=20.");
-  lines.push("Example OutputEnvelope (with evidence):");
-  lines.push('{"assistant_text":"shape:\\n- Arc: ...\\n- Active: ...\\n- Parked: ...\\n- Decisions: ...\\n- Next: ...\\n\\nReceipt: ...\\nRelease: ...\\nNext: ...\\nAssumption: ...","meta":{"claims":[{"claim_id":"cl-1","claim_text":"...","evidence_refs":[{"evidence_id":"ev-001","span_id":"sp-001"}]}]}}');
-  lines.push("Example OutputEnvelope (no evidence):");
-  lines.push('{"assistant_text":"shape:\\n- Arc: ...\\n- Active: ...\\n- Parked: ...\\n- Decisions: ...\\n- Next: ...\\n\\nReceipt: ...\\nRelease: ...\\nNext: ...\\nAssumption: ..."}');
+  lines.push(buildSpineV1OutputContract());
   lines.push("");
 
   lines.push("ModeDecision:");
