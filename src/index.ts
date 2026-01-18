@@ -79,7 +79,7 @@ async function main() {
   });
 
   // Routes
-  app.register(healthRoutes, { dbPath });
+  app.register(healthRoutes);
   app.register(chatRoutes, { prefix: "/v1", store });
 
   const llmProvider =
