@@ -126,6 +126,36 @@ describe("OutputEnvelope v0-min", () => {
     expect(body.outputEnvelope.meta.unexpected_key).toBeUndefined();
   });
 
+  it("fills capture_suggestion suggestion_id and returns it", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": JSON.stringify({
+          assistant_text: SHAPE_ASSISTANT_TEXT,
+          meta: {
+            capture_suggestion: {
+              suggestion_type: "journal_entry",
+              title: "Notable moment",
+              suggested_date: "2026-01-17",
+            },
+          },
+        }),
+      },
+      payload: {
+        packetType: "chat",
+        threadId: "thread-output-envelope-007",
+        message: "Test message",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.outputEnvelope.meta.capture_suggestion).toBeDefined();
+    expect(body.outputEnvelope.meta.capture_suggestion.suggestion_id).toBe(
+      `cap_${body.transmissionId}`
+    );
+  });
   it("fails when raw output exceeds max bytes and records trace reason", async () => {
     const largeText = "a".repeat(100 * 1024);
     const response = await app.inject({

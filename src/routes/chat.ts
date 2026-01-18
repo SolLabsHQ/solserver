@@ -253,7 +253,11 @@ function formatOutputContractError(
   return `output_contract_failed:schema_invalid:issues=${count}`;
 }
 
-function applyEvidenceMeta(envelope: OutputEnvelope, evidencePack: EvidencePack | null): OutputEnvelope {
+function applyEvidenceMeta(
+  envelope: OutputEnvelope,
+  evidencePack: EvidencePack | null,
+  transmissionId: string
+): OutputEnvelope {
   const claims = extractClaims(envelope);
   if (!envelope.meta && claims.length === 0 && !evidencePack) return envelope;
 
@@ -269,6 +273,12 @@ function applyEvidenceMeta(envelope: OutputEnvelope, evidencePack: EvidencePack 
     delete meta.evidence_pack_id;
   }
   meta.meta_version = "v1";
+  if (meta.capture_suggestion) {
+    meta.capture_suggestion = {
+      ...meta.capture_suggestion,
+      suggestion_id: `cap_${transmissionId}`,
+    };
+  }
 
   return { ...envelope, meta };
 }
@@ -276,7 +286,7 @@ function applyEvidenceMeta(envelope: OutputEnvelope, evidencePack: EvidencePack 
 function normalizeOutputEnvelopeForResponse(envelope: OutputEnvelope): OutputEnvelope {
   if (!envelope.meta) return envelope;
 
-  const allowedKeys = ["meta_version", "claims", "used_evidence_ids", "evidence_pack_id"] as const;
+  const allowedKeys = ["meta_version", "claims", "used_evidence_ids", "evidence_pack_id", "capture_suggestion"] as const;
   const meta: Partial<OutputEnvelope["meta"]> = {};
 
   for (const key of allowedKeys) {
@@ -863,8 +873,9 @@ export async function chatRoutes(
       envelope: OutputEnvelope;
       attempt: 0 | 1;
       evidencePack: EvidencePack | null;
+      transmissionId: string;
     }): Promise<{ ok: true; envelope: OutputEnvelope } | { ok: false; code: EvidenceGateErrorCode }> => {
-      const normalized = applyEvidenceMeta(args.envelope, args.evidencePack);
+      const normalized = applyEvidenceMeta(args.envelope, args.evidencePack, args.transmissionId);
       const claims = extractClaims(normalized);
 
       const binding = runEvidenceBindingGate(claims, args.evidencePack);
@@ -1469,6 +1480,7 @@ export async function chatRoutes(
               envelope: envelope0.envelope,
               attempt: 0,
               evidencePack,
+              transmissionId,
             });
 
             if (!evidenceGate0.ok) {
@@ -1670,6 +1682,7 @@ export async function chatRoutes(
               envelope: envelope1.envelope,
               attempt: 1,
               evidencePack,
+              transmissionId,
             });
 
             if (!evidenceGate1.ok) {
@@ -1958,6 +1971,7 @@ export async function chatRoutes(
         envelope: envelope0.envelope,
         attempt: 0,
         evidencePack,
+        transmissionId: transmission.id,
       });
 
       if (!evidenceGate0.ok) {
@@ -2132,6 +2146,7 @@ export async function chatRoutes(
           envelope: envelope1.envelope,
           attempt: 1,
           evidencePack,
+          transmissionId: transmission.id,
         });
 
         if (!evidenceGate1.ok) {

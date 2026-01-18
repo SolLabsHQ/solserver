@@ -10,6 +10,13 @@ export function buildSpineV1OutputContract(): string {
   lines.push("- Each evidence_ref must use evidence_id from the pack; do not invent ids.");
   lines.push("- If no EvidencePack is provided, omit meta.claims.");
   lines.push("- Budgets: max claims=8, max refs/claim=4, max total refs=20.");
+  lines.push("Capture Suggestions (optional):");
+  lines.push("- If the conversation includes a clear decision, next action, or notable moment, include meta.capture_suggestion.");
+  lines.push("- Max one per response. If nothing clearly stands out, omit it.");
+  lines.push("- Types: journal_entry (insights), reminder (tasks), calendar_event (time commitments).");
+  lines.push("- For journal/reminder: use suggested_date (YYYY-MM-DD) if relevant.");
+  lines.push("- For calendar_event: use suggested_start_at (RFC3339 datetime) if a specific time was discussed.");
+  lines.push("- Do not include suggestion_id; server fills it.");
   lines.push("- Future: additional structured outputs will live under meta (e.g., capture_suggestion).");
   lines.push("Example OutputEnvelope (with evidence):");
   lines.push(
