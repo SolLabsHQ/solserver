@@ -71,10 +71,32 @@ const SYSTEM_DEFAULT_BLOCKS: Record<string, { id: string; version: string; title
  */
 export const DRIVER_BLOCK_BOUNDS = {
   MAX_REFS: 10, // Max system refs
-  MAX_INLINE: 5, // Max user inline blocks
-  MAX_DEFINITION_LENGTH: 10_000, // Max chars per definition
+  MAX_INLINE: 3, // Max user inline blocks
+  MAX_DEFINITION_BYTES: 4 * 1024, // Max UTF-8 bytes per definition
   MAX_TOTAL_BLOCKS: 15, // Max total blocks (system + user)
 };
+
+function utf8ByteLength(text: string): number {
+  try {
+    return new TextEncoder().encode(text).length;
+  } catch {
+    return text.length;
+  }
+}
+
+function trimToUtf8Bytes(text: string, maxBytes: number): string {
+  if (utf8ByteLength(text) <= maxBytes) return text;
+  const encoder = new TextEncoder();
+  let bytes = 0;
+  let result = "";
+  for (const char of text) {
+    const encoded = encoder.encode(char);
+    if (bytes + encoded.length > maxBytes) break;
+    result += char;
+    bytes += encoded.length;
+  }
+  return result;
+}
 
 /**
  * Assemble Driver Blocks from packet in strict order:
@@ -172,13 +194,14 @@ export function assembleDriverBlocks(packet: PacketInput): DriverBlockEnforcemen
       let definition = block.definition;
       
       // Trim oversized definitions
-      if (definition.length > DRIVER_BLOCK_BOUNDS.MAX_DEFINITION_LENGTH) {
+      const originalBytes = utf8ByteLength(definition);
+      if (originalBytes > DRIVER_BLOCK_BOUNDS.MAX_DEFINITION_BYTES) {
+        definition = trimToUtf8Bytes(definition, DRIVER_BLOCK_BOUNDS.MAX_DEFINITION_BYTES);
         trimmed.push({
           id: block.id,
-          originalLength: definition.length,
-          trimmedLength: DRIVER_BLOCK_BOUNDS.MAX_DEFINITION_LENGTH,
+          originalLength: originalBytes,
+          trimmedLength: utf8ByteLength(definition),
         });
-        definition = definition.slice(0, DRIVER_BLOCK_BOUNDS.MAX_DEFINITION_LENGTH);
       }
 
       userBlocks.push({

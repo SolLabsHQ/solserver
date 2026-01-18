@@ -159,7 +159,6 @@ describe("OutputEnvelope v0-min", () => {
     );
     expect(payloadTooLarge).toBeTruthy();
   });
-
   it("persists output_contract_failed in async completion", async () => {
     const response = await app.inject({
       method: "POST",

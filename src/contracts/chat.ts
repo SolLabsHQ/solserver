@@ -30,7 +30,7 @@ export const DriverBlockInline = z.object({
   version: z.string().min(1),
   title: z.string().min(1),
   scope: z.enum(["global", "thread"]),
-  definition: z.string().min(1).max(10_000), // Bounded definition text
+  definition: z.string().min(1).max(100_000), // Allow oversize; trimmed by enforcement
   source: z.enum(["user_created", "assistant_proposed", "system_shipped"]),
   approvedAt: z.string().datetime(),
   threadId: z.string().optional(),

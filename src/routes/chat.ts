@@ -252,7 +252,6 @@ function normalizeOutputEnvelopeForResponse(envelope: OutputEnvelope): OutputEnv
     ? { ...envelope, meta: meta as OutputEnvelope["meta"] }
     : { ...envelope, meta: undefined };
 }
-
 function buildEvidenceGateFailureResponse(args: {
   code: EvidenceGateErrorCode;
   transmissionId: string;
@@ -727,7 +726,6 @@ export async function chatRoutes(
         return text.length;
       }
     };
-
     const parseOutputEnvelope = async (args: {
       rawText: string;
       attempt: 0 | 1;
@@ -1951,9 +1949,9 @@ export async function chatRoutes(
         log.warn(lintMeta0, "gate.post_lint_warning");
       }
 
-        if (lint0.ok) {
-          assistant = assistant0;
-          outputEnvelope = envelope0Normalized;
+      if (lint0.ok) {
+        assistant = assistant0;
+        outputEnvelope = envelope0Normalized;
         attemptsUsed = 1;
         if (attempt0.mementoDraft) {
           const m = putThreadMemento({
