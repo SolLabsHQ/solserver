@@ -286,14 +286,21 @@ function applyEvidenceMeta(
 function normalizeOutputEnvelopeForResponse(envelope: OutputEnvelope): OutputEnvelope {
   if (!envelope.meta) return envelope;
 
-  const allowedKeys = ["meta_version", "claims", "used_evidence_ids", "evidence_pack_id", "capture_suggestion"] as const;
   const meta: Partial<OutputEnvelope["meta"]> = {};
-
-  for (const key of allowedKeys) {
-    const value = envelope.meta[key];
-    if (value !== undefined) {
-      meta[key] = value;
-    }
+  if (envelope.meta.meta_version !== undefined) {
+    meta.meta_version = envelope.meta.meta_version;
+  }
+  if (envelope.meta.claims !== undefined) {
+    meta.claims = envelope.meta.claims;
+  }
+  if (envelope.meta.used_evidence_ids !== undefined) {
+    meta.used_evidence_ids = envelope.meta.used_evidence_ids;
+  }
+  if (envelope.meta.evidence_pack_id !== undefined) {
+    meta.evidence_pack_id = envelope.meta.evidence_pack_id;
+  }
+  if (envelope.meta.capture_suggestion !== undefined) {
+    meta.capture_suggestion = envelope.meta.capture_suggestion;
   }
 
   return Object.keys(meta).length > 0
