@@ -8,8 +8,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "test": "vitest",
-    "deploy:staging": "fly deploy -a solserver-staging"
+    "test": "vitest"
   },
   "repository": {
     "type": "git",
