@@ -329,6 +329,21 @@ export async function chatRoutes(
   // Dev-only async completion guard for simulated 202 (prevents duplicate background timers per transmission).
   const pendingCompletions = new Set<string>();
 
+  app.addHook("preHandler", async (req, reply) => {
+    const apiKey = process.env.SOLSERVER_API_KEY;
+    if (!apiKey) return;
+    if (req.method === "OPTIONS") return;
+
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length).trim()
+      : undefined;
+    if (!token || token !== apiKey) {
+      reply.header("WWW-Authenticate", "Bearer");
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+  });
+
   // Explicit OPTIONS handler for predictable CORS preflight behavior.
   app.options("/chat", async (_req, reply) => reply.code(204).send());
 
@@ -355,6 +370,10 @@ export async function chatRoutes(
     const result = await store.getChatResult(id);
     const traceRun = await store.getTraceRunByTransmission(id);
     const traceSummary = traceRun ? await store.getTraceSummary(traceRun.id) : null;
+
+    if (traceRun) {
+      reply.header("x-sol-trace-run-id", traceRun.id);
+    }
 
     const threadMemento = getLatestThreadMemento(transmission.threadId, { includeDraft: true });
 

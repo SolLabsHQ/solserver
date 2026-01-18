@@ -1,0 +1,34 @@
+app = "solserver-staging"
+primary_region = "sea"
+
+[env]
+  SOL_ENV = "staging"
+  LLM_PROVIDER = "openai"
+  OPENAI_MODEL = "gpt-5-nano"
+  CONTROL_PLANE_DB_PATH = "/data/control_plane.db"
+
+[http_service]
+  internal_port = 3333
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.checks]
+    [http_service.checks.healthz]
+      type = "http"
+      method = "GET"
+      path = "/healthz"
+      interval = "15s"
+      timeout = "2s"
+    [http_service.checks.readyz]
+      type = "http"
+      method = "GET"
+      path = "/readyz"
+      interval = "15s"
+      timeout = "2s"
+
+[[mounts]]
+  source = "solserver_staging_data"
+  destination = "/data"
