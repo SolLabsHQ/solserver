@@ -2384,7 +2384,10 @@ export async function chatRoutes(
     const packet = parsed.data;
     const simulate = String((req.headers as any)["x-sol-simulate-status"] ?? "");
     const emptyEvidenceSummary = { captures: 0, supports: 0, claims: 0, warnings: 0 };
-    const inlineProcessing = process.env.NODE_ENV === "test" || process.env.SOL_INLINE_PROCESSING === "1";
+    const inlineProcessing = process.env.NODE_ENV === "test"
+      || process.env.VITEST === "1"
+      || process.env.VITEST === "true"
+      || process.env.SOL_INLINE_PROCESSING === "1";
 
     const setTransmissionHeader = (transmissionId: string) => {
       reply.header("x-sol-transmission-id", transmissionId);
