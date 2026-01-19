@@ -293,6 +293,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     leaseOwner: string;
     leaseDurationSeconds: number;
     eligibleStatuses?: TransmissionStatus[];
+    packetType?: Transmission["packetType"];
   }): Promise<{ transmission: Transmission; previousStatus: TransmissionStatus } | null> {
     const eligible = (args.eligibleStatuses ?? ["created", "processing"])
       .filter((status) => status === "created" || status === "processing");
@@ -301,25 +302,32 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     const statusList = eligible.map((status) => `'${status}'`).join(", ");
     const nowIso = new Date().toISOString();
     const leaseExpiresAt = new Date(Date.now() + args.leaseDurationSeconds * 1000).toISOString();
+    const packetClause = args.packetType ? "AND packet_type = ?" : "";
 
     const tx = this.db.transaction(() => {
       const row = this.db.prepare(`
         SELECT * FROM transmissions
         WHERE status IN (${statusList})
+          ${packetClause}
           AND (lease_expires_at IS NULL OR lease_expires_at < ?)
         ORDER BY created_at ASC
         LIMIT 1
-      `).get(nowIso) as any;
+      `).get(...(args.packetType ? [args.packetType, nowIso] : [nowIso])) as any;
 
       if (!row) return null;
+
+      const updateParams = [leaseExpiresAt, args.leaseOwner, row.id];
+      if (args.packetType) updateParams.push(args.packetType);
+      updateParams.push(nowIso);
 
       const update = this.db.prepare(`
         UPDATE transmissions
         SET status = 'processing', lease_expires_at = ?, lease_owner = ?
         WHERE id = ?
+          ${packetClause}
           AND status IN (${statusList})
           AND (lease_expires_at IS NULL OR lease_expires_at < ?)
-      `).run(leaseExpiresAt, args.leaseOwner, row.id, nowIso);
+      `).run(...updateParams);
 
       if (update.changes === 0) {
         return null;
@@ -336,6 +344,37 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     });
 
     return tx();
+  }
+
+  async getLeaseableStats(args: {
+    eligibleStatuses?: TransmissionStatus[];
+    packetType?: Transmission["packetType"];
+  }): Promise<{ leaseableCount: number; oldestCreatedAt: string | null }> {
+    const eligible = (args.eligibleStatuses ?? ["created", "processing"])
+      .filter((status) => status === "created" || status === "processing");
+    if (eligible.length === 0) {
+      return { leaseableCount: 0, oldestCreatedAt: null };
+    }
+
+    const statusList = eligible.map((status) => `'${status}'`).join(", ");
+    const nowIso = new Date().toISOString();
+    const packetClause = args.packetType ? "AND packet_type = ?" : "";
+    const params = args.packetType ? [args.packetType, nowIso] : [nowIso];
+
+    const row = this.db.prepare(`
+      SELECT
+        COUNT(*) as count,
+        MIN(CASE WHEN status = 'created' THEN created_at END) as oldest_created_at
+      FROM transmissions
+      WHERE status IN (${statusList})
+        ${packetClause}
+        AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+    `).get(...params) as { count?: number; oldest_created_at?: string | null } | undefined;
+
+    return {
+      leaseableCount: Number(row?.count ?? 0),
+      oldestCreatedAt: row?.oldest_created_at ?? null,
+    };
   }
 
   async appendDeliveryAttempt(args: {

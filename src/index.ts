@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import pino from "pino";
+import { statSync } from "node:fs";
 import { config as loadEnv } from "dotenv";
 
 if (process.env.NODE_ENV !== "production") {
@@ -75,6 +76,19 @@ const hasExplicitDbPath = Boolean(process.env.CONTROL_PLANE_DB_PATH || process.e
 if (!isDev && !hasExplicitDbPath) {
   throw new Error("CONTROL_PLANE_DB_PATH must be set in non-dev environments.");
 }
+
+const getDbStat = (path: string): { exists: boolean; sizeBytes?: number; mtime?: string } => {
+  try {
+    const stat = statSync(path);
+    return {
+      exists: true,
+      sizeBytes: stat.size,
+      mtime: stat.mtime.toISOString(),
+    };
+  } catch {
+    return { exists: false };
+  }
+};
 const store = new SqliteControlPlaneStore(dbPath);
 
 async function main() {
@@ -110,7 +124,7 @@ async function main() {
   const address = await app.listen({ port, host: "0.0.0.0" });
 
   app.log.info(
-    { evt: "server.started", address, port, dbPath },
+    { evt: "server.started", address, port, dbPath, dbStat: getDbStat(dbPath) },
     "server.started"
   );
 

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 
 import { config as loadEnv } from "dotenv";
 import pino from "pino";
@@ -41,9 +42,29 @@ if (!isDev && !hasExplicitDbPath) {
 }
 const leaseSeconds = Number(process.env.WORKER_LEASE_SECONDS ?? 120) || 120;
 const pollIntervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? 500) || 500;
+const heartbeatEvery = Number(process.env.WORKER_HEARTBEAT_EVERY ?? 20) || 20;
 const workerId = process.env.WORKER_ID ?? randomUUID();
 
 const store = new SqliteControlPlaneStore(dbPath);
+
+const pickFilter = {
+  eligibleStatuses: ["created", "processing"] as const,
+  packetType: "chat" as const,
+  leaseCondition: "lease_expires_at IS NULL OR lease_expires_at < now",
+};
+
+const getDbStat = (path: string): { exists: boolean; sizeBytes?: number; mtime?: string } => {
+  try {
+    const stat = statSync(path);
+    return {
+      exists: true,
+      sizeBytes: stat.size,
+      mtime: stat.mtime.toISOString(),
+    };
+  } catch {
+    return { exists: false };
+  }
+};
 
 function packetFromTransmission(tx: Transmission): PacketInputType {
   if (tx.packet) return tx.packet;
@@ -73,18 +94,56 @@ function packetFromTransmission(tx: Transmission): PacketInputType {
   return parsedFallback.data;
 }
 
-async function processOne() {
+async function logHeartbeat(reason: "startup" | "poll") {
+  const stats = await store.getLeaseableStats({
+    eligibleStatuses: [...pickFilter.eligibleStatuses],
+    packetType: pickFilter.packetType,
+  });
+
+  const oldestCreatedAgeMs = stats.oldestCreatedAt
+    ? Date.now() - Date.parse(stats.oldestCreatedAt)
+    : null;
+
+  log.info(
+    {
+      evt: "worker.heartbeat",
+      reason,
+      dbPath,
+      dbStat: getDbStat(dbPath),
+      leaseableCount: stats.leaseableCount,
+      oldestCreatedAgeMs,
+      filter: pickFilter,
+    },
+    "worker.heartbeat"
+  );
+}
+
+async function processOne(opts: { logIdle: boolean }) {
   const leased = await store.leaseNextTransmission({
     leaseOwner: workerId,
     leaseDurationSeconds: leaseSeconds,
-    eligibleStatuses: ["created", "processing"],
+    eligibleStatuses: [...pickFilter.eligibleStatuses],
+    packetType: pickFilter.packetType,
   });
 
-  if (!leased) return;
+  if (!leased) {
+    const payload = { evt: "worker.transmission.none", filter: pickFilter };
+    log.debug(payload, "worker.transmission.none");
+    if (opts.logIdle) {
+      log.info(payload, "worker.transmission.none");
+    }
+    return;
+  }
 
   const { transmission, previousStatus } = leased;
-  log.info({ transmissionId: transmission.id, status: previousStatus }, "worker.transmission.picked");
-  log.info({ transmissionId: transmission.id, prevStatus: previousStatus, newStatus: "processing" }, "worker.transmission.processing");
+  log.info(
+    { transmissionId: transmission.id, status: previousStatus, filter: pickFilter },
+    "worker.transmission.picked"
+  );
+  log.info(
+    { transmissionId: transmission.id, prevStatus: previousStatus, newStatus: "processing" },
+    "worker.transmission.processing"
+  );
 
   const packet = packetFromTransmission(transmission);
   const traceLevel = packet.traceConfig?.level ?? "info";
@@ -134,12 +193,18 @@ async function processOne() {
 }
 
 let running = false;
+let pollCount = 0;
 
 async function tick() {
   if (running) return;
   running = true;
   try {
-    await processOne();
+    pollCount += 1;
+    if (pollCount % heartbeatEvery === 0) {
+      await logHeartbeat("poll");
+    }
+    const logIdle = pollCount % heartbeatEvery === 0;
+    await processOne({ logIdle });
   } finally {
     running = false;
   }
@@ -150,11 +215,14 @@ log.info(
     evt: "worker.started",
     workerId,
     dbPath,
+    dbStat: getDbStat(dbPath),
     pollIntervalMs,
     leaseSeconds,
+    heartbeatEvery,
   },
   "worker.started"
 );
 
+void logHeartbeat("startup");
 tick();
 setInterval(tick, pollIntervalMs);

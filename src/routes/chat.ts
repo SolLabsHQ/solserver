@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 
 import { z } from "zod";
 
-import { PacketInput } from "../contracts/chat";
+import { PacketInput, type ModeDecision } from "../contracts/chat";
 import { OutputEnvelopeSchema, type OutputEnvelope } from "../contracts/output_envelope";
 import { routeMode } from "../control-plane/router";
 import { buildPromptPack, toSinglePromptText, promptPackLogShape, withCorrectionSection, type PromptPack } from "../control-plane/prompt_pack";
