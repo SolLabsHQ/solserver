@@ -70,6 +70,11 @@ import { SqliteControlPlaneStore } from "./store/sqlite_control_plane_store";
 
 const dbPath =
   process.env.CONTROL_PLANE_DB_PATH ?? process.env.DB_PATH ?? "./data/control_plane.db";
+const hasExplicitDbPath = Boolean(process.env.CONTROL_PLANE_DB_PATH || process.env.DB_PATH);
+
+if (!isDev && !hasExplicitDbPath) {
+  throw new Error("CONTROL_PLANE_DB_PATH must be set in non-dev environments.");
+}
 const store = new SqliteControlPlaneStore(dbPath);
 
 async function main() {
@@ -102,7 +107,22 @@ async function main() {
   );
 
   const port = Number(process.env.PORT ?? 3333);
-  await app.listen({ port, host: "0.0.0.0" });
+  const address = await app.listen({ port, host: "0.0.0.0" });
+
+  app.log.info(
+    { evt: "server.started", address, port, dbPath },
+    "server.started"
+  );
+
+  if (isDev) {
+    app.log.info(
+      {
+        evt: "worker.reminder",
+        hint: "If responses remain pending, start the worker: npm run dev:worker (or npm run dev:all).",
+      },
+      "worker.reminder"
+    );
+  }
 }
 
 main().catch((err) => {

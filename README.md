@@ -159,10 +159,21 @@ npx tsc --init
 mkdir -p src/routes src/contracts src/control-plane src/gates src/providers src/store
 ```
 
-Run:
+Run (recommended):
+```bash
+npm run dev:all
+```
+
+Run (two terminals):
 ```bash
 npm run dev
 ```
+```bash
+npm run dev:worker
+```
+The web process handles HTTP requests; the worker processes queued transmissions. If the worker is not running, `/v1/chat` will return 202 and transmissions remain `status=created` (clients will poll forever).
+
+See `docs/dev.md` for more local dev details.
 
 Optional local DB path:
 ```bash

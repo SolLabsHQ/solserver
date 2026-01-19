@@ -7,6 +7,10 @@ primary_region = "sjc"
   OPENAI_MODEL = "gpt-5-nano"
   CONTROL_PLANE_DB_PATH = "/data/control_plane.db"
 
+[processes]
+  app = "node dist/index.js"
+  worker = "node dist/worker.js"
+
 [http_service]
   internal_port = 3333
   force_https = true
