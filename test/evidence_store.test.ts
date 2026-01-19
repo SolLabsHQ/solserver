@@ -4,6 +4,16 @@ import { SqliteControlPlaneStore } from "../src/store/sqlite_control_plane_store
 import type { ControlPlaneStore } from "../src/store/control_plane_store";
 import type { Evidence } from "../src/contracts/chat";
 
+const baseModeDecision = {
+  modeLabel: "Ida",
+  personaLabel: "ida",
+  domainFlags: [],
+  confidence: 1.0,
+  checkpointNeeded: false,
+  reasons: ["test"],
+  version: "mode-engine-v0",
+};
+
 // Test suite that runs against both Memory and SQLite stores
 function testEvidenceStore(storeName: string, createStore: () => ControlPlaneStore) {
   describe(`Evidence Store (${storeName})`, () => {
@@ -18,11 +28,7 @@ function testEvidenceStore(storeName: string, createStore: () => ControlPlaneSto
           threadId: "test-thread",
           message: "Test message",
         },
-        modeDecision: {
-          modeLabel: "chat",
-          domainFlags: [],
-          confidence: 1.0,
-        },
+        modeDecision: baseModeDecision,
       });
     });
 
@@ -64,7 +70,7 @@ function testEvidenceStore(storeName: string, createStore: () => ControlPlaneSto
       // Get transmission ID
       const transmissions = await store.createTransmission({
         packet: { threadId: "test-thread", message: "Test" },
-        modeDecision: { modeLabel: "chat", domainFlags: [], confidence: 1.0 },
+        modeDecision: baseModeDecision,
       });
 
       await store.saveEvidence({
@@ -99,7 +105,7 @@ function testEvidenceStore(storeName: string, createStore: () => ControlPlaneSto
 
       const transmission = await store.createTransmission({
         packet: { threadId: "test-thread", message: "Test" },
-        modeDecision: { modeLabel: "chat", domainFlags: [], confidence: 1.0 },
+        modeDecision: baseModeDecision,
       });
 
       // Save once
@@ -151,12 +157,12 @@ function testEvidenceStore(storeName: string, createStore: () => ControlPlaneSto
       // Create multiple transmissions with evidence
       const tx1 = await store.createTransmission({
         packet: { threadId, message: "Message 1" },
-        modeDecision: { modeLabel: "chat", domainFlags: [], confidence: 1.0 },
+        modeDecision: baseModeDecision,
       });
 
       const tx2 = await store.createTransmission({
         packet: { threadId, message: "Message 2" },
-        modeDecision: { modeLabel: "chat", domainFlags: [], confidence: 1.0 },
+        modeDecision: baseModeDecision,
       });
 
       await store.saveEvidence({
@@ -206,7 +212,7 @@ function testEvidenceStore(storeName: string, createStore: () => ControlPlaneSto
 
       const tx = await store.createTransmission({
         packet: { threadId, message: "Message with snippet only" },
-        modeDecision: { modeLabel: "chat", domainFlags: [], confidence: 1.0 },
+        modeDecision: baseModeDecision,
       });
 
       await store.saveEvidence({
@@ -250,7 +256,7 @@ function testEvidenceStore(storeName: string, createStore: () => ControlPlaneSto
       for (let i = 0; i < 3; i++) {
         const tx = await store.createTransmission({
           packet: { threadId, message: `Message ${i}` },
-          modeDecision: { modeLabel: "chat", domainFlags: [], confidence: 1.0 },
+          modeDecision: baseModeDecision,
         });
 
         await store.saveEvidence({
@@ -317,7 +323,7 @@ function testEvidenceStore(storeName: string, createStore: () => ControlPlaneSto
 
       const transmission = await store.createTransmission({
         packet: { threadId: "test-thread", message: "Test" },
-        modeDecision: { modeLabel: "chat", domainFlags: [], confidence: 1.0 },
+        modeDecision: baseModeDecision,
       });
 
       await store.saveEvidence({
@@ -346,7 +352,7 @@ function testEvidenceStore(storeName: string, createStore: () => ControlPlaneSto
 
       const transmission = await store.createTransmission({
         packet: { threadId: "test-thread", message: "Test" },
-        modeDecision: { modeLabel: "chat", domainFlags: [], confidence: 1.0 },
+        modeDecision: baseModeDecision,
       });
 
       await store.saveEvidence({

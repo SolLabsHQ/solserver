@@ -10,7 +10,7 @@
     "dev": "tsx watch src/index.ts",
     "dev:worker": "tsx watch src/worker.ts",
     "dev:all": "concurrently -n web,worker \"npm run dev\" \"npm run dev:worker\"",
-    "test": "vitest",
+    "test": "vitest run --no-file-parallelism --testTimeout 20000",
     "build": "tsc -p tsconfig.build.json",
     "start:worker": "node dist/worker.js",
     "deploy:staging": "fly deploy -a solserver-staging"

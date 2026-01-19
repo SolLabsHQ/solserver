@@ -16,6 +16,8 @@ export type Transmission = {
   status: TransmissionStatus;
   statusCode?: number;
   retryable?: boolean;
+  errorCode?: string;
+  errorDetail?: Record<string, any>;
   packetJson?: string;
   packet?: PacketInput;
   leaseExpiresAt?: string | null;
@@ -109,6 +111,8 @@ export interface ControlPlaneStore {
     status: TransmissionStatus;
     statusCode?: number;
     retryable?: boolean;
+    errorCode?: string | null;
+    errorDetail?: Record<string, any> | null;
   }): Promise<void>;
 
   appendDeliveryAttempt(args: {
@@ -200,6 +204,8 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       status: "created",
       statusCode: undefined,
       retryable: undefined,
+      errorCode: undefined,
+      errorDetail: undefined,
       packetJson: JSON.stringify(args.packet),
       packet: args.packet,
       leaseExpiresAt: null,
@@ -226,6 +232,8 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     status: TransmissionStatus;
     statusCode?: number;
     retryable?: boolean;
+    errorCode?: string | null;
+    errorDetail?: Record<string, any> | null;
   }): Promise<void> {
     const existing = this.transmissions.get(args.transmissionId);
     if (!existing) return;
@@ -234,6 +242,8 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       status: args.status,
       statusCode: args.statusCode ?? existing.statusCode,
       retryable: args.retryable ?? existing.retryable,
+      errorCode: args.errorCode === undefined ? existing.errorCode : args.errorCode ?? undefined,
+      errorDetail: args.errorDetail === undefined ? existing.errorDetail : args.errorDetail ?? undefined,
     });
   }
 
