@@ -4,7 +4,7 @@ import { z } from "zod";
 
 import { PacketInput, type ModeDecision } from "../contracts/chat";
 import { OutputEnvelopeSchema, type OutputEnvelope } from "../contracts/output_envelope";
-import { routeMode } from "../control-plane/router";
+import { routeMode, resolvePersonaLabel } from "../control-plane/router";
 import { buildPromptPack, toSinglePromptText, promptPackLogShape, withCorrectionSection, type PromptPack } from "../control-plane/prompt_pack";
 import { runGatesPipeline } from "../gates/gates_pipeline";
 import {
@@ -16,7 +16,7 @@ import {
   retrieveContext,
   retrievalLogShape,
 } from "../control-plane/retrieval";
-import { postOutputLinter, type PostLinterViolation, type PostLinterBlockResult } from "../gates/post_linter";
+import { postOutputLinter, type PostLinterViolation, type PostLinterBlockResult, type DriverBlockEnforcementMode } from "../gates/post_linter";
 import { runEvidenceIntake } from "../gates/evidence_intake";
 import { EvidenceValidationError } from "../gates/evidence_validation_error";
 import {
@@ -89,6 +89,60 @@ function buildPostLinterMetadata(violations: PostLinterViolation[], attempt: 0 |
         }
       : undefined,
   };
+}
+
+function collectPostLinterViolations(result: {
+  ok: boolean;
+  violations?: PostLinterViolation[];
+  warnings?: PostLinterViolation[];
+}): PostLinterViolation[] {
+  return result.ok ? (result.warnings ?? []) : (result.violations ?? []);
+}
+
+function buildPostLinterTrace(result: {
+  ok: boolean;
+  violations?: PostLinterViolation[];
+  warnings?: PostLinterViolation[];
+  skipped?: boolean;
+}, attempt: 0 | 1): {
+  violations: PostLinterViolation[];
+  meta: PostLinterMetadata;
+  status: "completed" | "warning";
+  summary: string;
+} {
+  const violations = collectPostLinterViolations(result);
+  const meta = buildPostLinterMetadata(violations, attempt);
+  const status = violations.length === 0 ? "completed" : "warning";
+  const summary = result.skipped
+    ? "Output linter skipped"
+    : violations.length === 0
+      ? "Output linter passed"
+      : `Output linter warning: ${meta.violationsCount} violations`;
+  return { violations, meta, status, summary };
+}
+
+function buildDriverBlockFailureDetail(meta: PostLinterMetadata): Record<string, any> {
+  return {
+    attempt: meta.attempt,
+    violationsCount: meta.violationsCount,
+    blockIds: meta.blockIds,
+    ...(meta.firstFailure ? { firstFailure: meta.firstFailure } : {}),
+  };
+}
+
+function withPersonaMeta(envelope: OutputEnvelope, modeDecision: ModeDecision): OutputEnvelope {
+  const personaLabel = resolvePersonaLabel(modeDecision);
+  const meta = { ...(envelope.meta ?? {}), persona_label: personaLabel };
+  return { ...envelope, meta };
+}
+
+function resolveDriverBlockEnforcementMode(): DriverBlockEnforcementMode {
+  const raw = String(process.env.DRIVER_BLOCK_ENFORCEMENT ?? "").toLowerCase();
+  if (raw === "strict" || raw === "warn" || raw === "off") return raw;
+  if (process.env.NODE_ENV === "test") return "strict";
+  if (process.env.SOL_ENV === "production" || process.env.NODE_ENV === "production") return "strict";
+  if (process.env.SOL_ENV === "staging") return "warn";
+  return "warn";
 }
 
 type DriverBlockTraceMetadata = {
@@ -359,6 +413,7 @@ export async function processTransmission(args: {
   } = args;
 
   const traceLevel = packet.traceConfig?.level ?? "info";
+  const enforcementMode = resolveDriverBlockEnforcementMode();
 
   let traceSeq = 0;
   const appendTrace = async (event: Parameters<typeof store.appendTraceEvent>[0]) => {
@@ -638,6 +693,9 @@ export async function processTransmission(args: {
     await store.updateTransmissionStatus({
       transmissionId: transmission.id,
       status: "failed",
+      statusCode: 500,
+      retryable: false,
+      errorCode: "openai_model_missing",
     });
 
     log.info({ evt: "chat.responded", statusCode: 500, attemptsUsed: 0 }, "chat.responded");
@@ -724,6 +782,10 @@ export async function processTransmission(args: {
       await store.updateTransmissionStatus({
         transmissionId: transmission.id,
         status: "failed",
+        statusCode: 400,
+        retryable: false,
+        errorCode: error.code,
+        errorDetail: error.details,
       });
 
       log.info({ evt: "chat.responded", statusCode: 400, attemptsUsed: 0 }, "chat.responded");
@@ -745,6 +807,7 @@ export async function processTransmission(args: {
     summary: `Mode routed: ${modeDecision.modeLabel}`,
     metadata: {
       modeLabel: modeDecision.modeLabel,
+      personaLabel: resolvePersonaLabel(modeDecision),
       domainFlags: modeDecision.domainFlags,
       confidence: modeDecision.confidence,
       modelSelected: modelSelection.model,
@@ -752,13 +815,14 @@ export async function processTransmission(args: {
       ...(modelSelection.tier ? { modelTier: modelSelection.tier } : {}),
     },
   });
-  log.info({
-    evt: "llm.provider.selected",
-    provider: llmProvider,
-    model: modelSelection.model,
-    source: modelSelection.source,
-    ...(modelSelection.tier ? { tier: modelSelection.tier } : {}),
-  }, "llm.provider.selected");
+    log.info({
+      evt: "llm.provider.selected",
+      provider: llmProvider,
+      model: modelSelection.model,
+      source: modelSelection.source,
+      personaLabel: resolvePersonaLabel(modeDecision),
+      ...(modelSelection.tier ? { tier: modelSelection.tier } : {}),
+    }, "llm.provider.selected");
 
   // Ordering Contract (v0): route-level phase sequence is authoritative.
   // Phases must appear in this order in trace (not necessarily contiguous):
@@ -831,6 +895,9 @@ export async function processTransmission(args: {
     await store.updateTransmissionStatus({
       transmissionId: transmission.id,
       status: "failed",
+      statusCode: 500,
+      retryable: true,
+      errorCode: "simulated_failure",
     });
 
     log.info({ evt: "chat.responded", statusCode: 500, attemptsUsed: 0 }, "chat.responded");
@@ -909,6 +976,9 @@ export async function processTransmission(args: {
     await store.updateTransmissionStatus({
       transmissionId: transmission.id,
       status: "failed",
+      statusCode: 500,
+      retryable: true,
+      errorCode,
     });
 
     log.error({ error: message, errorCode }, "evidence_provider.failed");
@@ -1086,6 +1156,7 @@ export async function processTransmission(args: {
               status: "failed",
               statusCode: 422,
               retryable: false,
+              errorCode,
             });
 
             await store.setChatResult({ transmissionId, assistant: stubAssistant });
@@ -1122,6 +1193,7 @@ export async function processTransmission(args: {
               status: "failed",
               statusCode: 422,
               retryable: false,
+              errorCode: evidenceGate0.code,
             });
 
             await store.setChatResult({ transmissionId, assistant: stubAssistant });
@@ -1149,23 +1221,22 @@ export async function processTransmission(args: {
           });
 
           const lint0 = postOutputLinter({
-            modeLabel: modeDecision.modeLabel,
+            modeDecision,
             content: assistant0,
             driverBlocks: promptPack.driverBlocks,
+            enforcementMode,
           });
 
-          const lintMeta0 = buildPostLinterMetadata(lint0.ok ? [] : lint0.violations, 0);
+          const lintTrace0 = buildPostLinterTrace(lint0, 0);
 
           await appendTrace({
             traceRunId: traceRun.id,
             transmissionId: transmission.id,
             actor: "solserver",
             phase: "output_gates",
-            status: lint0.ok ? "completed" : "warning",
-            summary: lint0.ok
-              ? "Output linter passed"
-              : `Output linter warning: ${lintMeta0.violationsCount} violations`,
-            metadata: lintMeta0,
+            status: lintTrace0.status,
+            summary: lintTrace0.summary,
+            metadata: lintTrace0.meta,
           });
 
           const driverBlockEvents0 = buildDriverBlockTraceEvents({
@@ -1189,8 +1260,12 @@ export async function processTransmission(args: {
             evt: "post_linter.completed",
             attempt: 0,
             ok: lint0.ok,
-            violationsCount: lintMeta0.violationsCount,
+            violationsCount: lintTrace0.meta.violationsCount,
           }, "post_linter.completed");
+
+          if (lintTrace0.violations.length > 0) {
+            bgLog.warn(lintTrace0.meta, "gate.post_lint_warning");
+          }
 
           if (lint0.ok) {
             if (attempt0.mementoDraft) {
@@ -1288,6 +1363,7 @@ export async function processTransmission(args: {
               status: "failed",
               statusCode: 422,
               retryable: false,
+              errorCode,
             });
 
             await store.setChatResult({ transmissionId, assistant: stubAssistant });
@@ -1324,6 +1400,7 @@ export async function processTransmission(args: {
               status: "failed",
               statusCode: 422,
               retryable: false,
+              errorCode: evidenceGate1.code,
             });
 
             await store.setChatResult({ transmissionId, assistant: stubAssistant });
@@ -1351,23 +1428,22 @@ export async function processTransmission(args: {
           });
 
           const lint1 = postOutputLinter({
-            modeLabel: modeDecision.modeLabel,
+            modeDecision,
             content: assistant1,
             driverBlocks: promptPack.driverBlocks,
+            enforcementMode,
           });
 
-          const lintMeta1 = buildPostLinterMetadata(lint1.ok ? [] : lint1.violations, 1);
+          const lintTrace1 = buildPostLinterTrace(lint1, 1);
 
           await appendTrace({
             traceRunId: traceRun.id,
             transmissionId: transmission.id,
             actor: "solserver",
             phase: "output_gates",
-            status: lint1.ok ? "completed" : "warning",
-            summary: lint1.ok
-              ? "Output linter passed"
-              : `Output linter warning: ${lintMeta1.violationsCount} violations`,
-            metadata: lintMeta1,
+            status: lintTrace1.status,
+            summary: lintTrace1.summary,
+            metadata: lintTrace1.meta,
           });
 
           const driverBlockEvents1 = buildDriverBlockTraceEvents({
@@ -1391,8 +1467,12 @@ export async function processTransmission(args: {
             evt: "post_linter.completed",
             attempt: 1,
             ok: lint1.ok,
-            violationsCount: lintMeta1.violationsCount,
+            violationsCount: lintTrace1.meta.violationsCount,
           }, "post_linter.completed");
+
+          if (lintTrace1.violations.length > 0) {
+            bgLog.warn(lintTrace1.meta, "gate.post_lint_warning");
+          }
 
           if (lint1.ok) {
             if (attempt1.mementoDraft) {
@@ -1454,7 +1534,7 @@ export async function processTransmission(args: {
               kind: "driver_block_enforcement",
               outcome: "fail_closed_422",
               attempts: 2,
-              violationsCount: lintMeta1.violationsCount,
+              violationsCount: lintTrace1.meta.violationsCount,
             } satisfies EnforcementFailureMetadata,
           });
 
@@ -1471,11 +1551,14 @@ export async function processTransmission(args: {
             error: "driver_block_enforcement_failed",
           });
 
+          const errorDetail = buildDriverBlockFailureDetail(lintTrace1.meta);
           await store.updateTransmissionStatus({
             transmissionId,
             status: "failed",
             statusCode: 422,
             retryable: false,
+            errorCode: "driver_block_enforcement_failed",
+            errorDetail,
           });
 
           await store.setChatResult({ transmissionId, assistant: stubAssistant });
@@ -1495,6 +1578,9 @@ export async function processTransmission(args: {
           await store.updateTransmissionStatus({
             transmissionId,
             status: "failed",
+            statusCode: 500,
+            retryable: true,
+            errorCode: "provider_failed",
           });
 
           bgLog.info({ evt: "chat.async.failed" }, "chat.async.failed");
@@ -1579,6 +1665,7 @@ export async function processTransmission(args: {
         status: "failed",
         statusCode: 422,
         retryable: false,
+        errorCode,
       });
 
       await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
@@ -1618,6 +1705,7 @@ export async function processTransmission(args: {
         status: "failed",
         statusCode: 422,
         retryable: false,
+        errorCode: evidenceGate0.code,
       });
 
       await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
@@ -1647,23 +1735,22 @@ export async function processTransmission(args: {
     });
 
     const lint0 = postOutputLinter({
-      modeLabel: modeDecision.modeLabel,
+      modeDecision,
       content: assistant0,
       driverBlocks: promptPack.driverBlocks,
+      enforcementMode,
     });
 
-    const lintMeta0 = buildPostLinterMetadata(lint0.ok ? [] : lint0.violations, 0);
+    const lintTrace0 = buildPostLinterTrace(lint0, 0);
 
     await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
       actor: "solserver",
       phase: "output_gates",
-      status: lint0.ok ? "completed" : "warning",
-      summary: lint0.ok
-        ? "Output linter passed"
-        : `Output linter warning: ${lintMeta0.violationsCount} violations`,
-      metadata: lintMeta0,
+      status: lintTrace0.status,
+      summary: lintTrace0.summary,
+      metadata: lintTrace0.meta,
     });
 
     const driverBlockEvents0 = buildDriverBlockTraceEvents({
@@ -1687,11 +1774,11 @@ export async function processTransmission(args: {
       evt: "post_linter.completed",
       attempt: 0,
       ok: lint0.ok,
-      violationsCount: lintMeta0.violationsCount,
+      violationsCount: lintTrace0.meta.violationsCount,
     }, "post_linter.completed");
 
-    if (!lint0.ok) {
-      log.warn(lintMeta0, "gate.post_lint_warning");
+    if (lintTrace0.violations.length > 0) {
+      log.warn(lintTrace0.meta, "gate.post_lint_warning");
     }
 
     if (lint0.ok) {
@@ -1760,6 +1847,7 @@ export async function processTransmission(args: {
           status: "failed",
           statusCode: 422,
           retryable: false,
+          errorCode,
         });
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
@@ -1799,6 +1887,7 @@ export async function processTransmission(args: {
           status: "failed",
           statusCode: 422,
           retryable: false,
+          errorCode: evidenceGate1.code,
         });
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
@@ -1828,23 +1917,22 @@ export async function processTransmission(args: {
       });
 
       const lint1 = postOutputLinter({
-        modeLabel: modeDecision.modeLabel,
+        modeDecision,
         content: assistant1,
         driverBlocks: promptPack.driverBlocks,
+        enforcementMode,
       });
 
-      const lintMeta1 = buildPostLinterMetadata(lint1.ok ? [] : lint1.violations, 1);
+      const lintTrace1 = buildPostLinterTrace(lint1, 1);
 
       await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "solserver",
         phase: "output_gates",
-        status: lint1.ok ? "completed" : "warning",
-        summary: lint1.ok
-          ? "Output linter passed"
-          : `Output linter warning: ${lintMeta1.violationsCount} violations`,
-        metadata: lintMeta1,
+        status: lintTrace1.status,
+        summary: lintTrace1.summary,
+        metadata: lintTrace1.meta,
       });
 
       const driverBlockEvents1 = buildDriverBlockTraceEvents({
@@ -1868,11 +1956,11 @@ export async function processTransmission(args: {
         evt: "post_linter.completed",
         attempt: 1,
         ok: lint1.ok,
-        violationsCount: lintMeta1.violationsCount,
+        violationsCount: lintTrace1.meta.violationsCount,
       }, "post_linter.completed");
 
-      if (!lint1.ok) {
-        log.warn(lintMeta1, "gate.post_lint_warning");
+      if (lintTrace1.violations.length > 0) {
+        log.warn(lintTrace1.meta, "gate.post_lint_warning");
       }
 
       if (lint1.ok) {
@@ -1905,7 +1993,7 @@ export async function processTransmission(args: {
             kind: "driver_block_enforcement",
             outcome: "fail_closed_422",
             attempts: 2,
-            violationsCount: lintMeta1.violationsCount,
+            violationsCount: lintTrace1.meta.violationsCount,
           } satisfies EnforcementFailureMetadata,
         });
 
@@ -1922,11 +2010,14 @@ export async function processTransmission(args: {
           error: "driver_block_enforcement_failed",
         });
 
+        const errorDetail = buildDriverBlockFailureDetail(lintTrace1.meta);
         await store.updateTransmissionStatus({
           transmissionId: transmission.id,
           status: "failed",
           statusCode: 422,
           retryable: false,
+          errorCode: "driver_block_enforcement_failed",
+          errorDetail,
         });
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
@@ -1956,13 +2047,16 @@ export async function processTransmission(args: {
       error: String(err?.message ?? err),
     });
 
+    const statusCode = err instanceof OpenAIProviderError ? err.statusCode : 500;
+    const errorTag = statusCode === 502 ? "provider_upstream_failed" : "provider_failed";
+
     await store.updateTransmissionStatus({
       transmissionId: transmission.id,
       status: "failed",
+      statusCode,
+      retryable: true,
+      errorCode: errorTag,
     });
-
-    const statusCode = err instanceof OpenAIProviderError ? err.statusCode : 500;
-    const errorTag = statusCode === 502 ? "provider_upstream_failed" : "provider_failed";
 
     log.error({ error: String(err?.message ?? err) }, "provider.failed");
 
@@ -2017,6 +2111,7 @@ export async function processTransmission(args: {
     ...evidenceSummary,
     claims: outputEnvelope?.meta?.claims?.length ?? 0,
   };
+  const responseEnvelope = withPersonaMeta(outputEnvelope, modeDecision);
 
   log.info({ evt: "chat.responded", statusCode: 200, attemptsUsed }, "chat.responded");
   return {
@@ -2026,7 +2121,7 @@ export async function processTransmission(args: {
       transmissionId: transmission.id,
       modeDecision,
       assistant,
-      outputEnvelope,
+      outputEnvelope: responseEnvelope,
       threadMemento,
       driverBlocks: driverBlockSummary,
       // Evidence fields (PR #7.1): include evidence only when present
@@ -2419,12 +2514,16 @@ export async function chatRoutes(
           const cached = await store.getChatResult(existing.id);
           if (cached) {
             setTransmissionHeader(existing.id);
+            const replayEnvelope = withPersonaMeta(
+              { assistant_text: cached.assistant },
+              existing.modeDecision
+            );
             return {
               ok: true,
               transmissionId: existing.id,
               modeDecision: existing.modeDecision,
               assistant: cached.assistant,
-              outputEnvelope: { assistant_text: cached.assistant },
+              outputEnvelope: replayEnvelope,
               idempotentReplay: true,
               threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
               evidenceSummary: emptyEvidenceSummary,
@@ -2486,6 +2585,7 @@ export async function chatRoutes(
     const traceRun = await store.createTraceRun({
       transmissionId: transmission.id,
       level: traceLevel,
+      personaLabel: resolvePersonaLabel(modeDecision),
     });
 
     reply.header("x-sol-trace-run-id", traceRun.id);
@@ -2530,6 +2630,7 @@ export async function chatRoutes(
       requestHints: packet.providerHints,
       defaultModel: process.env.OPENAI_MODEL ?? "gpt-5-nano",
     });
+    const enforcementMode = resolveDriverBlockEnforcementMode();
 
     const MAX_OUTPUT_ENVELOPE_BYTES = 64 * 1024;
 
@@ -2791,6 +2892,9 @@ export async function chatRoutes(
       await store.updateTransmissionStatus({
         transmissionId: transmission.id,
         status: "failed",
+        statusCode: 500,
+        retryable: false,
+        errorCode: "openai_model_missing",
       });
 
       log.info({ evt: "chat.responded", statusCode: 500, attemptsUsed: 0 }, "chat.responded");
@@ -2874,6 +2978,10 @@ export async function chatRoutes(
         await store.updateTransmissionStatus({
           transmissionId: transmission.id,
           status: "failed",
+          statusCode: 400,
+          retryable: false,
+          errorCode: error.code,
+          errorDetail: error.details,
         });
 
         log.info({ evt: "chat.responded", statusCode: 400, attemptsUsed: 0 }, "chat.responded");
@@ -2892,6 +3000,7 @@ export async function chatRoutes(
       summary: `Mode routed: ${modeDecision.modeLabel}`,
       metadata: {
         modeLabel: modeDecision.modeLabel,
+        personaLabel: resolvePersonaLabel(modeDecision),
         domainFlags: modeDecision.domainFlags,
         confidence: modeDecision.confidence,
         modelSelected: modelSelection.model,
@@ -2899,13 +3008,14 @@ export async function chatRoutes(
         ...(modelSelection.tier ? { modelTier: modelSelection.tier } : {}),
       },
     });
-    log.info({
-      evt: "llm.provider.selected",
-      provider: llmProvider,
-      model: modelSelection.model,
-      source: modelSelection.source,
-      ...(modelSelection.tier ? { tier: modelSelection.tier } : {}),
-    }, "llm.provider.selected");
+  log.info({
+    evt: "llm.provider.selected",
+    provider: llmProvider,
+    model: modelSelection.model,
+    source: modelSelection.source,
+    personaLabel: resolvePersonaLabel(modeDecision),
+    ...(modelSelection.tier ? { tier: modelSelection.tier } : {}),
+  }, "llm.provider.selected");
 
     // Ordering Contract (v0): route-level phase sequence is authoritative.
     // Phases must appear in this order in trace (not necessarily contiguous):
@@ -2978,6 +3088,9 @@ export async function chatRoutes(
       await store.updateTransmissionStatus({
         transmissionId: transmission.id,
         status: "failed",
+        statusCode: 500,
+        retryable: true,
+        errorCode: "simulated_failure",
       });
 
       log.info({ evt: "chat.responded", statusCode: 500, attemptsUsed: 0 }, "chat.responded");
@@ -3053,6 +3166,9 @@ export async function chatRoutes(
       await store.updateTransmissionStatus({
         transmissionId: transmission.id,
         status: "failed",
+        statusCode: 500,
+        retryable: true,
+        errorCode,
       });
 
       log.error({ error: message, errorCode }, "evidence_provider.failed");
@@ -3234,6 +3350,7 @@ export async function chatRoutes(
                 status: "failed",
                 statusCode: 422,
                 retryable: false,
+                errorCode,
               });
 
               await store.setChatResult({ transmissionId, assistant: stubAssistant });
@@ -3270,6 +3387,7 @@ export async function chatRoutes(
                 status: "failed",
                 statusCode: 422,
                 retryable: false,
+                errorCode: evidenceGate0.code,
               });
 
               await store.setChatResult({ transmissionId, assistant: stubAssistant });
@@ -3297,23 +3415,22 @@ export async function chatRoutes(
             });
 
             const lint0 = postOutputLinter({
-              modeLabel: modeDecision.modeLabel,
+              modeDecision,
               content: assistant0,
               driverBlocks: promptPack.driverBlocks,
+              enforcementMode,
             });
 
-            const lintMeta0 = buildPostLinterMetadata(lint0.ok ? [] : lint0.violations, 0);
+            const lintTrace0 = buildPostLinterTrace(lint0, 0);
 
             await appendTrace({
               traceRunId: traceRun.id,
               transmissionId: transmission.id,
               actor: "solserver",
               phase: "output_gates",
-              status: lint0.ok ? "completed" : "warning",
-              summary: lint0.ok
-                ? "Output linter passed"
-                : `Output linter warning: ${lintMeta0.violationsCount} violations`,
-              metadata: lintMeta0,
+              status: lintTrace0.status,
+              summary: lintTrace0.summary,
+              metadata: lintTrace0.meta,
             });
 
             const driverBlockEvents0 = buildDriverBlockTraceEvents({
@@ -3337,8 +3454,12 @@ export async function chatRoutes(
               evt: "post_linter.completed",
               attempt: 0,
               ok: lint0.ok,
-              violationsCount: lintMeta0.violationsCount,
+              violationsCount: lintTrace0.meta.violationsCount,
             }, "post_linter.completed");
+
+            if (lintTrace0.violations.length > 0) {
+              bgLog.warn(lintTrace0.meta, "gate.post_lint_warning");
+            }
 
             if (lint0.ok) {
               if (attempt0.mementoDraft) {
@@ -3436,6 +3557,7 @@ export async function chatRoutes(
                 status: "failed",
                 statusCode: 422,
                 retryable: false,
+                errorCode,
               });
 
               await store.setChatResult({ transmissionId, assistant: stubAssistant });
@@ -3472,6 +3594,7 @@ export async function chatRoutes(
                 status: "failed",
                 statusCode: 422,
                 retryable: false,
+                errorCode: evidenceGate1.code,
               });
 
               await store.setChatResult({ transmissionId, assistant: stubAssistant });
@@ -3499,23 +3622,22 @@ export async function chatRoutes(
             });
 
             const lint1 = postOutputLinter({
-              modeLabel: modeDecision.modeLabel,
+              modeDecision,
               content: assistant1,
               driverBlocks: promptPack.driverBlocks,
+              enforcementMode,
             });
 
-            const lintMeta1 = buildPostLinterMetadata(lint1.ok ? [] : lint1.violations, 1);
+            const lintTrace1 = buildPostLinterTrace(lint1, 1);
 
             await appendTrace({
               traceRunId: traceRun.id,
               transmissionId: transmission.id,
               actor: "solserver",
               phase: "output_gates",
-              status: lint1.ok ? "completed" : "warning",
-              summary: lint1.ok
-                ? "Output linter passed"
-                : `Output linter warning: ${lintMeta1.violationsCount} violations`,
-              metadata: lintMeta1,
+              status: lintTrace1.status,
+              summary: lintTrace1.summary,
+              metadata: lintTrace1.meta,
             });
 
             const driverBlockEvents1 = buildDriverBlockTraceEvents({
@@ -3539,8 +3661,12 @@ export async function chatRoutes(
               evt: "post_linter.completed",
               attempt: 1,
               ok: lint1.ok,
-              violationsCount: lintMeta1.violationsCount,
+              violationsCount: lintTrace1.meta.violationsCount,
             }, "post_linter.completed");
+
+            if (lintTrace1.violations.length > 0) {
+              bgLog.warn(lintTrace1.meta, "gate.post_lint_warning");
+            }
 
             if (lint1.ok) {
               if (attempt1.mementoDraft) {
@@ -3602,7 +3728,7 @@ export async function chatRoutes(
                 kind: "driver_block_enforcement",
                 outcome: "fail_closed_422",
                 attempts: 2,
-                violationsCount: lintMeta1.violationsCount,
+                violationsCount: lintTrace1.meta.violationsCount,
               } satisfies EnforcementFailureMetadata,
             });
 
@@ -3619,11 +3745,14 @@ export async function chatRoutes(
               error: "driver_block_enforcement_failed",
             });
 
+            const errorDetail = buildDriverBlockFailureDetail(lintTrace1.meta);
             await store.updateTransmissionStatus({
               transmissionId,
               status: "failed",
               statusCode: 422,
               retryable: false,
+              errorCode: "driver_block_enforcement_failed",
+              errorDetail,
             });
 
             await store.setChatResult({ transmissionId, assistant: stubAssistant });
@@ -3643,6 +3772,9 @@ export async function chatRoutes(
             await store.updateTransmissionStatus({
               transmissionId,
               status: "failed",
+              statusCode: 500,
+              retryable: true,
+              errorCode: "provider_failed",
             });
 
             bgLog.info({ evt: "chat.async.failed" }, "chat.async.failed");
@@ -3725,6 +3857,7 @@ export async function chatRoutes(
           status: "failed",
           statusCode: 422,
           retryable: false,
+          errorCode,
         });
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
@@ -3761,6 +3894,7 @@ export async function chatRoutes(
           status: "failed",
           statusCode: 422,
           retryable: false,
+          errorCode: evidenceGate0.code,
         });
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
@@ -3787,23 +3921,22 @@ export async function chatRoutes(
       });
 
       const lint0 = postOutputLinter({
-        modeLabel: modeDecision.modeLabel,
+        modeDecision,
         content: assistant0,
         driverBlocks: promptPack.driverBlocks,
+        enforcementMode,
       });
 
-      const lintMeta0 = buildPostLinterMetadata(lint0.ok ? [] : lint0.violations, 0);
+      const lintTrace0 = buildPostLinterTrace(lint0, 0);
 
       await appendTrace({
         traceRunId: traceRun.id,
         transmissionId: transmission.id,
         actor: "solserver",
         phase: "output_gates",
-        status: lint0.ok ? "completed" : "warning",
-        summary: lint0.ok
-          ? "Output linter passed"
-          : `Output linter warning: ${lintMeta0.violationsCount} violations`,
-        metadata: lintMeta0,
+        status: lintTrace0.status,
+        summary: lintTrace0.summary,
+        metadata: lintTrace0.meta,
       });
 
       const driverBlockEvents0 = buildDriverBlockTraceEvents({
@@ -3827,11 +3960,11 @@ export async function chatRoutes(
         evt: "post_linter.completed",
         attempt: 0,
         ok: lint0.ok,
-        violationsCount: lintMeta0.violationsCount,
+        violationsCount: lintTrace0.meta.violationsCount,
       }, "post_linter.completed");
 
-      if (!lint0.ok) {
-        log.warn(lintMeta0, "gate.post_lint_warning");
+      if (lintTrace0.violations.length > 0) {
+        log.warn(lintTrace0.meta, "gate.post_lint_warning");
       }
 
       if (lint0.ok) {
@@ -3900,6 +4033,7 @@ export async function chatRoutes(
             status: "failed",
             statusCode: 422,
             retryable: false,
+            errorCode,
           });
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
@@ -3936,6 +4070,7 @@ export async function chatRoutes(
             status: "failed",
             statusCode: 422,
             retryable: false,
+            errorCode: evidenceGate1.code,
           });
 
           await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
@@ -3962,23 +4097,22 @@ export async function chatRoutes(
         });
 
         const lint1 = postOutputLinter({
-          modeLabel: modeDecision.modeLabel,
+          modeDecision,
           content: assistant1,
           driverBlocks: promptPack.driverBlocks,
+          enforcementMode,
         });
 
-        const lintMeta1 = buildPostLinterMetadata(lint1.ok ? [] : lint1.violations, 1);
+        const lintTrace1 = buildPostLinterTrace(lint1, 1);
 
         await appendTrace({
           traceRunId: traceRun.id,
           transmissionId: transmission.id,
           actor: "solserver",
           phase: "output_gates",
-          status: lint1.ok ? "completed" : "warning",
-          summary: lint1.ok
-            ? "Output linter passed"
-            : `Output linter warning: ${lintMeta1.violationsCount} violations`,
-          metadata: lintMeta1,
+          status: lintTrace1.status,
+          summary: lintTrace1.summary,
+          metadata: lintTrace1.meta,
         });
 
         const driverBlockEvents1 = buildDriverBlockTraceEvents({
@@ -4002,11 +4136,11 @@ export async function chatRoutes(
           evt: "post_linter.completed",
           attempt: 1,
           ok: lint1.ok,
-          violationsCount: lintMeta1.violationsCount,
+          violationsCount: lintTrace1.meta.violationsCount,
         }, "post_linter.completed");
 
-        if (!lint1.ok) {
-          log.warn(lintMeta1, "gate.post_lint_warning");
+        if (lintTrace1.violations.length > 0) {
+          log.warn(lintTrace1.meta, "gate.post_lint_warning");
         }
 
         if (lint1.ok) {
@@ -4039,7 +4173,7 @@ export async function chatRoutes(
               kind: "driver_block_enforcement",
               outcome: "fail_closed_422",
               attempts: 2,
-              violationsCount: lintMeta1.violationsCount,
+              violationsCount: lintTrace1.meta.violationsCount,
             } satisfies EnforcementFailureMetadata,
           });
 
@@ -4056,11 +4190,14 @@ export async function chatRoutes(
             error: "driver_block_enforcement_failed",
           });
 
+          const errorDetail = buildDriverBlockFailureDetail(lintTrace1.meta);
           await store.updateTransmissionStatus({
             transmissionId: transmission.id,
             status: "failed",
             statusCode: 422,
             retryable: false,
+            errorCode: "driver_block_enforcement_failed",
+            errorDetail,
           });
 
           await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
@@ -4087,13 +4224,16 @@ export async function chatRoutes(
         error: String(err?.message ?? err),
       });
 
+      const statusCode = err instanceof OpenAIProviderError ? err.statusCode : 500;
+      const errorTag = statusCode === 502 ? "provider_upstream_failed" : "provider_failed";
+
       await store.updateTransmissionStatus({
         transmissionId: transmission.id,
         status: "failed",
+        statusCode,
+        retryable: true,
+        errorCode: errorTag,
       });
-
-      const statusCode = err instanceof OpenAIProviderError ? err.statusCode : 500;
-      const errorTag = statusCode === 502 ? "provider_upstream_failed" : "provider_failed";
 
       log.error({ error: String(err?.message ?? err) }, "provider.failed");
 
@@ -4146,6 +4286,7 @@ export async function chatRoutes(
       ...evidenceSummary,
       claims: outputEnvelope?.meta?.claims?.length ?? 0,
     };
+    const responseEnvelope = withPersonaMeta(outputEnvelope, modeDecision);
 
     log.info({ evt: "chat.responded", statusCode: 200, attemptsUsed }, "chat.responded");
     return {
@@ -4153,7 +4294,7 @@ export async function chatRoutes(
       transmissionId: transmission.id,
       modeDecision,
       assistant,
-      outputEnvelope,
+      outputEnvelope: responseEnvelope,
       threadMemento,
       driverBlocks: driverBlockSummary,
       // Evidence fields (PR #7.1): include evidence only when present

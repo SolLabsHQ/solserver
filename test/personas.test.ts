@@ -4,6 +4,13 @@ import { join } from "node:path";
 
 const personasDir = join(__dirname, "..", "src", "control-plane", "personas");
 const MAX_PERSONA_BYTES = 1024;
+const ALLOWED_PERSONA_FILES = new Set([
+  "ida.md",
+  "sole.md",
+  "cassandra.md",
+  "diogenes.md",
+  "system.md",
+]);
 
 function utf8ByteLength(text: string): number {
   try {
@@ -29,6 +36,10 @@ describe("persona preambles", () => {
       .filter((name) => !name.startsWith("."));
 
     for (const name of files) {
+      expect(
+        ALLOWED_PERSONA_FILES.has(name),
+        `${name} is not a recognized persona preamble file name`
+      ).toBe(true);
       const content = readFileSync(join(personasDir, name), "utf8");
       const bytes = utf8ByteLength(content);
       expect(bytes, `${name} exceeds ${MAX_PERSONA_BYTES} bytes`).toBeLessThanOrEqual(MAX_PERSONA_BYTES);

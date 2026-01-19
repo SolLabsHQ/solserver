@@ -5,6 +5,7 @@ import { config as loadEnv } from "dotenv";
 import pino from "pino";
 
 import { PacketInput, type PacketInput as PacketInputType } from "./contracts/chat";
+import { resolvePersonaLabel } from "./control-plane/router";
 import { processTransmission } from "./routes/chat";
 import { SqliteControlPlaneStore } from "./store/sqlite_control_plane_store";
 import type { Transmission } from "./store/control_plane_store";
@@ -150,7 +151,11 @@ async function processOne(opts: { logIdle: boolean }) {
 
   let traceRun = await store.getTraceRunByTransmission(transmission.id);
   if (!traceRun) {
-    traceRun = await store.createTraceRun({ transmissionId: transmission.id, level: traceLevel });
+    traceRun = await store.createTraceRun({
+      transmissionId: transmission.id,
+      level: traceLevel,
+      personaLabel: resolvePersonaLabel(transmission.modeDecision),
+    });
   }
 
   try {
@@ -186,6 +191,9 @@ async function processOne(opts: { logIdle: boolean }) {
     await store.updateTransmissionStatus({
       transmissionId: transmission.id,
       status: "failed",
+      statusCode: 500,
+      retryable: true,
+      errorCode: "worker_failed",
     });
 
     log.error({ transmissionId: transmission.id, error: message }, "worker.transmission.error");

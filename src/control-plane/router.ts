@@ -1,5 +1,22 @@
 import type { PacketInput, ModeDecision } from "../contracts/chat"; 
 
+export type PersonaLabel = "ida" | "sole" | "cassandra" | "diogenes" | "system";
+
+export function resolvePersonaLabel(modeDecision: ModeDecision): PersonaLabel {
+  if (modeDecision.personaLabel) return modeDecision.personaLabel;
+
+  switch (modeDecision.modeLabel) {
+    case "Ida":
+      return "ida";
+    case "Sole":
+      return "sole";
+    case "System-mode":
+      return "cassandra";
+    default:
+      return "ida";
+  }
+}
+
 export function routeMode(packet: PacketInput): ModeDecision {
   const msg = packet.message;
 
@@ -8,6 +25,7 @@ export function routeMode(packet: PacketInput): ModeDecision {
   if (highRigor) {
     return {
       modeLabel: "System-mode",
+      personaLabel: "cassandra",
       domainFlags: ["high-rigor"],
       confidence: 1.0,
       checkpointNeeded: true,
@@ -21,6 +39,7 @@ export function routeMode(packet: PacketInput): ModeDecision {
   if (reflective) {
     return {
       modeLabel: "Sole",
+      personaLabel: "sole",
       domainFlags: ["relationship"],
       confidence: 0.8,
       checkpointNeeded: false,
@@ -31,6 +50,7 @@ export function routeMode(packet: PacketInput): ModeDecision {
 
   return {
     modeLabel: "Ida",
+    personaLabel: "ida",
     domainFlags: [],
     confidence: 0.7,
     checkpointNeeded: false,

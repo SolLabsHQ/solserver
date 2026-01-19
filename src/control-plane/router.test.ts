@@ -9,6 +9,7 @@ describe("routeMode", () => {
       message: "hello sol",
     });
     expect(md.modeLabel).toBe("Ida");
+    expect(md.personaLabel).toBe("ida");
     expect(md.checkpointNeeded).toBe(false);
     expect(md.reasons).toContain("default");
   });
@@ -20,6 +21,7 @@ describe("routeMode", () => {
       message: "I need architecture advice",
     });
     expect(md.modeLabel).toBe("System-mode");
+    expect(md.personaLabel).toBe("cassandra");
     expect(md.domainFlags).toContain("high-rigor");
     expect(md.checkpointNeeded).toBe(true);
     expect(md.reasons).toContain("high_rigor_keyword");
@@ -32,6 +34,7 @@ describe("routeMode", () => {
       message: "I feel worried about family stuff",
     });
     expect(md.modeLabel).toBe("Sole");
+    expect(md.personaLabel).toBe("sole");
     expect(md.domainFlags).toContain("relationship");
     expect(md.checkpointNeeded).toBe(false);
     expect(md.reasons).toContain("reflective_cues");

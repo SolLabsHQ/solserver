@@ -48,6 +48,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         status TEXT NOT NULL,
         status_code INTEGER,
         retryable INTEGER,
+        error_code TEXT,
+        error_detail_json TEXT,
         lease_expires_at TEXT,
         lease_owner TEXT
       );
@@ -183,6 +185,12 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       this.db.exec("ALTER TABLE transmissions ADD COLUMN packet_json TEXT");
     } catch {}
     try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN error_code TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN error_detail_json TEXT");
+    } catch {}
+    try {
       this.db.exec("ALTER TABLE transmissions ADD COLUMN lease_expires_at TEXT");
     } catch {}
     try {
@@ -226,10 +234,12 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         status,
         status_code,
         retryable,
+        error_code,
+        error_detail_json,
         lease_expires_at,
         lease_owner
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     try {
@@ -245,6 +255,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         t.status,
         t.statusCode ?? null,
         t.retryable === undefined ? null : (t.retryable ? 1 : 0),
+        null,
+        null,
         null,
         null
       );
@@ -278,15 +290,33 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     status: TransmissionStatus;
     statusCode?: number;
     retryable?: boolean;
+    errorCode?: string | null;
+    errorDetail?: Record<string, any> | null;
   }): Promise<void> {
     const stmt = this.db.prepare(`
       UPDATE transmissions
-      SET status = ?, status_code = COALESCE(?, status_code), retryable = COALESCE(?, retryable)
+      SET status = ?,
+        status_code = COALESCE(?, status_code),
+        retryable = COALESCE(?, retryable),
+        error_code = COALESCE(?, error_code),
+        error_detail_json = COALESCE(?, error_detail_json)
       WHERE id = ?
     `);
 
     const retryableValue = args.retryable === undefined ? null : (args.retryable ? 1 : 0);
-    stmt.run(args.status, args.statusCode ?? null, retryableValue, args.transmissionId);
+    const errorDetailJson = args.errorDetail === undefined
+      ? null
+      : args.errorDetail === null
+        ? null
+        : JSON.stringify(args.errorDetail);
+    stmt.run(
+      args.status,
+      args.statusCode ?? null,
+      retryableValue,
+      args.errorCode ?? null,
+      errorDetailJson,
+      args.transmissionId
+    );
   }
 
   async leaseNextTransmission(args: {
@@ -713,6 +743,12 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         packet = JSON.parse(packetJson);
       } catch {}
     }
+    let errorDetail: Record<string, any> | undefined;
+    if (row.error_detail_json) {
+      try {
+        errorDetail = JSON.parse(row.error_detail_json);
+      } catch {}
+    }
 
     return {
       id: row.id,
@@ -725,6 +761,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       status: row.status,
       statusCode: row.status_code ?? undefined,
       retryable: row.retryable === null || row.retryable === undefined ? undefined : Boolean(row.retryable),
+      errorCode: row.error_code ?? undefined,
+      errorDetail,
       packetJson,
       packet,
       leaseExpiresAt: row.lease_expires_at ?? null,

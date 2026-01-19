@@ -24,6 +24,11 @@ function makePacket(message: string): PacketInput {
 function makeModeDecision(modeLabel: string): ModeDecision {
   return {
     modeLabel,
+    personaLabel: modeLabel === "Sole"
+      ? "sole"
+      : modeLabel === "System-mode"
+        ? "cassandra"
+        : "ida",
     domainFlags: [],
     confidence: 0.7,
     checkpointNeeded: false,

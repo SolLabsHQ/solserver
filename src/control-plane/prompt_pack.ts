@@ -4,6 +4,7 @@ import type { PacketInput, ModeDecision } from "../contracts/chat";
 import type { EvidencePack, EvidenceItem } from "../evidence/evidence_provider";
 import { assembleDriverBlocks, formatDriverBlocksForPrompt, type AssembledDriverBlock, type DriverBlockEnforcementResult } from "./driver_blocks";
 import { buildSpineV1OutputContract } from "./spine_v1";
+import { resolvePersonaLabel } from "./router";
 
 /**
  * PromptPack is the deterministic "spine" for provider calls.
@@ -68,6 +69,7 @@ function buildMountedLaw(modeDecision: ModeDecision, driverBlocksText: string): 
 
   lines.push("ModeDecision:");
   lines.push(`- modeLabel: ${modeDecision.modeLabel}`);
+  lines.push(`- personaLabel: ${resolvePersonaLabel(modeDecision)}`);
   lines.push(`- domainFlags: ${(modeDecision.domainFlags ?? []).join(", ") || "(none)"}`);
 
   return lines.join("\n");

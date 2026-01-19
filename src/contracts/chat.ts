@@ -118,6 +118,7 @@ export type PacketInput = z.infer<typeof PacketInput>;
 
 export type ModeDecision = {
   modeLabel: "Ida" | "Sole" | "System-mode";
+  personaLabel?: "ida" | "sole" | "cassandra" | "diogenes" | "system";
   domainFlags: string[];
   confidence: number;
   checkpointNeeded: boolean;
