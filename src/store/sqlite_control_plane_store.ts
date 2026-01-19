@@ -42,11 +42,14 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         thread_id TEXT NOT NULL,
         client_request_id TEXT,
         message TEXT NOT NULL,
+        packet_json TEXT,
         mode_decision TEXT NOT NULL,
         created_at TEXT NOT NULL,
         status TEXT NOT NULL,
         status_code INTEGER,
-        retryable INTEGER
+        retryable INTEGER,
+        lease_expires_at TEXT,
+        lease_owner TEXT
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_client_request_id ON transmissions(client_request_id);
@@ -86,6 +89,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         id TEXT PRIMARY KEY,
         transmission_id TEXT NOT NULL,
         level TEXT NOT NULL,
+        persona_label TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY (transmission_id) REFERENCES transmissions(id)
       );
@@ -175,6 +179,18 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     try {
       this.db.exec("ALTER TABLE transmissions ADD COLUMN retryable INTEGER");
     } catch {}
+    try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN packet_json TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN lease_expires_at TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN lease_owner TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE trace_runs ADD COLUMN persona_label TEXT");
+    } catch {}
   }
 
   async createTransmission(args: {
@@ -198,8 +214,22 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     };
 
     const stmt = this.db.prepare(`
-      INSERT INTO transmissions (id, packet_type, thread_id, client_request_id, message, mode_decision, created_at, status, status_code, retryable)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO transmissions (
+        id,
+        packet_type,
+        thread_id,
+        client_request_id,
+        message,
+        packet_json,
+        mode_decision,
+        created_at,
+        status,
+        status_code,
+        retryable,
+        lease_expires_at,
+        lease_owner
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     try {
@@ -209,11 +239,14 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         t.threadId,
         t.clientRequestId ?? null,
         t.message,
+        JSON.stringify(args.packet),
         JSON.stringify(t.modeDecision),
         t.createdAt,
         t.status,
         t.statusCode ?? null,
-        t.retryable === undefined ? null : (t.retryable ? 1 : 0)
+        t.retryable === undefined ? null : (t.retryable ? 1 : 0),
+        null,
+        null
       );
     } catch (err) {
       const code = (err as { code?: string } | null)?.code;
@@ -254,6 +287,55 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
 
     const retryableValue = args.retryable === undefined ? null : (args.retryable ? 1 : 0);
     stmt.run(args.status, args.statusCode ?? null, retryableValue, args.transmissionId);
+  }
+
+  async leaseNextTransmission(args: {
+    leaseOwner: string;
+    leaseDurationSeconds: number;
+    eligibleStatuses?: TransmissionStatus[];
+  }): Promise<{ transmission: Transmission; previousStatus: TransmissionStatus } | null> {
+    const eligible = (args.eligibleStatuses ?? ["created", "processing"])
+      .filter((status) => status === "created" || status === "processing");
+    if (eligible.length === 0) return null;
+
+    const statusList = eligible.map((status) => `'${status}'`).join(", ");
+    const nowIso = new Date().toISOString();
+    const leaseExpiresAt = new Date(Date.now() + args.leaseDurationSeconds * 1000).toISOString();
+
+    const tx = this.db.transaction(() => {
+      const row = this.db.prepare(`
+        SELECT * FROM transmissions
+        WHERE status IN (${statusList})
+          AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+        ORDER BY created_at ASC
+        LIMIT 1
+      `).get(nowIso) as any;
+
+      if (!row) return null;
+
+      const update = this.db.prepare(`
+        UPDATE transmissions
+        SET status = 'processing', lease_expires_at = ?, lease_owner = ?
+        WHERE id = ?
+          AND status IN (${statusList})
+          AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+      `).run(leaseExpiresAt, args.leaseOwner, row.id, nowIso);
+
+      if (update.changes === 0) {
+        return null;
+      }
+
+      const transmission = this.rowToTransmission({
+        ...row,
+        status: "processing",
+        lease_expires_at: leaseExpiresAt,
+        lease_owner: args.leaseOwner,
+      });
+
+      return { transmission, previousStatus: row.status as TransmissionStatus };
+    });
+
+    return tx();
   }
 
   async appendDeliveryAttempt(args: {
@@ -391,20 +473,25 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     return r;
   }
 
-  async createTraceRun(args: { transmissionId: string; level: TraceLevel }): Promise<TraceRun> {
+  async createTraceRun(args: {
+    transmissionId: string;
+    level: TraceLevel;
+    personaLabel?: string | null;
+  }): Promise<TraceRun> {
     const tr: TraceRun = {
       id: randomUUID(),
       transmissionId: args.transmissionId,
       level: args.level,
+      personaLabel: args.personaLabel ?? null,
       createdAt: new Date().toISOString(),
     };
 
     const stmt = this.db.prepare(`
-      INSERT INTO trace_runs (id, transmission_id, level, created_at)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO trace_runs (id, transmission_id, level, persona_label, created_at)
+      VALUES (?, ?, ?, ?, ?)
     `);
 
-    stmt.run(tr.id, tr.transmissionId, tr.level, tr.createdAt);
+    stmt.run(tr.id, tr.transmissionId, tr.level, tr.personaLabel ?? null, tr.createdAt);
     return tr;
   }
 
@@ -471,6 +558,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       id: row.id,
       transmissionId: row.transmission_id,
       level: row.level,
+      personaLabel: row.persona_label ?? null,
       createdAt: row.created_at,
     };
   }
@@ -490,6 +578,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       id: row.id,
       transmissionId: row.transmission_id,
       level: row.level,
+      personaLabel: row.persona_label ?? null,
       createdAt: row.created_at,
     };
   }
@@ -578,6 +667,14 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
   }
 
   private rowToTransmission(row: any): Transmission {
+    let packet: PacketInput | undefined;
+    const packetJson = row.packet_json ?? undefined;
+    if (packetJson) {
+      try {
+        packet = JSON.parse(packetJson);
+      } catch {}
+    }
+
     return {
       id: row.id,
       packetType: row.packet_type,
@@ -589,6 +686,10 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       status: row.status,
       statusCode: row.status_code ?? undefined,
       retryable: row.retryable === null || row.retryable === undefined ? undefined : Boolean(row.retryable),
+      packetJson,
+      packet,
+      leaseExpiresAt: row.lease_expires_at ?? null,
+      leaseOwner: row.lease_owner ?? null,
     };
   }
 

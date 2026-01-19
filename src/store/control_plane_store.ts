@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { PacketInput, ModeDecision, Evidence } from "../contracts/chat";
 
-export type TransmissionStatus = "created" | "completed" | "failed";
+export type TransmissionStatus = "created" | "processing" | "completed" | "failed";
 export type DeliveryStatus = "succeeded" | "failed";
 
 export type Transmission = {
@@ -16,6 +16,10 @@ export type Transmission = {
   status: TransmissionStatus;
   statusCode?: number;
   retryable?: boolean;
+  packetJson?: string;
+  packet?: PacketInput;
+  leaseExpiresAt?: string | null;
+  leaseOwner?: string | null;
 };
 
 export type DeliveryAttempt = {
@@ -48,6 +52,7 @@ export type TraceRun = {
   id: string;
   transmissionId: string;
   level: TraceLevel;
+  personaLabel?: string | null;
   createdAt: string;
 };
 
@@ -132,6 +137,7 @@ export interface ControlPlaneStore {
   createTraceRun(args: {
     transmissionId: string;
     level: TraceLevel;
+    personaLabel?: string | null;
   }): Promise<TraceRun>;
 
   appendTraceEvent(args: {
@@ -194,6 +200,10 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       status: "created",
       statusCode: undefined,
       retryable: undefined,
+      packetJson: JSON.stringify(args.packet),
+      packet: args.packet,
+      leaseExpiresAt: null,
+      leaseOwner: null,
     };
 
     this.transmissions.set(id, t);
@@ -298,11 +308,13 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
   async createTraceRun(args: {
     transmissionId: string;
     level: TraceLevel;
+    personaLabel?: string | null;
   }): Promise<TraceRun> {
     const tr: TraceRun = {
       id: randomUUID(),
       transmissionId: args.transmissionId,
       level: args.level,
+      personaLabel: args.personaLabel ?? null,
       createdAt: new Date().toISOString(),
     };
     this.traceRuns.set(tr.id, tr);

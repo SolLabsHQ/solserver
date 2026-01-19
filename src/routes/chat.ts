@@ -35,7 +35,7 @@ import {
 import { fakeModelReplyWithMeta } from "../providers/fake_model";
 import { openAIModelReplyWithMeta, OpenAIProviderError } from "../providers/openai_model";
 import { selectModel } from "../providers/provider_config";
-import type { ControlPlaneStore } from "../store/control_plane_store";
+import type { ControlPlaneStore, TraceRun, Transmission } from "../store/control_plane_store";
 import { MemoryControlPlaneStore } from "../store/control_plane_store";
 
 type EnforcementFailureMetadata = {
@@ -327,6 +327,1724 @@ function buildEvidenceGateFailureResponse(args: {
   };
 }
 
+export async function processTransmission(args: {
+  store: ControlPlaneStore;
+  packet: PacketInput;
+  transmission: Transmission;
+  modeDecision: ModeDecision;
+  traceRun: TraceRun;
+  simulate?: string;
+  req?: any;
+  log: {
+    child: (bindings: Record<string, any>) => any;
+    debug: (obj: any, msg?: string) => void;
+    info: (obj: any, msg?: string) => void;
+    warn: (obj: any, msg?: string) => void;
+    error: (obj: any, msg?: string) => void;
+  };
+  pendingCompletions?: Set<string>;
+  allowAsyncSimulation?: boolean;
+}): Promise<{ statusCode: number; body: any }> {
+  const {
+    store,
+    packet,
+    transmission,
+    modeDecision,
+    traceRun,
+    simulate = "",
+    req,
+    log: baseLog,
+    pendingCompletions,
+    allowAsyncSimulation = false,
+  } = args;
+
+  const traceLevel = packet.traceConfig?.level ?? "info";
+
+  let traceSeq = 0;
+  const appendTrace = async (event: Parameters<typeof store.appendTraceEvent>[0]) => {
+    const metadata = { ...(event.metadata ?? {}), seq: traceSeq++ };
+    return store.appendTraceEvent({ ...event, metadata });
+  };
+
+  const llmProvider = (process.env.LLM_PROVIDER ?? "fake").toLowerCase() === "openai"
+    ? "openai"
+    : "fake";
+
+  const modelSelection = selectModel({
+    solEnv: process.env.SOL_ENV,
+    nodeEnv: process.env.NODE_ENV,
+    requestHints: packet.providerHints,
+    defaultModel: process.env.OPENAI_MODEL ?? "gpt-5-nano",
+  });
+
+  const MAX_OUTPUT_ENVELOPE_BYTES = 64 * 1024;
+
+  const getRawByteLength = (text: string): number => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const anyGlobal: any = globalThis as any;
+      if (anyGlobal.Buffer?.byteLength) return anyGlobal.Buffer.byteLength(text, "utf8");
+    } catch {}
+
+    try {
+      return new TextEncoder().encode(text).length;
+    } catch {
+      return text.length;
+    }
+  };
+
+  const parseOutputEnvelope = async (args: {
+    rawText: string;
+    attempt: 0 | 1;
+  }): Promise<{ ok: true; envelope: OutputEnvelope } | { ok: false; reason: "invalid_json" | "schema_invalid" | "payload_too_large"; issuesCount?: number }> => {
+    const rawLength = getRawByteLength(args.rawText);
+
+    if (rawLength > MAX_OUTPUT_ENVELOPE_BYTES) {
+      const meta = buildOutputEnvelopeMetadata({
+        attempt: args.attempt,
+        ok: false,
+        rawLength,
+        reason: "payload_too_large",
+      });
+
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: "failed",
+        summary: "Output envelope payload too large",
+        metadata: meta,
+      });
+
+      return { ok: false, reason: "payload_too_large" };
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(args.rawText);
+    } catch (error) {
+      const meta = buildOutputEnvelopeMetadata({
+        attempt: args.attempt,
+        ok: false,
+        rawLength,
+        reason: "invalid_json",
+        error,
+      });
+
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: "failed",
+        summary: "Output envelope invalid JSON",
+        metadata: meta,
+      });
+
+      return { ok: false, reason: "invalid_json" };
+    }
+
+    const result = OutputEnvelopeSchema.safeParse(parsed);
+    if (!result.success) {
+      const meta = buildOutputEnvelopeMetadata({
+        attempt: args.attempt,
+        ok: false,
+        rawLength,
+        reason: "schema_invalid",
+        issuesCount: result.error.issues.length,
+        error: result.error,
+      });
+
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: "failed",
+        summary: "Output envelope schema invalid",
+        metadata: meta,
+      });
+
+      return { ok: false, reason: "schema_invalid", issuesCount: result.error.issues.length };
+    }
+
+    const meta = buildOutputEnvelopeMetadata({
+      attempt: args.attempt,
+      ok: true,
+      rawLength,
+    });
+
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "output_gates",
+      status: "completed",
+      summary: "Output envelope validated",
+      metadata: meta,
+    });
+
+    return { ok: true, envelope: result.data };
+  };
+
+  const runEvidenceOutputGates = async (args: {
+    envelope: OutputEnvelope;
+    attempt: 0 | 1;
+    evidencePack: EvidencePack | null;
+    transmissionId: string;
+  }): Promise<{ ok: true; envelope: OutputEnvelope } | { ok: false; code: EvidenceGateErrorCode }> => {
+    const normalized = applyEvidenceMeta(args.envelope, args.evidencePack, args.transmissionId);
+    const claims = extractClaims(normalized);
+
+    const binding = runEvidenceBindingGate(claims, args.evidencePack);
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "output_gates",
+      status: binding.ok ? "completed" : "failed",
+      summary: binding.ok ? "Evidence binding passed" : "Evidence binding failed",
+      metadata: {
+        kind: "evidence_binding",
+        ok: binding.ok,
+        attempt: args.attempt,
+        invalidRefsCount: binding.invalidRefsCount,
+        ...(binding.reason ? { reason: binding.reason } : {}),
+      },
+    });
+
+    if (!binding.ok) {
+      return {
+        ok: false,
+        code: binding.reason === "claims_without_evidence"
+          ? "claims_without_evidence"
+          : "evidence_binding_failed",
+      };
+    }
+
+    const budget = runEvidenceBudgetGate(normalized, claims, args.evidencePack);
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "output_gates",
+      status: budget.ok ? "completed" : "failed",
+      summary: budget.ok ? "Evidence budget passed" : "Evidence budget failed",
+      metadata: {
+        kind: "evidence_budget",
+        ok: budget.ok,
+        attempt: args.attempt,
+        ...(budget.reason ? { reason: budget.reason } : {}),
+        limits: budget.limits,
+        counts: budget.counts,
+        metaBytes: budget.metaBytes,
+        evidenceBytes: budget.evidenceBytes,
+      },
+    });
+
+    if (!budget.ok) {
+      return { ok: false, code: "evidence_budget_exceeded" };
+    }
+
+    return { ok: true, envelope: normalized };
+  };
+
+  const shouldCaptureModelIo =
+    process.env.TRACE_CAPTURE_MODEL_IO === "1" && process.env.NODE_ENV !== "production";
+
+  const truncatePreview = (value: string, max = 4096) =>
+    value.length > max ? value.slice(0, max) : value;
+
+  const runModelAttempt = async (args: {
+    attempt: 0 | 1;
+    promptPack: PromptPack;
+    modeLabel: string;
+    evidencePack?: EvidencePack | null;
+    forcedRawText?: string;
+    logger?: {
+      debug: (obj: any, msg?: string) => void;
+      info?: (obj: any, msg?: string) => void;
+      warn?: (obj: any, msg?: string) => void;
+      error?: (obj: any, msg?: string) => void;
+    };
+  }) => {
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "model",
+      phase: "model_call",
+      status: "started",
+      summary: `Calling model provider (Attempt ${args.attempt})`,
+      metadata: { attempt: args.attempt },
+    });
+
+    const providerInputText = toSinglePromptText(args.promptPack);
+    const meta = llmProvider === "openai"
+      ? await openAIModelReplyWithMeta({
+          promptText: providerInputText,
+          modeLabel: args.modeLabel,
+          model: modelSelection.model,
+          logger: args.logger,
+        })
+      : await fakeModelReplyWithMeta({
+          userText: providerInputText,
+          modeLabel: args.modeLabel,
+          evidencePack: args.evidencePack,
+        });
+
+    const rawText = args.forcedRawText ?? meta.rawText;
+    const promptPreview = shouldCaptureModelIo ? truncatePreview(providerInputText) : undefined;
+    const responsePreview = shouldCaptureModelIo ? truncatePreview(rawText) : undefined;
+
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "model",
+      phase: "model_call",
+      status: "completed",
+      summary: `Model response received (Attempt ${args.attempt})`,
+      metadata: {
+        attempt: args.attempt,
+        outputLength: rawText.length,
+        ...(shouldCaptureModelIo
+          ? { prompt_preview: promptPreview, response_preview: responsePreview }
+          : {}),
+      },
+    });
+
+    if (args.logger) {
+      args.logger.debug({
+        evt: "model_call.completed",
+        attempt: args.attempt,
+        outputLength: rawText.length,
+      }, "model_call.completed");
+    }
+
+    return { rawText, mementoDraft: meta.mementoDraft };
+  };
+
+  // Route-scoped logger for control-plane tracing (keeps logs searchable).
+  const log = baseLog.child({
+    plane: "chat",
+    transmissionId: transmission.id,
+    threadId: packet.threadId,
+    clientRequestId: packet.clientRequestId ?? undefined,
+    modeLabel: modeDecision?.modeLabel ?? undefined,
+    traceRunId: traceRun.id,
+  });
+
+  if (llmProvider === "openai" && !process.env.OPENAI_MODEL) {
+    await store.updateTransmissionStatus({
+      transmissionId: transmission.id,
+      status: "failed",
+    });
+
+    log.info({ evt: "chat.responded", statusCode: 500, attemptsUsed: 0 }, "chat.responded");
+    return {
+      statusCode: 500,
+      body: {
+        error: "openai_model_missing",
+        transmissionId: transmission.id,
+        traceRunId: traceRun.id,
+        retryable: false,
+      },
+    };
+  }
+
+  log.debug({
+    idempotency: Boolean(packet.clientRequestId),
+    status: transmission.status,
+    domainFlags: modeDecision?.domainFlags ?? [],
+  }, "control_plane.transmission_ready");
+
+  // --- Evidence Intake (PR #7) ---
+  // Run evidence intake gate: extract URLs, create auto-captures, validate
+  let evidenceIntakeOutput;
+  try {
+    evidenceIntakeOutput = runEvidenceIntake(packet);
+    packet.evidence = evidenceIntakeOutput.evidence;
+
+    // Persist evidence to SQLite (idempotent)
+    if (evidenceIntakeOutput.evidence) {
+      await store.saveEvidence({
+        transmissionId: transmission.id,
+        threadId: packet.threadId,
+        evidence: evidenceIntakeOutput.evidence,
+      });
+    }
+
+    const snippetCharTotal = evidenceIntakeOutput.evidence?.supports
+      ?.filter((s) => s.type === "text_snippet" && s.snippetText)
+      .reduce((sum, s) => sum + (s.snippetText?.length || 0), 0) ?? 0;
+
+    const capturesCount = evidenceIntakeOutput.evidence.captures?.length ?? 0;
+    const supportsCount = evidenceIntakeOutput.evidence.supports?.length ?? 0;
+    const claimsCount = evidenceIntakeOutput.evidence.claims?.length ?? 0;
+
+    // Trace event: Evidence intake
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "evidence_intake",
+      status: "completed",
+      summary: `Evidence processed: ${evidenceIntakeOutput.autoCaptures} auto-captures, ${evidenceIntakeOutput.clientCaptures} client-captures`,
+      metadata: {
+        autoCaptures: evidenceIntakeOutput.autoCaptures,
+        clientCaptures: evidenceIntakeOutput.clientCaptures,
+        urlsDetectedCount: evidenceIntakeOutput.urlsDetected.length,
+        warningsCount: evidenceIntakeOutput.warnings.length,
+        captureCount: capturesCount,
+        supportCount: supportsCount,
+        claimCount: claimsCount,
+        snippetCharTotal,
+      },
+    });
+
+    log.info({
+      evt: "evidence.intake.completed",
+      capturesCount,
+      supportsCount,
+      claimsCount,
+    }, "evidence.intake.completed");
+  } catch (error) {
+    // Handle EvidenceValidationError (fail closed with structured 400)
+    if (error instanceof EvidenceValidationError) {
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "evidence_intake",
+        status: "failed",
+        summary: `Evidence validation failed: ${error.message}`,
+        metadata: error.details,
+      });
+
+      await store.updateTransmissionStatus({
+        transmissionId: transmission.id,
+        status: "failed",
+      });
+
+      log.info({ evt: "chat.responded", statusCode: 400, attemptsUsed: 0 }, "chat.responded");
+      return {
+        statusCode: 400,
+        body: error.toJSON(),
+      };
+    }
+    throw error;
+  }
+
+  // Trace event: Policy engine (mode routing)
+  await appendTrace({
+    traceRunId: traceRun.id,
+    transmissionId: transmission.id,
+    actor: "solserver",
+    phase: "policy_engine",
+    status: "completed",
+    summary: `Mode routed: ${modeDecision.modeLabel}`,
+    metadata: {
+      modeLabel: modeDecision.modeLabel,
+      domainFlags: modeDecision.domainFlags,
+      confidence: modeDecision.confidence,
+      modelSelected: modelSelection.model,
+      modelSource: modelSelection.source,
+      ...(modelSelection.tier ? { modelTier: modelSelection.tier } : {}),
+    },
+  });
+  log.info({
+    evt: "llm.provider.selected",
+    provider: llmProvider,
+    model: modelSelection.model,
+    source: modelSelection.source,
+    ...(modelSelection.tier ? { tier: modelSelection.tier } : {}),
+  }, "llm.provider.selected");
+
+  // Ordering Contract (v0): route-level phase sequence is authoritative.
+  // Phases must appear in this order in trace (not necessarily contiguous):
+  // evidence_intake → gate_normalize_modality → url_extraction → gate_intent_risk → gate_lattice
+  // → model_call → output_gates (post_linter + driver_block per-block events).
+  // Tests assert this sequence from persisted trace events.
+  // Note: metadata.seq is global and monotonic; it is not reset per gate.
+  // Run gates pipeline
+  const gatesOutput = runGatesPipeline(packet);
+
+  const effectiveEvidence = evidenceIntakeOutput?.evidence ?? packet.evidence ?? null;
+  const effectiveWarnings: any[] = evidenceIntakeOutput?.warnings ?? [];
+
+  const evidenceSummary = {
+    captures: effectiveEvidence?.captures?.length || 0,
+    supports: effectiveEvidence?.supports?.length || 0,
+    claims: effectiveEvidence?.claims?.length || 0,
+    warnings: effectiveWarnings.length,
+  };
+
+  const hasEvidence =
+    evidenceSummary.captures > 0 || evidenceSummary.supports > 0 || evidenceSummary.claims > 0;
+
+  const phaseByGateName: Record<
+    string,
+    "gate_normalize_modality" | "url_extraction" | "gate_intent_risk" | "gate_lattice"
+  > = {
+    normalize_modality: "gate_normalize_modality",
+    url_extraction: "url_extraction",
+    intent_risk: "gate_intent_risk",
+    lattice: "gate_lattice",
+  };
+
+  const statusByGateStatus: Record<string, "completed" | "failed" | "warning"> = {
+    pass: "completed",
+    fail: "failed",
+    warn: "warning",
+  };
+
+  for (const result of gatesOutput.results) {
+    const phase = phaseByGateName[result.gateName];
+    if (!phase) {
+      log.warn({ gateName: result.gateName }, "gate.trace.unknown_gate");
+      continue;
+    }
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase,
+      status: statusByGateStatus[result.status] ?? "completed",
+      summary: result.summary,
+      metadata: { gateName: result.gateName, ...(result.metadata ?? {}) },
+    });
+  }
+
+  const gatesOk = gatesOutput.results.every((r) => r.status === "pass");
+  log.info({ evt: "gates.completed", gatesOk }, "gates.completed");
+
+  // Dev/testing hook: force a 500 when requested.
+  log.info({ evt: "chat.accepted", simulate: Boolean(simulate) }, "chat.accepted");
+  if (simulate === "500") {
+    await store.appendDeliveryAttempt({
+      transmissionId: transmission.id,
+      provider: llmProvider,
+      status: "failed",
+      error: "simulated_500",
+    });
+
+    await store.updateTransmissionStatus({
+      transmissionId: transmission.id,
+      status: "failed",
+    });
+
+    log.info({ evt: "chat.responded", statusCode: 500, attemptsUsed: 0 }, "chat.responded");
+    return {
+      statusCode: 500,
+      body: {
+        error: "simulated_failure",
+        transmissionId: transmission.id,
+        traceRunId: traceRun.id,
+        retryable: true,
+      },
+    };
+  }
+
+  // --- Step 6: Prompt assembly stub (mounted law + retrieval slot) ---
+  // We build the PromptPack even when using the fake provider so OpenAI wiring is a swap, not a rewrite.
+  await appendTrace({
+    traceRunId: traceRun.id,
+    transmissionId: transmission.id,
+    actor: "solserver",
+    phase: "enrichment_lattice",
+    status: "started",
+    summary: "Retrieving context",
+  });
+
+  const retrievalItems = await retrieveContext({
+    threadId: packet.threadId,
+    packetType: packet.packetType,
+    message: packet.message,
+  });
+
+  log.debug(retrievalLogShape(retrievalItems), "control_plane.retrieval");
+
+  await appendTrace({
+    traceRunId: traceRun.id,
+    transmissionId: transmission.id,
+    actor: "solserver",
+    phase: "enrichment_lattice",
+    status: "completed",
+    summary: `Retrieved ${retrievalItems.length} context items`,
+    metadata: { itemCount: retrievalItems.length },
+  });
+
+  const evidenceDecision = resolveEvidenceProviderDecision({
+    intakeSummary: evidenceSummary,
+    traceConfig: packet.traceConfig,
+    nodeEnv: process.env.NODE_ENV,
+    env: process.env,
+  });
+  const allowEvidencePack = evidenceDecision.allowed;
+  const evidenceProviderName = (process.env.EVIDENCE_PROVIDER ?? "stub").toLowerCase();
+  const evidenceProvider = selectEvidenceProvider();
+  let evidencePack: EvidencePack | null = null;
+  try {
+    if (allowEvidencePack) {
+      evidencePack = await evidenceProvider.getEvidencePack({
+        threadId: packet.threadId,
+        query: packet.message,
+        modeLabel: modeDecision.modeLabel,
+      });
+      if (evidencePack) validateEvidencePack(evidencePack);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const errorCode = error instanceof EvidenceProviderError
+      ? "evidence_provider_contract_failed"
+      : "evidence_provider_failed";
+
+    await store.appendDeliveryAttempt({
+      transmissionId: transmission.id,
+      provider: llmProvider,
+      status: "failed",
+      error: errorCode,
+    });
+
+    await store.updateTransmissionStatus({
+      transmissionId: transmission.id,
+      status: "failed",
+    });
+
+    log.error({ error: message, errorCode }, "evidence_provider.failed");
+    log.info({ evt: "chat.responded", statusCode: 500, attemptsUsed: 0 }, "chat.responded");
+    return {
+      statusCode: 500,
+      body: {
+        error: "evidence_provider_failed",
+        transmissionId: transmission.id,
+        traceRunId: traceRun.id,
+        retryable: true,
+      },
+    };
+  }
+
+  await appendTrace({
+    traceRunId: traceRun.id,
+    transmissionId: transmission.id,
+    actor: "solserver",
+    phase: "output_gates",
+    status: "completed",
+    summary: "Evidence provider resolved",
+    metadata: {
+      kind: "evidence_provider",
+      provider: allowEvidencePack ? evidenceProviderName : "skipped",
+      allowed: allowEvidencePack,
+      allowed_reason: evidenceDecision.allowedReason,
+      forced: evidenceDecision.forced,
+      packId: evidencePack?.packId,
+      itemCount: evidencePack?.items.length ?? 0,
+    },
+  });
+
+  await appendTrace({
+    traceRunId: traceRun.id,
+    transmissionId: transmission.id,
+    actor: "solserver",
+    phase: "compose_request",
+    status: "started",
+    summary: "Building prompt pack",
+  });
+
+  const promptPack = buildPromptPack({
+    packet,
+    modeDecision,
+    retrievalItems,
+    evidencePack,
+  });
+
+  log.debug(promptPackLogShape(promptPack), "control_plane.prompt_pack");
+  log.info({
+    evt: "prompt_pack.built",
+    driverBlocksCount: promptPack.driverBlocks.length,
+    retrievalCount: retrievalItems.length,
+  }, "prompt_pack.built");
+
+  // Provider input for v0: one stable string with headers.
+  // We do not log the content here.
+  const providerInputText = toSinglePromptText(promptPack);
+
+  await appendTrace({
+    traceRunId: traceRun.id,
+    transmissionId: transmission.id,
+    actor: "solserver",
+    phase: "compose_request",
+    status: "completed",
+    summary: "Prompt pack assembled",
+    metadata: {
+      inputLength: providerInputText.length,
+      driverBlocksAccepted: promptPack.driverBlocks.length,
+      driverBlocksDropped: promptPack.driverBlockEnforcement.dropped.length,
+      driverBlocksTrimmed: promptPack.driverBlockEnforcement.trimmed.length,
+    },
+  });
+
+  const driverBlockSummary = {
+    baselineCount: promptPack.driverBlocks.filter((b) => b.source === "system_baseline").length,
+    acceptedCount: promptPack.driverBlocks.length,
+    droppedCount: promptPack.driverBlockEnforcement.dropped.length,
+    trimmedCount: promptPack.driverBlockEnforcement.trimmed.length,
+  };
+
+  // Trace event: Driver Blocks enforcement (if any blocks were dropped or trimmed)
+  if (promptPack.driverBlockEnforcement.dropped.length > 0 || promptPack.driverBlockEnforcement.trimmed.length > 0) {
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "compose_request",
+      status: "warning",
+      summary: `Driver Blocks enforcement: ${promptPack.driverBlockEnforcement.dropped.length} dropped, ${promptPack.driverBlockEnforcement.trimmed.length} trimmed`,
+      metadata: {
+        dropped: promptPack.driverBlockEnforcement.dropped,
+        trimmed: promptPack.driverBlockEnforcement.trimmed,
+      },
+    });
+  }
+
+  // Dev/testing hook: simulate an accepted-but-pending response (202) that COMPLETES shortly after.
+  if (allowAsyncSimulation && simulate === "202" && pendingCompletions) {
+    const transmissionId = transmission.id;
+
+    if (!pendingCompletions.has(transmissionId)) {
+      pendingCompletions.add(transmissionId);
+
+      const bgLog = log.child({
+        async: true,
+      });
+
+      bgLog.info({ evt: "chat.async.started" }, "chat.async.started");
+
+      // Small fixed delay is enough for v0 testing. We'll replace with real async provider later.
+      const delayMs = 750;
+
+      setTimeout(async () => {
+        try {
+          const current = await store.getTransmission(transmissionId);
+          if (!current) {
+            bgLog.warn({ status: "missing" }, "delivery.async.skip");
+            return;
+          }
+
+          // If already terminal, don't double-complete.
+          if (current.status !== "created" && current.status !== "processing") {
+            bgLog.info({ status: current.status }, "delivery.async.skip");
+            return;
+          }
+
+          const attempt0Output = getForcedTestProviderOutput(req, 0);
+          const attempt1Output = getForcedTestProviderOutput(req, 1);
+
+          const attempt0 = await runModelAttempt({
+            attempt: 0,
+            promptPack,
+            modeLabel: modeDecision.modeLabel,
+            evidencePack,
+            forcedRawText: attempt0Output,
+            logger: bgLog,
+          });
+
+          const envelope0 = await parseOutputEnvelope({
+            rawText: attempt0.rawText,
+            attempt: 0,
+          });
+
+          if (envelope0.ok) {
+            bgLog.debug({
+              evt: "output_envelope.completed",
+              attempt: 0,
+              rawLength: attempt0.rawText.length,
+            }, "output_envelope.completed");
+          } else {
+            bgLog.info({
+              evt: "output_envelope.failed",
+              attempt: 0,
+              reason: envelope0.reason,
+              rawLength: attempt0.rawText.length,
+              ...(typeof envelope0.issuesCount === "number" ? { issuesCount: envelope0.issuesCount } : {}),
+            }, "output_envelope.failed");
+          }
+
+          if (!envelope0.ok) {
+            const stubAssistant = buildOutputContractStub();
+            const errorCode = formatOutputContractError(envelope0.reason, envelope0.issuesCount);
+
+            await store.appendDeliveryAttempt({
+              transmissionId,
+              provider: llmProvider,
+              status: "failed",
+              error: errorCode,
+            });
+
+            await store.updateTransmissionStatus({
+              transmissionId,
+              status: "failed",
+              statusCode: 422,
+              retryable: false,
+            });
+
+            await store.setChatResult({ transmissionId, assistant: stubAssistant });
+
+            bgLog.info({
+              evt: "simulate.persisted_failure",
+              statusCode: 422,
+              errorCode,
+            }, "simulate.persisted_failure");
+            bgLog.info({ evt: "chat.async.failed", statusCode: 422 }, "chat.async.failed");
+            bgLog.warn({ status: "failed", reason: envelope0.reason }, "delivery.failed_async");
+            return;
+          }
+
+          const evidenceGate0 = await runEvidenceOutputGates({
+            envelope: envelope0.envelope,
+            attempt: 0,
+            evidencePack,
+            transmissionId,
+          });
+
+          if (!evidenceGate0.ok) {
+            const stubAssistant = buildOutputContractStub();
+
+            await store.appendDeliveryAttempt({
+              transmissionId,
+              provider: llmProvider,
+              status: "failed",
+              error: evidenceGate0.code,
+            });
+
+            await store.updateTransmissionStatus({
+              transmissionId,
+              status: "failed",
+              statusCode: 422,
+              retryable: false,
+            });
+
+            await store.setChatResult({ transmissionId, assistant: stubAssistant });
+
+            bgLog.info({
+              evt: "simulate.persisted_failure",
+              statusCode: 422,
+              errorCode: evidenceGate0.code,
+            }, "simulate.persisted_failure");
+            bgLog.info({ evt: "chat.async.failed", statusCode: 422 }, "chat.async.failed");
+            bgLog.warn({ status: "failed", reason: evidenceGate0.code }, "delivery.failed_async");
+            return;
+          }
+
+          const assistant0 = evidenceGate0.envelope.assistant_text;
+
+          await appendTrace({
+            traceRunId: traceRun.id,
+            transmissionId: transmission.id,
+            actor: "solserver",
+            phase: "output_gates",
+            status: "started",
+            summary: "Running output linter",
+            metadata: { kind: "post_linter", attempt: 0 },
+          });
+
+          const lint0 = postOutputLinter({
+            modeLabel: modeDecision.modeLabel,
+            content: assistant0,
+            driverBlocks: promptPack.driverBlocks,
+          });
+
+          const lintMeta0 = buildPostLinterMetadata(lint0.ok ? [] : lint0.violations, 0);
+
+          await appendTrace({
+            traceRunId: traceRun.id,
+            transmissionId: transmission.id,
+            actor: "solserver",
+            phase: "output_gates",
+            status: lint0.ok ? "completed" : "warning",
+            summary: lint0.ok
+              ? "Output linter passed"
+              : `Output linter warning: ${lintMeta0.violationsCount} violations`,
+            metadata: lintMeta0,
+          });
+
+          const driverBlockEvents0 = buildDriverBlockTraceEvents({
+            blockResults: lint0.blockResults ?? [],
+            driverBlocks: promptPack.driverBlocks,
+            attempt: 0,
+          });
+          for (const event of driverBlockEvents0) {
+            await appendTrace({
+              traceRunId: traceRun.id,
+              transmissionId: transmission.id,
+              actor: "solserver",
+              phase: "output_gates",
+              status: event.status,
+              summary: event.summary,
+              metadata: event.metadata,
+            });
+          }
+
+          bgLog.debug({
+            evt: "post_linter.completed",
+            attempt: 0,
+            ok: lint0.ok,
+            violationsCount: lintMeta0.violationsCount,
+          }, "post_linter.completed");
+
+          if (lint0.ok) {
+            if (attempt0.mementoDraft) {
+              const m = putThreadMemento({
+                threadId: packet.threadId,
+                arc: attempt0.mementoDraft.arc || "Untitled",
+                active: attempt0.mementoDraft.active ?? [],
+                parked: attempt0.mementoDraft.parked ?? [],
+                decisions: attempt0.mementoDraft.decisions ?? [],
+                next: attempt0.mementoDraft.next ?? [],
+              });
+
+              bgLog.info(
+                {
+                  plane: "memento",
+                  threadId: packet.threadId,
+                  mementoId: m.id,
+                  source: "model",
+                },
+                "control_plane.memento_auto_put"
+              );
+            }
+
+            await store.appendDeliveryAttempt({
+              transmissionId,
+              provider: llmProvider,
+              status: "succeeded",
+              outputChars: assistant0.length,
+            });
+
+            await store.recordUsage({
+              transmissionId,
+              inputChars: packet.message.length,
+              outputChars: assistant0.length,
+            });
+
+            await store.updateTransmissionStatus({
+              transmissionId,
+              status: "completed",
+            });
+
+            await store.setChatResult({ transmissionId, assistant: assistant0 });
+
+            bgLog.info({ evt: "chat.async.completed", statusCode: 200, attemptsUsed: 1 }, "chat.async.completed");
+            bgLog.info({ status: "completed", outputChars: assistant0.length }, "delivery.completed_async");
+            return;
+          }
+
+          const correctionText = buildCorrectionText(lint0.violations, promptPack.driverBlocks);
+          const promptPack1 = withCorrectionSection(promptPack, correctionText);
+
+          const attempt1 = await runModelAttempt({
+            attempt: 1,
+            promptPack: promptPack1,
+            modeLabel: modeDecision.modeLabel,
+            evidencePack,
+            forcedRawText: attempt1Output,
+            logger: bgLog,
+          });
+
+          const envelope1 = await parseOutputEnvelope({
+            rawText: attempt1.rawText,
+            attempt: 1,
+          });
+
+          if (envelope1.ok) {
+            bgLog.debug({
+              evt: "output_envelope.completed",
+              attempt: 1,
+              rawLength: attempt1.rawText.length,
+            }, "output_envelope.completed");
+          } else {
+            bgLog.info({
+              evt: "output_envelope.failed",
+              attempt: 1,
+              reason: envelope1.reason,
+              rawLength: attempt1.rawText.length,
+              ...(typeof envelope1.issuesCount === "number" ? { issuesCount: envelope1.issuesCount } : {}),
+            }, "output_envelope.failed");
+          }
+
+          if (!envelope1.ok) {
+            const stubAssistant = buildOutputContractStub();
+            const errorCode = formatOutputContractError(envelope1.reason, envelope1.issuesCount);
+
+            await store.appendDeliveryAttempt({
+              transmissionId,
+              provider: llmProvider,
+              status: "failed",
+              error: errorCode,
+            });
+
+            await store.updateTransmissionStatus({
+              transmissionId,
+              status: "failed",
+              statusCode: 422,
+              retryable: false,
+            });
+
+            await store.setChatResult({ transmissionId, assistant: stubAssistant });
+
+            bgLog.info({
+              evt: "simulate.persisted_failure",
+              statusCode: 422,
+              errorCode,
+            }, "simulate.persisted_failure");
+            bgLog.info({ evt: "chat.async.failed", statusCode: 422 }, "chat.async.failed");
+            bgLog.warn({ status: "failed", reason: envelope1.reason }, "delivery.failed_async");
+            return;
+          }
+
+          const evidenceGate1 = await runEvidenceOutputGates({
+            envelope: envelope1.envelope,
+            attempt: 1,
+            evidencePack,
+            transmissionId,
+          });
+
+          if (!evidenceGate1.ok) {
+            const stubAssistant = buildOutputContractStub();
+
+            await store.appendDeliveryAttempt({
+              transmissionId,
+              provider: llmProvider,
+              status: "failed",
+              error: evidenceGate1.code,
+            });
+
+            await store.updateTransmissionStatus({
+              transmissionId,
+              status: "failed",
+              statusCode: 422,
+              retryable: false,
+            });
+
+            await store.setChatResult({ transmissionId, assistant: stubAssistant });
+
+            bgLog.info({
+              evt: "simulate.persisted_failure",
+              statusCode: 422,
+              errorCode: evidenceGate1.code,
+            }, "simulate.persisted_failure");
+            bgLog.info({ evt: "chat.async.failed", statusCode: 422 }, "chat.async.failed");
+            bgLog.warn({ status: "failed", reason: evidenceGate1.code }, "delivery.failed_async");
+            return;
+          }
+
+          const assistant1 = evidenceGate1.envelope.assistant_text;
+
+          await appendTrace({
+            traceRunId: traceRun.id,
+            transmissionId: transmission.id,
+            actor: "solserver",
+            phase: "output_gates",
+            status: "started",
+            summary: "Running output linter",
+            metadata: { kind: "post_linter", attempt: 1 },
+          });
+
+          const lint1 = postOutputLinter({
+            modeLabel: modeDecision.modeLabel,
+            content: assistant1,
+            driverBlocks: promptPack.driverBlocks,
+          });
+
+          const lintMeta1 = buildPostLinterMetadata(lint1.ok ? [] : lint1.violations, 1);
+
+          await appendTrace({
+            traceRunId: traceRun.id,
+            transmissionId: transmission.id,
+            actor: "solserver",
+            phase: "output_gates",
+            status: lint1.ok ? "completed" : "warning",
+            summary: lint1.ok
+              ? "Output linter passed"
+              : `Output linter warning: ${lintMeta1.violationsCount} violations`,
+            metadata: lintMeta1,
+          });
+
+          const driverBlockEvents1 = buildDriverBlockTraceEvents({
+            blockResults: lint1.blockResults ?? [],
+            driverBlocks: promptPack1.driverBlocks,
+            attempt: 1,
+          });
+          for (const event of driverBlockEvents1) {
+            await appendTrace({
+              traceRunId: traceRun.id,
+              transmissionId: transmission.id,
+              actor: "solserver",
+              phase: "output_gates",
+              status: event.status,
+              summary: event.summary,
+              metadata: event.metadata,
+            });
+          }
+
+          bgLog.debug({
+            evt: "post_linter.completed",
+            attempt: 1,
+            ok: lint1.ok,
+            violationsCount: lintMeta1.violationsCount,
+          }, "post_linter.completed");
+
+          if (lint1.ok) {
+            if (attempt1.mementoDraft) {
+              const m = putThreadMemento({
+                threadId: packet.threadId,
+                arc: attempt1.mementoDraft.arc || "Untitled",
+                active: attempt1.mementoDraft.active ?? [],
+                parked: attempt1.mementoDraft.parked ?? [],
+                decisions: attempt1.mementoDraft.decisions ?? [],
+                next: attempt1.mementoDraft.next ?? [],
+              });
+
+              bgLog.info(
+                {
+                  plane: "memento",
+                  threadId: packet.threadId,
+                  mementoId: m.id,
+                  source: "model",
+                },
+                "control_plane.memento_auto_put"
+              );
+            }
+
+            await store.appendDeliveryAttempt({
+              transmissionId,
+              provider: llmProvider,
+              status: "succeeded",
+              outputChars: assistant1.length,
+            });
+
+            await store.recordUsage({
+              transmissionId,
+              inputChars: packet.message.length,
+              outputChars: assistant1.length,
+            });
+
+            await store.updateTransmissionStatus({
+              transmissionId,
+              status: "completed",
+            });
+
+            await store.setChatResult({ transmissionId, assistant: assistant1 });
+
+            bgLog.info({ evt: "chat.async.completed", statusCode: 200, attemptsUsed: 2 }, "chat.async.completed");
+            bgLog.info({ status: "completed", outputChars: assistant1.length }, "delivery.completed_async");
+            return;
+          }
+
+          const stubAssistant = buildEnforcementStub();
+
+          await appendTrace({
+            traceRunId: traceRun.id,
+            transmissionId: transmission.id,
+            actor: "solserver",
+            phase: "output_gates",
+            status: "failed",
+            summary: "Driver block enforcement failed",
+            metadata: {
+              kind: "driver_block_enforcement",
+              outcome: "fail_closed_422",
+              attempts: 2,
+              violationsCount: lintMeta1.violationsCount,
+            } satisfies EnforcementFailureMetadata,
+          });
+
+          bgLog.info({
+            evt: "enforcement.failed",
+            attempt: 1,
+            error: "driver_block_enforcement_failed",
+          }, "enforcement.failed");
+
+          await store.appendDeliveryAttempt({
+            transmissionId,
+            provider: llmProvider,
+            status: "failed",
+            error: "driver_block_enforcement_failed",
+          });
+
+          await store.updateTransmissionStatus({
+            transmissionId,
+            status: "failed",
+            statusCode: 422,
+            retryable: false,
+          });
+
+          await store.setChatResult({ transmissionId, assistant: stubAssistant });
+
+          bgLog.info({ evt: "chat.async.failed", statusCode: 422 }, "chat.async.failed");
+          bgLog.warn({ status: "failed" }, "delivery.failed_async");
+        } catch (err: any) {
+          const msg = String(err?.message ?? err);
+
+          await store.appendDeliveryAttempt({
+            transmissionId,
+            provider: llmProvider,
+            status: "failed",
+            error: msg,
+          });
+
+          await store.updateTransmissionStatus({
+            transmissionId,
+            status: "failed",
+          });
+
+          bgLog.info({ evt: "chat.async.failed" }, "chat.async.failed");
+          bgLog.error({ error: msg }, "provider.failed_async");
+        } finally {
+          pendingCompletions.delete(transmissionId);
+        }
+      }, delayMs);
+    }
+
+    log.info({ evt: "chat.responded", statusCode: 202, attemptsUsed: 0 }, "chat.responded");
+    return {
+      statusCode: 202,
+      body: {
+        ok: true,
+        transmissionId,
+        status: "created",
+        pending: true,
+        simulated: true,
+        checkAfterMs: 750,
+        driverBlocks: driverBlockSummary,
+        ...(hasEvidence ? { evidence: effectiveEvidence } : {}),
+        evidenceSummary,
+        ...(effectiveWarnings.length > 0 ? { evidenceWarnings: effectiveWarnings } : {}),
+        threadMemento: getLatestThreadMemento(packet.threadId, { includeDraft: true }),
+      },
+    };
+  }
+
+  const attempt0Output = getForcedTestProviderOutput(req, 0);
+  const attempt1Output = getForcedTestProviderOutput(req, 1);
+
+  let assistant: string;
+  let outputEnvelope: OutputEnvelope | null = null;
+  let threadMemento: any = null;
+  let attemptsUsed = 0;
+
+  try {
+    const attempt0 = await runModelAttempt({
+      attempt: 0,
+      promptPack,
+      modeLabel: modeDecision.modeLabel,
+      evidencePack,
+      forcedRawText: attempt0Output,
+      logger: log,
+    });
+
+    const envelope0 = await parseOutputEnvelope({
+      rawText: attempt0.rawText,
+      attempt: 0,
+    });
+
+    if (envelope0.ok) {
+      log.debug({
+        evt: "output_envelope.completed",
+        attempt: 0,
+        rawLength: getRawByteLength(attempt0.rawText),
+      }, "output_envelope.completed");
+    } else {
+      log.info({
+        evt: "output_envelope.failed",
+        attempt: 0,
+        reason: envelope0.reason,
+        rawLength: getRawByteLength(attempt0.rawText),
+        ...(typeof envelope0.issuesCount === "number" ? { issuesCount: envelope0.issuesCount } : {}),
+      }, "output_envelope.failed");
+    }
+
+    if (!envelope0.ok) {
+      const stubAssistant = buildOutputContractStub();
+      const errorCode = formatOutputContractError(envelope0.reason, envelope0.issuesCount);
+
+      await store.appendDeliveryAttempt({
+        transmissionId: transmission.id,
+        provider: llmProvider,
+        status: "failed",
+        error: errorCode,
+      });
+
+      await store.updateTransmissionStatus({
+        transmissionId: transmission.id,
+        status: "failed",
+        statusCode: 422,
+        retryable: false,
+      });
+
+      await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+
+      log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 1 }, "chat.responded");
+      return {
+        statusCode: 422,
+        body: {
+          error: "output_contract_failed",
+          transmissionId: transmission.id,
+          traceRunId: traceRun.id,
+          retryable: false,
+          assistant: stubAssistant,
+        },
+      };
+    }
+
+    const evidenceGate0 = await runEvidenceOutputGates({
+      envelope: envelope0.envelope,
+      attempt: 0,
+      evidencePack,
+      transmissionId: transmission.id,
+    });
+
+    if (!evidenceGate0.ok) {
+      const stubAssistant = buildOutputContractStub();
+
+      await store.appendDeliveryAttempt({
+        transmissionId: transmission.id,
+        provider: llmProvider,
+        status: "failed",
+        error: evidenceGate0.code,
+      });
+
+      await store.updateTransmissionStatus({
+        transmissionId: transmission.id,
+        status: "failed",
+        statusCode: 422,
+        retryable: false,
+      });
+
+      await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+
+      log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 1 }, "chat.responded");
+      return {
+        statusCode: 422,
+        body: buildEvidenceGateFailureResponse({
+          code: evidenceGate0.code,
+          transmissionId: transmission.id,
+          traceRunId: traceRun.id,
+        }),
+      };
+    }
+
+    const assistant0 = evidenceGate0.envelope.assistant_text;
+    const envelope0Normalized = normalizeOutputEnvelopeForResponse(evidenceGate0.envelope);
+
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "output_gates",
+      status: "started",
+      summary: "Running output linter",
+      metadata: { kind: "post_linter", attempt: 0 },
+    });
+
+    const lint0 = postOutputLinter({
+      modeLabel: modeDecision.modeLabel,
+      content: assistant0,
+      driverBlocks: promptPack.driverBlocks,
+    });
+
+    const lintMeta0 = buildPostLinterMetadata(lint0.ok ? [] : lint0.violations, 0);
+
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "output_gates",
+      status: lint0.ok ? "completed" : "warning",
+      summary: lint0.ok
+        ? "Output linter passed"
+        : `Output linter warning: ${lintMeta0.violationsCount} violations`,
+      metadata: lintMeta0,
+    });
+
+    const driverBlockEvents0 = buildDriverBlockTraceEvents({
+      blockResults: lint0.blockResults ?? [],
+      driverBlocks: promptPack.driverBlocks,
+      attempt: 0,
+    });
+    for (const event of driverBlockEvents0) {
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: event.status,
+        summary: event.summary,
+        metadata: event.metadata,
+      });
+    }
+
+    log.debug({
+      evt: "post_linter.completed",
+      attempt: 0,
+      ok: lint0.ok,
+      violationsCount: lintMeta0.violationsCount,
+    }, "post_linter.completed");
+
+    if (!lint0.ok) {
+      log.warn(lintMeta0, "gate.post_lint_warning");
+    }
+
+    if (lint0.ok) {
+      assistant = assistant0;
+      outputEnvelope = envelope0Normalized;
+      attemptsUsed = 1;
+      if (attempt0.mementoDraft) {
+        const m = putThreadMemento({
+          threadId: packet.threadId,
+          arc: attempt0.mementoDraft.arc || "Untitled",
+          active: attempt0.mementoDraft.active ?? [],
+          parked: attempt0.mementoDraft.parked ?? [],
+          decisions: attempt0.mementoDraft.decisions ?? [],
+          next: attempt0.mementoDraft.next ?? [],
+        });
+        threadMemento = m;
+        log.info({ plane: "memento", threadId: packet.threadId, mementoId: m.id, source: "model" }, "control_plane.memento_auto_put");
+      }
+    } else {
+      const correctionText = buildCorrectionText(lint0.violations, promptPack.driverBlocks);
+      const promptPack1 = withCorrectionSection(promptPack, correctionText);
+
+      const attempt1 = await runModelAttempt({
+        attempt: 1,
+        promptPack: promptPack1,
+        modeLabel: modeDecision.modeLabel,
+        evidencePack,
+        forcedRawText: attempt1Output,
+        logger: log,
+      });
+
+      const envelope1 = await parseOutputEnvelope({
+        rawText: attempt1.rawText,
+        attempt: 1,
+      });
+
+      if (envelope1.ok) {
+        log.debug({
+          evt: "output_envelope.completed",
+          attempt: 1,
+          rawLength: getRawByteLength(attempt1.rawText),
+        }, "output_envelope.completed");
+      } else {
+        log.info({
+          evt: "output_envelope.failed",
+          attempt: 1,
+          reason: envelope1.reason,
+          rawLength: getRawByteLength(attempt1.rawText),
+          ...(typeof envelope1.issuesCount === "number" ? { issuesCount: envelope1.issuesCount } : {}),
+        }, "output_envelope.failed");
+      }
+
+      if (!envelope1.ok) {
+        const stubAssistant = buildOutputContractStub();
+        const errorCode = formatOutputContractError(envelope1.reason, envelope1.issuesCount);
+
+        await store.appendDeliveryAttempt({
+          transmissionId: transmission.id,
+          provider: llmProvider,
+          status: "failed",
+          error: errorCode,
+        });
+
+        await store.updateTransmissionStatus({
+          transmissionId: transmission.id,
+          status: "failed",
+          statusCode: 422,
+          retryable: false,
+        });
+
+        await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+
+        log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 2 }, "chat.responded");
+        return {
+          statusCode: 422,
+          body: {
+            error: "output_contract_failed",
+            transmissionId: transmission.id,
+            traceRunId: traceRun.id,
+            retryable: false,
+            assistant: stubAssistant,
+          },
+        };
+      }
+
+      const evidenceGate1 = await runEvidenceOutputGates({
+        envelope: envelope1.envelope,
+        attempt: 1,
+        evidencePack,
+        transmissionId: transmission.id,
+      });
+
+      if (!evidenceGate1.ok) {
+        const stubAssistant = buildOutputContractStub();
+
+        await store.appendDeliveryAttempt({
+          transmissionId: transmission.id,
+          provider: llmProvider,
+          status: "failed",
+          error: evidenceGate1.code,
+        });
+
+        await store.updateTransmissionStatus({
+          transmissionId: transmission.id,
+          status: "failed",
+          statusCode: 422,
+          retryable: false,
+        });
+
+        await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+
+        log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 2 }, "chat.responded");
+        return {
+          statusCode: 422,
+          body: buildEvidenceGateFailureResponse({
+            code: evidenceGate1.code,
+            transmissionId: transmission.id,
+            traceRunId: traceRun.id,
+          }),
+        };
+      }
+
+      const assistant1 = evidenceGate1.envelope.assistant_text;
+      const envelope1Normalized = normalizeOutputEnvelopeForResponse(evidenceGate1.envelope);
+
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: "started",
+        summary: "Running output linter",
+        metadata: { kind: "post_linter", attempt: 1 },
+      });
+
+      const lint1 = postOutputLinter({
+        modeLabel: modeDecision.modeLabel,
+        content: assistant1,
+        driverBlocks: promptPack.driverBlocks,
+      });
+
+      const lintMeta1 = buildPostLinterMetadata(lint1.ok ? [] : lint1.violations, 1);
+
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: lint1.ok ? "completed" : "warning",
+        summary: lint1.ok
+          ? "Output linter passed"
+          : `Output linter warning: ${lintMeta1.violationsCount} violations`,
+        metadata: lintMeta1,
+      });
+
+      const driverBlockEvents1 = buildDriverBlockTraceEvents({
+        blockResults: lint1.blockResults ?? [],
+        driverBlocks: promptPack1.driverBlocks,
+        attempt: 1,
+      });
+      for (const event of driverBlockEvents1) {
+        await appendTrace({
+          traceRunId: traceRun.id,
+          transmissionId: transmission.id,
+          actor: "solserver",
+          phase: "output_gates",
+          status: event.status,
+          summary: event.summary,
+          metadata: event.metadata,
+        });
+      }
+
+      log.debug({
+        evt: "post_linter.completed",
+        attempt: 1,
+        ok: lint1.ok,
+        violationsCount: lintMeta1.violationsCount,
+      }, "post_linter.completed");
+
+      if (!lint1.ok) {
+        log.warn(lintMeta1, "gate.post_lint_warning");
+      }
+
+      if (lint1.ok) {
+        assistant = assistant1;
+        outputEnvelope = envelope1Normalized;
+        attemptsUsed = 2;
+        if (attempt1.mementoDraft) {
+          const m = putThreadMemento({
+            threadId: packet.threadId,
+            arc: attempt1.mementoDraft.arc || "Untitled",
+            active: attempt1.mementoDraft.active ?? [],
+            parked: attempt1.mementoDraft.parked ?? [],
+            decisions: attempt1.mementoDraft.decisions ?? [],
+            next: attempt1.mementoDraft.next ?? [],
+          });
+          threadMemento = m;
+          log.info({ plane: "memento", threadId: packet.threadId, mementoId: m.id, source: "model" }, "control_plane.memento_auto_put");
+        }
+      } else {
+        const stubAssistant = buildEnforcementStub();
+
+        await appendTrace({
+          traceRunId: traceRun.id,
+          transmissionId: transmission.id,
+          actor: "solserver",
+          phase: "output_gates",
+          status: "failed",
+          summary: "Driver block enforcement failed",
+          metadata: {
+            kind: "driver_block_enforcement",
+            outcome: "fail_closed_422",
+            attempts: 2,
+            violationsCount: lintMeta1.violationsCount,
+          } satisfies EnforcementFailureMetadata,
+        });
+
+        log.info({
+          evt: "enforcement.failed",
+          attempt: 1,
+          error: "driver_block_enforcement_failed",
+        }, "enforcement.failed");
+
+        await store.appendDeliveryAttempt({
+          transmissionId: transmission.id,
+          provider: llmProvider,
+          status: "failed",
+          error: "driver_block_enforcement_failed",
+        });
+
+        await store.updateTransmissionStatus({
+          transmissionId: transmission.id,
+          status: "failed",
+          statusCode: 422,
+          retryable: false,
+        });
+
+        await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+
+        log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 2 }, "chat.responded");
+        return {
+          statusCode: 422,
+          body: {
+            error: "driver_block_enforcement_failed",
+            transmissionId: transmission.id,
+            traceRunId: traceRun.id,
+            retryable: false,
+            assistant: stubAssistant,
+          },
+        };
+      }
+    }
+
+    if (!outputEnvelope) {
+      throw new Error("output_envelope_missing");
+    }
+  } catch (err: any) {
+    await store.appendDeliveryAttempt({
+      transmissionId: transmission.id,
+      provider: llmProvider,
+      status: "failed",
+      error: String(err?.message ?? err),
+    });
+
+    await store.updateTransmissionStatus({
+      transmissionId: transmission.id,
+      status: "failed",
+    });
+
+    const statusCode = err instanceof OpenAIProviderError ? err.statusCode : 500;
+    const errorTag = statusCode === 502 ? "provider_upstream_failed" : "provider_failed";
+
+    log.error({ error: String(err?.message ?? err) }, "provider.failed");
+
+    return {
+      statusCode,
+      body: {
+        error: errorTag,
+        transmissionId: transmission.id,
+        traceRunId: traceRun.id,
+        retryable: true,
+      },
+    };
+  }
+
+  await store.appendDeliveryAttempt({
+    transmissionId: transmission.id,
+    provider: llmProvider,
+    status: "succeeded",
+    outputChars: assistant.length,
+  });
+
+  await store.recordUsage({
+    transmissionId: transmission.id,
+    inputChars: packet.message.length,
+    outputChars: assistant.length,
+  });
+
+  await store.updateTransmissionStatus({
+    transmissionId: transmission.id,
+    status: "completed",
+  });
+
+  await store.setChatResult({ transmissionId: transmission.id, assistant });
+
+  log.info({
+    status: "completed",
+    outputChars: assistant.length,
+  }, "delivery.completed");
+
+  const traceSummary = await store.getTraceSummary(traceRun.id);
+
+  // Fetch trace events for response (bounded by level)
+  const traceEventLimit = traceLevel === "debug" ? 50 : 0; // debug: return up to 50 events, info: no events
+  const traceEvents = traceLevel === "debug"
+    ? await store.getTraceEvents(traceRun.id, { limit: traceEventLimit })
+    : [];
+
+  const eventCount = traceSummary?.eventCount
+    ?? (traceLevel === "debug" ? traceEvents.length : 0);
+
+  const responseEvidenceSummary = {
+    ...evidenceSummary,
+    claims: outputEnvelope?.meta?.claims?.length ?? 0,
+  };
+
+  log.info({ evt: "chat.responded", statusCode: 200, attemptsUsed }, "chat.responded");
+  return {
+    statusCode: 200,
+    body: {
+      ok: true,
+      transmissionId: transmission.id,
+      modeDecision,
+      assistant,
+      outputEnvelope,
+      threadMemento,
+      driverBlocks: driverBlockSummary,
+      // Evidence fields (PR #7.1): include evidence only when present
+      ...(hasEvidence ? { evidence: effectiveEvidence } : {}),
+      evidenceSummary: responseEvidenceSummary,
+      ...(effectiveWarnings.length > 0 ? { evidenceWarnings: effectiveWarnings } : {}),
+      trace: {
+        traceRunId: traceRun.id,
+        level: traceLevel,
+        eventCount,
+        ...(traceLevel === "debug"
+          ? { events: traceEvents }
+          : { phaseCounts: traceSummary?.phaseCounts ?? {} }),
+      },
+    },
+  };
+}
+
 export async function chatRoutes(
   app: FastifyInstance,
   opts: { store?: ControlPlaneStore } = {}
@@ -387,7 +2105,7 @@ export async function chatRoutes(
     return {
       ok: true,
       transmission,
-      pending: transmission.status === "created",
+      pending: transmission.status === "created" || transmission.status === "processing",
       assistant: result?.assistant ?? null,
       attempts,
       usage,
@@ -666,6 +2384,7 @@ export async function chatRoutes(
     const packet = parsed.data;
     const simulate = String((req.headers as any)["x-sol-simulate-status"] ?? "");
     const emptyEvidenceSummary = { captures: 0, supports: 0, claims: 0, warnings: 0 };
+    const inlineProcessing = process.env.NODE_ENV === "test" || process.env.SOL_INLINE_PROCESSING === "1";
 
     const setTransmissionHeader = (transmissionId: string) => {
       reply.header("x-sol-transmission-id", transmissionId);
@@ -722,8 +2441,8 @@ export async function chatRoutes(
           });
         }
 
-        // Created: treat as in-flight/pending.
-        if (existing.status === "created") {
+        // Created/processing: treat as in-flight/pending.
+        if (existing.status === "created" || existing.status === "processing") {
           setTransmissionHeader(existing.id);
           return reply.code(202).send({
             ok: true,
@@ -767,6 +2486,30 @@ export async function chatRoutes(
     });
 
     reply.header("x-sol-trace-run-id", traceRun.id);
+
+    if (!inlineProcessing) {
+      const packetEvidence = packet.evidence ?? null;
+      const evidenceSummary = {
+        captures: packetEvidence?.captures?.length ?? 0,
+        supports: packetEvidence?.supports?.length ?? 0,
+        claims: packetEvidence?.claims?.length ?? 0,
+        warnings: 0,
+      };
+
+      req.log.info(
+        { evt: "chat.enqueued", transmissionId: transmission.id },
+        "chat.enqueued"
+      );
+
+      return reply.code(202).send({
+        ok: true,
+        transmissionId: transmission.id,
+        status: transmission.status,
+        pending: true,
+        evidenceSummary,
+        threadMemento: getLatestThreadMemento(packet.threadId, { includeDraft: true }),
+      });
+    }
 
     let traceSeq = 0;
     const appendTrace = async (event: Parameters<typeof store.appendTraceEvent>[0]) => {
