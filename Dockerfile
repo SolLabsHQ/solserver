@@ -27,8 +27,9 @@ ENV NODE_ENV=production
 COPY --from=build /app/package.json /app/pnpm-lock.yaml* /app/package-lock.json* ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/scripts ./scripts
 
 # Fly sets PORT; your app already respects process.env.PORT ?? 3333
 EXPOSE 3333
 
-CMD ["node", "dist/index.js"]
+CMD ["bash", "scripts/run-web-worker.sh"]
