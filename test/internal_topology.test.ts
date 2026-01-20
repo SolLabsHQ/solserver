@@ -27,11 +27,17 @@ const buildApp = async () => {
 
 describe("Internal topology route", () => {
   let previousToken: string | undefined;
+  let previousNodeEnv: string | undefined;
+  let previousFlyApp: string | undefined;
 
   beforeEach(() => {
     cleanup();
     previousToken = process.env.SOL_INTERNAL_TOKEN;
+    previousNodeEnv = process.env.NODE_ENV;
+    previousFlyApp = process.env.FLY_APP_NAME;
     process.env.SOL_INTERNAL_TOKEN = "test-token";
+    process.env.NODE_ENV = "development";
+    delete process.env.FLY_APP_NAME;
   });
 
   afterEach(async () => {
@@ -40,6 +46,69 @@ describe("Internal topology route", () => {
       delete process.env.SOL_INTERNAL_TOKEN;
     } else {
       process.env.SOL_INTERNAL_TOKEN = previousToken;
+    }
+
+    if (previousNodeEnv === undefined) {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = previousNodeEnv;
+    }
+
+    if (previousFlyApp === undefined) {
+      delete process.env.FLY_APP_NAME;
+    } else {
+      process.env.FLY_APP_NAME = previousFlyApp;
+    }
+  });
+
+  it("allows localhost without token in dev", async () => {
+    delete process.env.SOL_INTERNAL_TOKEN;
+    const { app, store } = await buildApp();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/internal/topology",
+        remoteAddress: "127.0.0.1",
+      });
+
+      expect(response.statusCode).toBe(200);
+    } finally {
+      store.close();
+      await app.close();
+    }
+  });
+
+  it("rejects non-localhost without token in dev", async () => {
+    delete process.env.SOL_INTERNAL_TOKEN;
+    const { app, store } = await buildApp();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/internal/topology",
+        remoteAddress: "10.0.0.5",
+      });
+
+      expect(response.statusCode).toBe(403);
+    } finally {
+      store.close();
+      await app.close();
+    }
+  });
+
+  it("returns 403 when token missing in prod", async () => {
+    delete process.env.SOL_INTERNAL_TOKEN;
+    process.env.NODE_ENV = "production";
+    const { app, store } = await buildApp();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/internal/topology",
+      });
+
+      expect(response.statusCode).toBe(403);
+    } finally {
+      store.close();
+      await app.close();
     }
   });
 

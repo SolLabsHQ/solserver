@@ -33,8 +33,10 @@ export async function runTopologyHandshake(opts: HandshakeOptions): Promise<void
   const fetchImpl = opts.fetchImpl ?? fetch;
   const sleepImpl = opts.sleepImpl ?? sleep;
   const url = buildTopologyUrl(opts.apiBaseUrl);
+  const isFly = Boolean(process.env.FLY_APP_NAME);
+  const isProd = process.env.NODE_ENV === "production" || isFly;
 
-  if (!opts.internalToken) {
+  if (!opts.internalToken && isProd) {
     opts.log.error(
       { evt: "topology.guard.worker_internal_token_missing_fatal" },
       "topology.guard.worker_internal_token_missing_fatal"
@@ -69,11 +71,13 @@ export async function runTopologyHandshake(opts: HandshakeOptions): Promise<void
     }
 
     let response: Response;
+    const headers = opts.internalToken
+      ? { "x-sol-internal-token": opts.internalToken }
+      : undefined;
+
     try {
       response = await fetchImpl(url, {
-        headers: {
-          "x-sol-internal-token": opts.internalToken,
-        },
+        headers,
       });
     } catch (error) {
       if (attempt === opts.maxAttempts) {

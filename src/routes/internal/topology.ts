@@ -12,23 +12,36 @@ export async function internalTopologyRoutes(
   opts: InternalTopologyOptions
 ) {
   app.get("/topology", async (req, reply) => {
+    const isFly = Boolean(process.env.FLY_APP_NAME);
+    const isProd = process.env.NODE_ENV === "production" || isFly;
     const expectedToken = process.env.SOL_INTERNAL_TOKEN ?? "";
     const providedToken = req.headers["x-sol-internal-token"];
+    const requestIp = req.ip;
+    const isLocal =
+      requestIp === "127.0.0.1"
+      || requestIp === "::1"
+      || requestIp === "::ffff:127.0.0.1";
 
     if (!expectedToken) {
-      app.log.error(
-        { evt: "topology.guard.internal_token_missing" },
-        "topology.guard.internal_token_missing"
-      );
-      return reply.code(403).send({ error: "forbidden" });
-    }
+      if (isProd) {
+        app.log.error(
+          { evt: "topology.guard.internal_token_missing" },
+          "topology.guard.internal_token_missing"
+        );
+        return reply.code(403).send({ error: "forbidden" });
+      }
 
-    if (!providedToken) {
-      return reply.code(401).send({ error: "unauthorized" });
-    }
+      if (!isLocal) {
+        return reply.code(403).send({ error: "forbidden" });
+      }
+    } else {
+      if (!providedToken) {
+        return reply.code(401).send({ error: "unauthorized" });
+      }
 
-    if (String(providedToken) !== expectedToken) {
-      return reply.code(403).send({ error: "forbidden" });
+      if (String(providedToken) !== expectedToken) {
+        return reply.code(403).send({ error: "forbidden" });
+      }
     }
 
     const meta = opts.store.readTopologyKey();
