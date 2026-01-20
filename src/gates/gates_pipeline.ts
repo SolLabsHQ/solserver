@@ -3,7 +3,7 @@ import type { GateInput } from "./normalize_modality";
 import { runNormalizeModality, type NormalizeModalityOutput } from "./normalize_modality";
 import { runIntentRisk, type IntentRiskOutput } from "./intent_risk";
 import { runLattice, type LatticeOutput } from "./lattice";
-import type { GateOutput } from "./gate_interfaces";
+import { GATE_SENTINEL, type GateOutput } from "./gate_interfaces";
 import { extractUrls } from "./url_extraction";
 
 export type GatesPipelineOutput = {
@@ -126,7 +126,7 @@ export function runGatesPipeline(packet: PacketInput): GatesPipelineOutput {
       },
     },
     {
-      gateName: "intent_risk",
+      gateName: GATE_SENTINEL,
       status: "pass",
       summary: `Intent: ${intentRisk.intent}, Risk: ${intentRisk.risk}`,
       metadata: {

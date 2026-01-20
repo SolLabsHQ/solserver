@@ -940,7 +940,7 @@ export async function runOrchestrationPipeline(args: {
 
   // Ordering Contract (v0): route-level phase sequence is authoritative.
   // Phases must appear in this order in trace (not necessarily contiguous):
-  // evidence_intake → gate_normalize_modality → url_extraction → gate_intent_risk → gate_lattice
+  // evidence_intake → gate_normalize_modality → url_extraction → gate_sentinel → gate_lattice
   // → model_call → output_gates (post_linter + driver_block per-block events).
   // Tests assert this sequence from persisted trace events.
   // Note: metadata.seq is global and monotonic; it is not reset per gate.
@@ -975,11 +975,11 @@ export async function runOrchestrationPipeline(args: {
 
   const phaseByGateName: Record<
     string,
-    "gate_normalize_modality" | "url_extraction" | "gate_intent_risk" | "gate_lattice"
+    "gate_normalize_modality" | "url_extraction" | "gate_sentinel" | "gate_lattice"
   > = {
     normalize_modality: "gate_normalize_modality",
     url_extraction: "url_extraction",
-    intent_risk: "gate_intent_risk",
+    [GATE_SENTINEL]: "gate_sentinel",
     lattice: "gate_lattice",
   };
 

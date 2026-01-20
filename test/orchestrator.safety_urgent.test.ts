@@ -8,7 +8,7 @@ describe("resolveSafetyIsUrgent", () => {
     const warn = vi.fn();
     const results: GateOutput[] = [
       {
-        gateName: "intent_risk",
+        gateName: "lattice",
         status: "pass",
         summary: "intent ok",
         is_urgent: true,
