@@ -20,7 +20,7 @@ import type {
   TraceEventStatus,
   TraceSummary,
 } from "./control_plane_store";
-import type { PacketInput, ModeDecision, Evidence } from "../contracts/chat";
+import type { PacketInput, ModeDecision, Evidence, NotificationPolicy } from "../contracts/chat";
 
 type LeaseNextTransmissionResult =
   | { outcome: "leased"; transmission: Transmission; previousStatus: TransmissionStatus }
@@ -149,6 +149,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         message TEXT NOT NULL,
         packet_json TEXT,
         mode_decision TEXT NOT NULL,
+        notification_policy TEXT,
+        forced_persona TEXT,
         created_at TEXT NOT NULL,
         status TEXT NOT NULL,
         status_code INTEGER,
@@ -296,6 +298,12 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       this.db.exec("ALTER TABLE transmissions ADD COLUMN error_detail_json TEXT");
     } catch {}
     try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN notification_policy TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN forced_persona TEXT");
+    } catch {}
+    try {
       this.db.exec("ALTER TABLE transmissions ADD COLUMN lease_expires_at TEXT");
     } catch {}
     try {
@@ -350,6 +358,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
   async createTransmission(args: {
     packet: PacketInput;
     modeDecision: ModeDecision;
+    notificationPolicy?: NotificationPolicy;
+    forcedPersona?: ModeDecision["personaLabel"] | null;
   }): Promise<Transmission> {
     const id = randomUUID();
     const clientRequestId = (args.packet as any).clientRequestId as string | undefined;
@@ -361,6 +371,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       clientRequestId,
       message: args.packet.message,
       modeDecision: args.modeDecision,
+      notificationPolicy: args.notificationPolicy,
+      forcedPersona: args.forcedPersona ?? null,
       createdAt: new Date().toISOString(),
       status: "created",
       statusCode: undefined,
@@ -376,6 +388,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         message,
         packet_json,
         mode_decision,
+        notification_policy,
+        forced_persona,
         created_at,
         status,
         status_code,
@@ -385,7 +399,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         lease_expires_at,
         lease_owner
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     try {
@@ -397,6 +411,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         t.message,
         JSON.stringify(args.packet),
         JSON.stringify(t.modeDecision),
+        t.notificationPolicy ?? null,
+        t.forcedPersona ?? null,
         t.createdAt,
         t.status,
         t.statusCode ?? null,
@@ -461,6 +477,25 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       retryableValue,
       args.errorCode ?? null,
       errorDetailJson,
+      args.transmissionId
+    );
+  }
+
+  async updateTransmissionPolicy(args: {
+    transmissionId: string;
+    notificationPolicy?: NotificationPolicy | null;
+    forcedPersona?: ModeDecision["personaLabel"] | null;
+  }): Promise<void> {
+    const stmt = this.db.prepare(`
+      UPDATE transmissions
+      SET notification_policy = COALESCE(?, notification_policy),
+        forced_persona = COALESCE(?, forced_persona)
+      WHERE id = ?
+    `);
+
+    stmt.run(
+      args.notificationPolicy ?? null,
+      args.forcedPersona ?? null,
       args.transmissionId
     );
   }
@@ -922,6 +957,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       clientRequestId: row.client_request_id ?? undefined,
       message: row.message,
       modeDecision: JSON.parse(row.mode_decision),
+      notificationPolicy: row.notification_policy ?? undefined,
+      forcedPersona: row.forced_persona ?? null,
       createdAt: row.created_at,
       status: row.status,
       statusCode: row.status_code ?? undefined,
