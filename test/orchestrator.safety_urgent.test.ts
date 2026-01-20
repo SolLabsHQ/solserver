@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { resolveSafetyIsUrgent } from "../src/control-plane/orchestrator";
-import type { GateOutput } from "../src/gates/gate_interfaces";
+import { GATE_SENTINEL, type GateOutput } from "../src/gates/gate_interfaces";
 
 describe("resolveSafetyIsUrgent", () => {
   it("blocks non-safety gates from setting is_urgent", () => {
@@ -25,9 +25,9 @@ describe("resolveSafetyIsUrgent", () => {
     const warn = vi.fn();
     const results: GateOutput[] = [
       {
-        gateName: "safety",
+        gateName: GATE_SENTINEL,
         status: "fail",
-        summary: "safety escalation",
+        summary: "sentinel escalation",
         is_urgent: true,
       },
     ];
