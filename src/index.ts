@@ -89,7 +89,7 @@ const getDbStat = (path: string): { exists: boolean; sizeBytes?: number; mtime?:
     return { exists: false };
   }
 };
-const store = new SqliteControlPlaneStore(dbPath);
+const store = new SqliteControlPlaneStore(dbPath, app.log);
 
 async function main() {
   // CORS (v0/dev): permissive. Tighten before prod.

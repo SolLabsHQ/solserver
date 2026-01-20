@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import * as fs from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
+import pino from "pino";
 
 import type {
   ControlPlaneStore,
@@ -26,15 +27,85 @@ type LeaseNextTransmissionResult =
   | { outcome: "empty" }
   | { outcome: "contention" };
 
+type TopologyLogger = {
+  info: (obj: Record<string, unknown>, msg?: string) => void;
+  warn: (obj: Record<string, unknown>, msg?: string) => void;
+  error: (obj: Record<string, unknown>, msg?: string) => void;
+};
+
+const isTruthy = (value?: string) =>
+  value !== undefined && ["1", "true", "yes", "on"].includes(value.toLowerCase());
+
+const createDefaultLogger = (): TopologyLogger =>
+  pino({
+    level: process.env.LOG_LEVEL ?? (process.env.NODE_ENV === "test" ? "silent" : "info"),
+  });
+
+export function validateTopology(dbPath: string, log: TopologyLogger): void {
+  const strict = isTruthy(process.env.TOPOLOGY_GUARD_STRICT);
+
+  const warnOrThrow = (context: Record<string, unknown>, message: string) => {
+    if (strict) {
+      log.error(context, message);
+      throw new Error(message);
+    }
+    log.warn(context, message);
+  };
+
+  if (dbPath === ":memory:") {
+    warnOrThrow(
+      { dbPath },
+      "topology.guard: in-memory database detected (acceptable for tests)"
+    );
+    return;
+  }
+
+  if (!fs.existsSync(dbPath)) {
+    log.error({ dbPath }, "topology.guard: database file does not exist");
+    throw new Error(`Database file not found: ${dbPath}`);
+  }
+
+  if (dbPath.startsWith("/tmp/")) {
+    warnOrThrow(
+      { dbPath },
+      "topology.guard: database on ephemeral storage (data will be lost on restart)"
+    );
+  }
+
+  const expectedVolumePrefix = "/data/";
+  if (!dbPath.startsWith(expectedVolumePrefix)) {
+    warnOrThrow(
+      { dbPath, expectedVolumePrefix },
+      "topology.guard: database not on Fly.io volume (may not be shared across instances)"
+    );
+  }
+
+  const processGroup = process.env.FLY_PROCESS_GROUP;
+  if (processGroup && processGroup !== "app") {
+    warnOrThrow(
+      { processGroup, expected: "app" },
+      "topology.guard: unexpected Fly.io process group (may indicate topology change)"
+    );
+  }
+
+  log.info({ dbPath, processGroup }, "topology.guard: validation passed");
+}
+
 export class SqliteControlPlaneStore implements ControlPlaneStore {
   private db: Database.Database;
+  private log: TopologyLogger;
 
-  constructor(dbPath: string = "./data/control_plane.db") {
+  constructor(
+    dbPath: string = "./data/control_plane.db",
+    log: TopologyLogger = createDefaultLogger()
+  ) {
+    this.log = log;
     if (dbPath !== ":memory:") {
       const dir = dirname(dbPath);
-      mkdirSync(dir, { recursive: true });
+      fs.mkdirSync(dir, { recursive: true });
     }
     this.db = new Database(dbPath);
+    validateTopology(dbPath, this.log);
     this.db.pragma("foreign_keys = ON");
     this.initSchema();
   }

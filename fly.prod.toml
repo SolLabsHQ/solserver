@@ -1,11 +1,12 @@
-app = "solserver-staging"
+app = "solserver-prod"
 primary_region = "sjc"
 
 [env]
-  SOL_ENV = "staging"
+  SOL_ENV = "prod"
   LLM_PROVIDER = "openai"
   OPENAI_MODEL = "gpt-5-nano"
   CONTROL_PLANE_DB_PATH = "/data/control_plane.db"
+  # Keep strict topology validation on for production deployments.
   TOPOLOGY_GUARD_STRICT = "true"
 
 [http_service]
@@ -31,5 +32,5 @@ primary_region = "sjc"
     timeout = "2s"
 
 [[mounts]]
-  source = "solserver_staging_data"
+  source = "solserver_prod_data"
   destination = "/data"

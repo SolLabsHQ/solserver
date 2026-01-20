@@ -51,7 +51,7 @@ const emptyScanLimit = Number(process.env.WORKER_EMPTY_SCANS ?? 2) || 2;
 const jitterMinMs = Number(process.env.WORKER_LEASE_JITTER_MIN_MS ?? 10) || 10;
 const jitterMaxMs = Number(process.env.WORKER_LEASE_JITTER_MAX_MS ?? 50) || 50;
 
-const store = new SqliteControlPlaneStore(dbPath);
+const store = new SqliteControlPlaneStore(dbPath, log);
 
 const pickFilter = {
   eligibleStatuses: ["created", "processing"] as const,
