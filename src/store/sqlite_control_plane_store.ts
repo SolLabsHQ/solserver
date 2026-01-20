@@ -21,6 +21,11 @@ import type {
 } from "./control_plane_store";
 import type { PacketInput, ModeDecision, Evidence } from "../contracts/chat";
 
+type LeaseNextTransmissionResult =
+  | { outcome: "leased"; transmission: Transmission; previousStatus: TransmissionStatus }
+  | { outcome: "empty" }
+  | { outcome: "contention" };
+
 export class SqliteControlPlaneStore implements ControlPlaneStore {
   private db: Database.Database;
 
@@ -324,17 +329,27 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     leaseDurationSeconds: number;
     eligibleStatuses?: TransmissionStatus[];
     packetType?: Transmission["packetType"];
-  }): Promise<{ transmission: Transmission; previousStatus: TransmissionStatus } | null> {
+  }): Promise<LeaseNextTransmissionResult> {
     const eligible = (args.eligibleStatuses ?? ["created", "processing"])
       .filter((status) => status === "created" || status === "processing");
-    if (eligible.length === 0) return null;
+    if (eligible.length === 0) return { outcome: "empty" };
 
     const statusList = eligible.map((status) => `'${status}'`).join(", ");
     const nowIso = new Date().toISOString();
     const leaseExpiresAt = new Date(Date.now() + args.leaseDurationSeconds * 1000).toISOString();
     const packetClause = args.packetType ? "AND packet_type = ?" : "";
 
-    const tx = this.db.transaction(() => {
+    try {
+      this.db.exec("BEGIN IMMEDIATE");
+    } catch (error) {
+      const code = (error as { code?: string } | null)?.code;
+      if (code === "SQLITE_BUSY" || code === "SQLITE_BUSY_SNAPSHOT" || code === "SQLITE_BUSY_TIMEOUT") {
+        return { outcome: "contention" };
+      }
+      throw error;
+    }
+
+    try {
       const row = this.db.prepare(`
         SELECT * FROM transmissions
         WHERE status IN (${statusList})
@@ -344,7 +359,10 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         LIMIT 1
       `).get(...(args.packetType ? [args.packetType, nowIso] : [nowIso])) as any;
 
-      if (!row) return null;
+      if (!row) {
+        this.db.exec("ROLLBACK");
+        return { outcome: "empty" };
+      }
 
       const updateParams = [leaseExpiresAt, args.leaseOwner, row.id];
       if (args.packetType) updateParams.push(args.packetType);
@@ -360,8 +378,11 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       `).run(...updateParams);
 
       if (update.changes === 0) {
-        return null;
+        this.db.exec("ROLLBACK");
+        return { outcome: "contention" };
       }
+
+      this.db.exec("COMMIT");
 
       const transmission = this.rowToTransmission({
         ...row,
@@ -370,10 +391,13 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         lease_owner: args.leaseOwner,
       });
 
-      return { transmission, previousStatus: row.status as TransmissionStatus };
-    });
-
-    return tx();
+      return { outcome: "leased", transmission, previousStatus: row.status as TransmissionStatus };
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
   }
 
   async getLeaseableStats(args: {
