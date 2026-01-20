@@ -25,6 +25,7 @@ import {
 import { fakeModelReplyWithMeta } from "../providers/fake_model";
 import { openAIModelReplyWithMeta, OpenAIProviderError } from "../providers/openai_model";
 import { selectModel } from "../providers/provider_config";
+import type { GateOutput } from "../gates/gate_interfaces";
 import type { ControlPlaneStore, TraceRun, Transmission } from "../store/control_plane_store";
 import { OutputEnvelopeSchema, type OutputEnvelope } from "../contracts/output_envelope";
 import type { PacketInput, ModeDecision, NotificationPolicy } from "../contracts/chat";
@@ -94,6 +95,34 @@ export function buildOutputEnvelopeMeta(args: {
     notification_policy: args.notificationPolicy,
   };
   return { ...args.envelope, meta };
+}
+
+const SAFETY_GATE_NAME = "safety";
+
+export function resolveSafetyIsUrgent(args: {
+  results: GateOutput[];
+  log?: { warn: (obj: Record<string, any>, msg?: string) => void };
+}): boolean {
+  let isUrgent = false;
+
+  for (const result of args.results) {
+    const flagged = result.is_urgent === true || result.metadata?.is_urgent === true;
+    if (!flagged) continue;
+
+    if (result.gateName === SAFETY_GATE_NAME) {
+      isUrgent = true;
+      continue;
+    }
+
+    if (args.log?.warn) {
+      args.log.warn(
+        { evt: "gate.is_urgent_blocked", gateName: result.gateName, allowedGateName: SAFETY_GATE_NAME },
+        "gate.is_urgent_blocked"
+      );
+    }
+  }
+
+  return isUrgent;
 }
 
 type EnforcementFailureMetadata = {
@@ -918,9 +947,7 @@ export async function runOrchestrationPipeline(args: {
   // Note: metadata.seq is global and monotonic; it is not reset per gate.
   // Run gates pipeline
   const gatesOutput = runGatesPipeline(packet);
-  const safetyIsUrgent = gatesOutput.results.some(
-    (result) => result.is_urgent === true || result.metadata?.is_urgent === true
-  );
+  const safetyIsUrgent = resolveSafetyIsUrgent({ results: gatesOutput.results, log });
 
   const resolvedAfterGates = resolveNotificationPolicy({
     source: request.source,
