@@ -1,15 +1,21 @@
 import type { PacketInput } from "../contracts/chat";
 import type { GateInput } from "./normalize_modality";
 import { runNormalizeModality, type NormalizeModalityOutput } from "./normalize_modality";
-import { runIntentRisk, type IntentRiskOutput } from "./intent_risk";
+import {
+  runIntentGate,
+  runSentinelGate,
+  type IntentGateOutput,
+  type SentinelGateOutput,
+} from "./intent_risk";
 import { runLattice, type LatticeOutput } from "./lattice";
-import { GATE_SENTINEL, type GateOutput } from "./gate_interfaces";
+import { GATE_INTENT, GATE_SENTINEL, type GateOutput } from "./gate_interfaces";
 import { extractUrls } from "./url_extraction";
 
 export type GatesPipelineOutput = {
   results: GateOutput[];
   normalizeModality: NormalizeModalityOutput;
-  intentRisk: IntentRiskOutput;
+  intent: IntentGateOutput;
+  sentinel: SentinelGateOutput;
   lattice: LatticeOutput;
   evidenceCounts: {
     captureCount: number;
@@ -86,8 +92,9 @@ function buildGateInput(packet: PacketInput): {
  * Ordering:
  * 1. Normalize/Modality
  * 2. URL Extraction
- * 3. Intent/Risk
- * 4. Lattice (stub)
+ * 3. Intent
+ * 4. Sentinel
+ * 5. Lattice (stub)
  */
 export function runGatesPipeline(packet: PacketInput): GatesPipelineOutput {
   const { gateInput, inlineUrls, urlWarningsCount } = buildGateInput(packet);
@@ -99,7 +106,8 @@ export function runGatesPipeline(packet: PacketInput): GatesPipelineOutput {
 
   // Run gates in order
   const normalizeModality = runNormalizeModality(gateInput);
-  const intentRisk = runIntentRisk(gateInput);
+  const intent = runIntentGate(gateInput);
+  const sentinel = runSentinelGate(gateInput);
   const lattice = runLattice(gateInput);
 
   const results: GateOutput[] = [
@@ -126,13 +134,23 @@ export function runGatesPipeline(packet: PacketInput): GatesPipelineOutput {
       },
     },
     {
+      gateName: GATE_INTENT,
+      status: "pass",
+      summary: `Intent: ${intent.intent}`,
+      metadata: {
+        intent: intent.intent,
+      },
+    },
+    {
       gateName: GATE_SENTINEL,
       status: "pass",
-      summary: `Intent: ${intentRisk.intent}, Risk: ${intentRisk.risk}`,
+      summary: `Sentinel risk: ${sentinel.risk}`,
+      ...(sentinel.isUrgent ? { is_urgent: true } : {}),
       metadata: {
-        intent: intentRisk.intent,
-        risk: intentRisk.risk,
-        riskReasons: intentRisk.riskReasons,
+        risk: sentinel.risk,
+        riskReasons: sentinel.riskReasons,
+        ...(sentinel.urgentReasonCode ? { urgent_reason_code: sentinel.urgentReasonCode } : {}),
+        ...(sentinel.urgentSummary ? { urgent_summary: sentinel.urgentSummary } : {}),
       },
     },
     {
@@ -146,7 +164,8 @@ export function runGatesPipeline(packet: PacketInput): GatesPipelineOutput {
   return {
     results,
     normalizeModality,
-    intentRisk,
+    intent,
+    sentinel,
     lattice,
     evidenceCounts: gateInput.evidenceCounts,
   };

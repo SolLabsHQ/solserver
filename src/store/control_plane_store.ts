@@ -66,6 +66,7 @@ export type TraceEventPhase =
   | "evidence_intake"
   | "url_extraction"
   | "gate_normalize_modality"
+  | "gate_intent"
   | "gate_sentinel"
   | "gate_lattice"
   | "modality_gate"

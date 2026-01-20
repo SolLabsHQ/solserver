@@ -1,3 +1,4 @@
+export const GATE_INTENT = "intent" as const;
 export const GATE_SENTINEL = "sentinel" as const;
 
 export interface GateOutput {

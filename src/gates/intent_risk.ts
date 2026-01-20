@@ -25,10 +25,16 @@ export type RiskReason =
   | "MINORS"
   | "UNKNOWN";
 
-export type IntentRiskOutput = {
+export type IntentGateOutput = {
   intent: Intent;
+};
+
+export type SentinelGateOutput = {
   risk: Risk;
   riskReasons: RiskReason[];
+  isUrgent?: boolean;
+  urgentReasonCode?: string;
+  urgentSummary?: string;
 };
 
 /**
@@ -37,19 +43,41 @@ export type IntentRiskOutput = {
  * Classifies user intent and risk level using keyword matching.
  * Returns up to 5 risk reasons.
  */
-export function runIntentRisk(input: GateInput): IntentRiskOutput {
+export function runIntentGate(input: GateInput): IntentGateOutput {
   const messageText = input.messageText.toLowerCase();
   
   // Intent classification (keyword-based)
   const intent = classifyIntent(messageText);
   
-  // Risk classification (keyword-based)
-  const { risk, riskReasons } = classifyRisk(messageText);
-  
   return {
     intent,
+  };
+}
+
+export function runSentinelGate(input: GateInput): SentinelGateOutput {
+  const messageText = input.messageText.toLowerCase();
+
+  // Risk classification (keyword-based)
+  const { risk, riskReasons } = classifyRisk(messageText);
+  const boundedReasons = riskReasons.slice(0, 5);
+
+  const urgentSignals: Record<RiskReason, { code: string; summary: string }> = {
+    SELF_HARM: { code: "self_harm_signal", summary: "Self-harm signal" },
+    VIOLENCE: { code: "violence_signal", summary: "Violence signal" },
+  };
+  const urgentReason = boundedReasons.find((reason) => reason in urgentSignals);
+  const urgentMeta = urgentReason ? urgentSignals[urgentReason] : undefined;
+
+  return {
     risk,
-    riskReasons: riskReasons.slice(0, 5), // Max 5 reasons
+    riskReasons: boundedReasons,
+    ...(urgentMeta
+      ? {
+          isUrgent: true,
+          urgentReasonCode: urgentMeta.code,
+          urgentSummary: urgentMeta.summary,
+        }
+      : {}),
   };
 }
 
