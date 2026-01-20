@@ -50,6 +50,7 @@ sqlite3 ./data/control_plane.db "select id,status,lease_owner,lease_expires_at f
 - Verify token: `X-SOL-INTERNAL-TOKEN` must match `SOL_INTERNAL_TOKEN`
 - Verify `/data` writable (strict mode / Fly auto-strict)
 - Check logs for:
+  - `topology.guard.worker_internal_token_missing_fatal`
   - `topology.guard.worker_key_mismatch_fatal`
   - `topology.guard.worker_api_unreachable_fatal`
   - `topology.guard.worker_key_missing_fatal`

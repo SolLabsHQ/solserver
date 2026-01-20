@@ -36,8 +36,8 @@ export async function runTopologyHandshake(opts: HandshakeOptions): Promise<void
 
   if (!opts.internalToken) {
     opts.log.error(
-      { evt: "topology.guard.worker_api_unreachable_fatal", reason: "missing_internal_token" },
-      "topology.guard.worker_api_unreachable_fatal"
+      { evt: "topology.guard.worker_internal_token_missing_fatal" },
+      "topology.guard.worker_internal_token_missing_fatal"
     );
     throw new Error("Topology guard: SOL_INTERNAL_TOKEN missing");
   }
