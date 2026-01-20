@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { config as loadEnv } from "dotenv";
 import pino from "pino";
@@ -45,6 +46,10 @@ const leaseSeconds = Number(process.env.WORKER_LEASE_SECONDS ?? 120) || 120;
 const pollIntervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? 500) || 500;
 const heartbeatEvery = Number(process.env.WORKER_HEARTBEAT_EVERY ?? 20) || 20;
 const workerId = process.env.WORKER_ID ?? randomUUID();
+const leaseAttemptLimit = Number(process.env.WORKER_LEASE_ATTEMPTS ?? 5) || 5;
+const emptyScanLimit = Number(process.env.WORKER_EMPTY_SCANS ?? 2) || 2;
+const jitterMinMs = Number(process.env.WORKER_LEASE_JITTER_MIN_MS ?? 10) || 10;
+const jitterMaxMs = Number(process.env.WORKER_LEASE_JITTER_MAX_MS ?? 50) || 50;
 
 const store = new SqliteControlPlaneStore(dbPath);
 
@@ -53,6 +58,11 @@ const pickFilter = {
   packetType: "chat" as const,
   leaseCondition: "lease_expires_at IS NULL OR lease_expires_at < now",
 };
+
+let leaseAttempts = 0;
+let leaseWins = 0;
+let leaseContention = 0;
+let leaseEmpty = 0;
 
 const getDbStat = (path: string): { exists: boolean; sizeBytes?: number; mtime?: string } => {
   try {
@@ -114,21 +124,58 @@ async function logHeartbeat(reason: "startup" | "poll") {
       leaseableCount: stats.leaseableCount,
       oldestCreatedAgeMs,
       filter: pickFilter,
+      leaseStats: {
+        attempts: leaseAttempts,
+        wins: leaseWins,
+        contention: leaseContention,
+        empty: leaseEmpty,
+      },
     },
     "worker.heartbeat"
   );
 }
 
 async function processOne(opts: { logIdle: boolean }) {
-  const leased = await store.leaseNextTransmission({
-    leaseOwner: workerId,
-    leaseDurationSeconds: leaseSeconds,
-    eligibleStatuses: [...pickFilter.eligibleStatuses],
-    packetType: pickFilter.packetType,
-  });
+  let leased: Awaited<ReturnType<typeof store.leaseNextTransmission>> | null = null;
+  let emptyScans = 0;
+  let lastOutcome: "empty" | "contention" = "empty";
 
-  if (!leased) {
-    const payload = { evt: "worker.transmission.none", filter: pickFilter };
+  for (let attempt = 1; attempt <= leaseAttemptLimit; attempt += 1) {
+    leaseAttempts += 1;
+    leased = await store.leaseNextTransmission({
+      leaseOwner: workerId,
+      leaseDurationSeconds: leaseSeconds,
+      eligibleStatuses: [...pickFilter.eligibleStatuses],
+      packetType: pickFilter.packetType,
+    });
+
+    if (leased.outcome === "leased") {
+      leaseWins += 1;
+      break;
+    }
+
+    if (leased.outcome === "contention") {
+      leaseContention += 1;
+      lastOutcome = "contention";
+    } else {
+      leaseEmpty += 1;
+      emptyScans += 1;
+      lastOutcome = "empty";
+      if (emptyScans >= emptyScanLimit) {
+        leased = null;
+        break;
+      }
+    }
+
+    const jitter = Math.max(
+      0,
+      jitterMinMs + Math.floor(Math.random() * Math.max(1, jitterMaxMs - jitterMinMs + 1))
+    );
+    await sleep(jitter);
+  }
+
+  if (!leased || leased.outcome !== "leased") {
+    const payload = { evt: "worker.transmission.none", filter: pickFilter, reason: lastOutcome };
     log.debug(payload, "worker.transmission.none");
     if (opts.logIdle) {
       log.info(payload, "worker.transmission.none");
@@ -227,6 +274,10 @@ log.info(
     pollIntervalMs,
     leaseSeconds,
     heartbeatEvery,
+    leaseAttemptLimit,
+    emptyScanLimit,
+    jitterMinMs,
+    jitterMaxMs,
   },
   "worker.started"
 );
