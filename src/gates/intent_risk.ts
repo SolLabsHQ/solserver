@@ -61,11 +61,11 @@ export function runSentinelGate(input: GateInput): SentinelGateOutput {
   const { risk, riskReasons } = classifyRisk(messageText);
   const boundedReasons = riskReasons.slice(0, 5);
 
-  const urgentSignals: Record<RiskReason, { code: string; summary: string }> = {
+  const urgentSignals: Partial<Record<RiskReason, { code: string; summary: string }>> = {
     SELF_HARM: { code: "self_harm_signal", summary: "Self-harm signal" },
     VIOLENCE: { code: "violence_signal", summary: "Violence signal" },
   };
-  const urgentReason = boundedReasons.find((reason) => reason in urgentSignals);
+  const urgentReason = boundedReasons.find((reason) => Boolean(urgentSignals[reason]));
   const urgentMeta = urgentReason ? urgentSignals[urgentReason] : undefined;
 
   return {
