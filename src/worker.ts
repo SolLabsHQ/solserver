@@ -7,7 +7,7 @@ import pino from "pino";
 
 import { PacketInput, type PacketInput as PacketInputType } from "./contracts/chat";
 import { resolvePersonaLabel } from "./control-plane/router";
-import { processTransmission } from "./routes/chat";
+import { runOrchestrationPipeline } from "./control-plane/orchestrator";
 import { SqliteControlPlaneStore } from "./store/sqlite_control_plane_store";
 import type { Transmission } from "./store/control_plane_store";
 import { runTopologyHandshake } from "./topology/worker_handshake";
@@ -222,13 +222,18 @@ async function processOne(opts: { logIdle: boolean }) {
   }
 
   try {
-    const result = await processTransmission({
+    const result = await runOrchestrationPipeline({
       store: activeStore,
-      packet,
+      request: {
+        source: "worker",
+        packet,
+        simulate: packet.simulate === true,
+        forcedPersona: transmission.forcedPersona ?? undefined,
+      },
       transmission,
       modeDecision: transmission.modeDecision,
       traceRun,
-      simulate: "",
+      simulateStatus: "",
       log,
       allowAsyncSimulation: false,
     });

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import Fastify from "fastify";
 import { chatRoutes } from "../src/routes/chat";
 import { runGatesPipeline } from "../src/gates/gates_pipeline";
+import { GATE_INTENT, GATE_SENTINEL } from "../src/gates/gate_interfaces";
 import { SqliteControlPlaneStore } from "../src/store/sqlite_control_plane_store";
 import { unlinkSync } from "fs";
 
@@ -21,11 +22,12 @@ describe("Gates Pipeline", () => {
       message: "hello world",
     } as any);
 
-    expect(output.results).toHaveLength(4);
+    expect(output.results).toHaveLength(5);
     expect(output.results.map((r) => r.gateName)).toEqual([
       "normalize_modality",
       "url_extraction",
-      "intent_risk",
+      GATE_INTENT,
+      GATE_SENTINEL,
       "lattice",
     ]);
   });
@@ -62,7 +64,7 @@ describe("Gates Pipeline", () => {
     } catch {}
   });
 
-  it("should run gates in correct order: evidence_intake → normalize_modality → url_extraction → intent_risk → lattice", async () => {
+  it("should run gates in correct order: evidence_intake → normalize_modality → url_extraction → intent → sentinel → lattice", async () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/chat",
@@ -84,21 +86,24 @@ describe("Gates Pipeline", () => {
     const evidenceIntake = traceEvents.find(e => e.phase === "evidence_intake");
     const normalizeModality = traceEvents.find(e => e.phase === "gate_normalize_modality");
     const urlExtraction = traceEvents.find(e => e.phase === "url_extraction");
-    const intentRisk = traceEvents.find(e => e.phase === "gate_intent_risk");
+    const intentGate = traceEvents.find(e => e.phase === "gate_intent");
+    const sentinelGate = traceEvents.find(e => e.phase === "gate_sentinel");
     const lattice = traceEvents.find(e => e.phase === "gate_lattice");
 
     // Verify all gates ran
     expect(evidenceIntake).toBeDefined();
     expect(normalizeModality).toBeDefined();
     expect(urlExtraction).toBeDefined();
-    expect(intentRisk).toBeDefined();
+    expect(intentGate).toBeDefined();
+    expect(sentinelGate).toBeDefined();
     expect(lattice).toBeDefined();
 
     const gatePhases = [
       "evidence_intake",
       "gate_normalize_modality",
       "url_extraction",
-      "gate_intent_risk",
+      "gate_intent",
+      "gate_sentinel",
       "gate_lattice",
     ];
     const ordered = traceEvents.filter((event) => gatePhases.includes(event.phase));
@@ -369,7 +374,7 @@ describe("Gates Pipeline", () => {
     const body = JSON.parse(response.body);
 
     const traceEvents = await store.getTraceEvents(body.trace.traceRunId, { limit: 100 });
-    const intentRisk = traceEvents.find(e => e.phase === "gate_intent_risk");
+    const intentRisk = traceEvents.find(e => e.phase === "gate_intent");
     
     expect(intentRisk).toBeDefined();
     expect(intentRisk!.metadata).toMatchObject({
@@ -392,10 +397,10 @@ describe("Gates Pipeline", () => {
     const body = JSON.parse(response.body);
 
     const traceEvents = await store.getTraceEvents(body.trace.traceRunId, { limit: 100 });
-    const intentRisk = traceEvents.find(e => e.phase === "gate_intent_risk");
+    const sentinelGate = traceEvents.find(e => e.phase === "gate_sentinel");
     
-    expect(intentRisk).toBeDefined();
-    expect(intentRisk!.metadata).toMatchObject({
+    expect(sentinelGate).toBeDefined();
+    expect(sentinelGate!.metadata).toMatchObject({
       risk: "high",
       riskReasons: expect.arrayContaining(["FINANCE"]),
     });
@@ -517,7 +522,8 @@ describe("Gates Pipeline", () => {
     expect(phases).toContain("evidence_intake");
     expect(phases).toContain("gate_normalize_modality");
     expect(phases).toContain("url_extraction");
-    expect(phases).toContain("gate_intent_risk");
+    expect(phases).toContain("gate_intent");
+    expect(phases).toContain("gate_sentinel");
     expect(phases).toContain("gate_lattice");
 
     // Verify events have proper structure

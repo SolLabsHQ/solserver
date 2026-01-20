@@ -16,6 +16,10 @@ export const ProviderHints = z.object({
 
 export type ProviderHints = z.infer<typeof ProviderHints>;
 
+export const NotificationPolicy = z.enum(["silent", "muted", "alert", "urgent"]);
+
+export type NotificationPolicy = z.infer<typeof NotificationPolicy>;
+
 // Driver Block reference (for system defaults)
 export const DriverBlockRef = z.object({
   id: z.string().min(1),
@@ -104,6 +108,8 @@ export const PacketInput = z.object({
   // Idempotency key from client (SolMobile). If provided, server will dedupe retries.
   clientRequestId: z.string().min(1).optional(),
   message: z.string().min(1).max(20_000),
+  notification_policy: NotificationPolicy.optional(),
+  simulate: z.boolean().optional(),
   traceConfig: TraceConfig.optional(),
   providerHints: ProviderHints.optional(),
   // Driver Blocks (v0) - always additive

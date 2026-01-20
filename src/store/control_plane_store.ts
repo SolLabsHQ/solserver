@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { PacketInput, ModeDecision, Evidence } from "../contracts/chat";
+import type { PacketInput, ModeDecision, Evidence, NotificationPolicy } from "../contracts/chat";
 
 export type TransmissionStatus = "created" | "processing" | "completed" | "failed";
 export type DeliveryStatus = "succeeded" | "failed";
@@ -12,6 +12,8 @@ export type Transmission = {
   clientRequestId?: string;
   message: string;
   modeDecision: ModeDecision;
+  notificationPolicy?: NotificationPolicy;
+  forcedPersona?: ModeDecision["personaLabel"] | null;
   createdAt: string;
   status: TransmissionStatus;
   statusCode?: number;
@@ -64,7 +66,8 @@ export type TraceEventPhase =
   | "evidence_intake"
   | "url_extraction"
   | "gate_normalize_modality"
-  | "gate_intent_risk"
+  | "gate_intent"
+  | "gate_sentinel"
   | "gate_lattice"
   | "modality_gate"
   | "intent_gate"
@@ -102,6 +105,8 @@ export interface ControlPlaneStore {
   createTransmission(args: {
     packet: PacketInput;
     modeDecision: ModeDecision;
+    notificationPolicy?: NotificationPolicy;
+    forcedPersona?: ModeDecision["personaLabel"] | null;
   }): Promise<Transmission>;
 
   getTransmissionByClientRequestId(clientRequestId: string): Promise<Transmission | null>;
@@ -113,6 +118,12 @@ export interface ControlPlaneStore {
     retryable?: boolean;
     errorCode?: string | null;
     errorDetail?: Record<string, any> | null;
+  }): Promise<void>;
+
+  updateTransmissionPolicy(args: {
+    transmissionId: string;
+    notificationPolicy?: NotificationPolicy | null;
+    forcedPersona?: ModeDecision["personaLabel"] | null;
   }): Promise<void>;
 
   appendDeliveryAttempt(args: {
@@ -189,6 +200,8 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
   async createTransmission(args: {
     packet: PacketInput;
     modeDecision: ModeDecision;
+    notificationPolicy?: NotificationPolicy;
+    forcedPersona?: ModeDecision["personaLabel"] | null;
   }): Promise<Transmission> {
     const id = randomUUID();
     const clientRequestId = (args.packet as any).clientRequestId as string | undefined;
@@ -200,6 +213,8 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       clientRequestId,
       message: args.packet.message,
       modeDecision: args.modeDecision,
+      notificationPolicy: args.notificationPolicy,
+      forcedPersona: args.forcedPersona ?? null,
       createdAt: new Date().toISOString(),
       status: "created",
       statusCode: undefined,
@@ -219,6 +234,20 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     }
 
     return t;
+  }
+
+  async updateTransmissionPolicy(args: {
+    transmissionId: string;
+    notificationPolicy?: NotificationPolicy | null;
+    forcedPersona?: ModeDecision["personaLabel"] | null;
+  }): Promise<void> {
+    const existing = this.transmissions.get(args.transmissionId);
+    if (!existing) return;
+    this.transmissions.set(args.transmissionId, {
+      ...existing,
+      notificationPolicy: args.notificationPolicy ?? existing.notificationPolicy,
+      forcedPersona: args.forcedPersona ?? existing.forcedPersona,
+    });
   }
 
   async getTransmissionByClientRequestId(clientRequestId: string): Promise<Transmission | null> {
