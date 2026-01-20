@@ -31,14 +31,18 @@ const cleanupFile = (path: string) => {
   }
 };
 
-const loadValidateTopology = async (overrideExists?: (path: fs.PathLike) => boolean) => {
+type FsOverrides = Partial<Pick<typeof fs, "existsSync" | "writeFileSync" | "unlinkSync">>;
+
+const loadValidateTopology = async (overrides: FsOverrides = {}) => {
   vi.resetModules();
 
   vi.doMock("node:fs", async () => {
     const actual = await vi.importActual<typeof fs>("node:fs");
     return {
       ...actual,
-      existsSync: overrideExists ?? actual.existsSync,
+      existsSync: overrides.existsSync ?? actual.existsSync,
+      writeFileSync: overrides.writeFileSync ?? actual.writeFileSync,
+      unlinkSync: overrides.unlinkSync ?? actual.unlinkSync,
     };
   });
 
@@ -52,6 +56,7 @@ describe("Topology guard", () => {
   beforeEach(() => {
     envSnapshot = {
       FLY_PROCESS_GROUP: process.env.FLY_PROCESS_GROUP,
+      FLY_APP_NAME: process.env.FLY_APP_NAME,
       TOPOLOGY_GUARD_STRICT: process.env.TOPOLOGY_GUARD_STRICT,
     };
   });
@@ -61,6 +66,12 @@ describe("Topology guard", () => {
       delete process.env.FLY_PROCESS_GROUP;
     } else {
       process.env.FLY_PROCESS_GROUP = envSnapshot.FLY_PROCESS_GROUP;
+    }
+
+    if (envSnapshot.FLY_APP_NAME === undefined) {
+      delete process.env.FLY_APP_NAME;
+    } else {
+      process.env.FLY_APP_NAME = envSnapshot.FLY_APP_NAME;
     }
 
     if (envSnapshot.TOPOLOGY_GUARD_STRICT === undefined) {
@@ -78,7 +89,9 @@ describe("Topology guard", () => {
 
     process.env.FLY_PROCESS_GROUP = "app";
 
-    const validateTopology = await loadValidateTopology((path) => path === dbPath);
+    const validateTopology = await loadValidateTopology({
+      existsSync: (path) => path === dbPath,
+    });
     expect(() => validateTopology(dbPath, log)).not.toThrow();
 
     const warns = entries.filter((entry) => entry.level === "warn");
@@ -93,7 +106,9 @@ describe("Topology guard", () => {
   it("warns for in-memory database", async () => {
     const { log, entries } = makeLogger();
 
-    const validateTopology = await loadValidateTopology((path) => fs.existsSync(path));
+    const validateTopology = await loadValidateTopology({
+      existsSync: (path) => fs.existsSync(path),
+    });
     expect(() => validateTopology(":memory:", log)).not.toThrow();
 
     expect(entries.some((entry) => entry.message.includes("in-memory database"))).toBe(true);
@@ -105,7 +120,9 @@ describe("Topology guard", () => {
 
     cleanupFile(dbPath);
 
-    const validateTopology = await loadValidateTopology((path) => fs.existsSync(path));
+    const validateTopology = await loadValidateTopology({
+      existsSync: (path) => fs.existsSync(path),
+    });
     expect(() => validateTopology(dbPath, log)).toThrow("Database file not found");
   });
 
@@ -117,7 +134,9 @@ describe("Topology guard", () => {
     fs.writeFileSync(dbPath, "");
 
     try {
-      const validateTopology = await loadValidateTopology((path) => fs.existsSync(path));
+      const validateTopology = await loadValidateTopology({
+        existsSync: (path) => fs.existsSync(path),
+      });
       expect(() => validateTopology(dbPath, log)).not.toThrow();
       expect(entries.some((entry) => entry.message.includes("ephemeral storage"))).toBe(true);
     } finally {
@@ -133,7 +152,9 @@ describe("Topology guard", () => {
     fs.writeFileSync(dbPath, "");
 
     try {
-      const validateTopology = await loadValidateTopology((path) => fs.existsSync(path));
+      const validateTopology = await loadValidateTopology({
+        existsSync: (path) => fs.existsSync(path),
+      });
       expect(() => validateTopology(dbPath, log)).not.toThrow();
       expect(entries.some((entry) => entry.message.includes("not on Fly.io volume"))).toBe(true);
     } finally {
@@ -150,7 +171,9 @@ describe("Topology guard", () => {
     process.env.FLY_PROCESS_GROUP = "worker";
 
     try {
-      const validateTopology = await loadValidateTopology((path) => fs.existsSync(path));
+      const validateTopology = await loadValidateTopology({
+        existsSync: (path) => fs.existsSync(path),
+      });
       expect(() => validateTopology(dbPath, log)).not.toThrow();
       expect(entries.some((entry) => entry.message.includes("unexpected Fly.io process group"))).toBe(
         true
@@ -158,5 +181,25 @@ describe("Topology guard", () => {
     } finally {
       cleanupFile(dbPath);
     }
+  });
+
+  it("fails when /data is not writable in strict mode", async () => {
+    const { log, entries } = makeLogger();
+    const dbPath = "/data/control_plane.db";
+
+    process.env.FLY_APP_NAME = "solserver-test";
+
+    const validateTopology = await loadValidateTopology({
+      existsSync: () => true,
+      writeFileSync: () => {
+        throw new Error("EACCES: permission denied");
+      },
+      unlinkSync: () => undefined,
+    });
+
+    expect(() => validateTopology(dbPath, log)).toThrow("Topology guard: /data volume is not writable");
+    expect(
+      entries.some((entry) => entry.message.includes("topology.guard.volume_not_writable_fatal"))
+    ).toBe(true);
   });
 });

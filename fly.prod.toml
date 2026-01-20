@@ -8,6 +8,7 @@ primary_region = "sjc"
   CONTROL_PLANE_DB_PATH = "/data/control_plane.db"
   # Keep strict topology validation on for production deployments.
   TOPOLOGY_GUARD_STRICT = "true"
+  SOL_INTERNAL_API_BASE = "http://solserver-prod.internal:3333"
 
 [http_service]
   internal_port = 3333
