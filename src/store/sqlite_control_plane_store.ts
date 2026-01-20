@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import * as fs from "node:fs";
+import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
+import pino from "pino";
 
 import type {
   ControlPlaneStore,
@@ -26,21 +27,120 @@ type LeaseNextTransmissionResult =
   | { outcome: "empty" }
   | { outcome: "contention" };
 
+export type TopologyMeta = {
+  topologyKey: string;
+  createdAtMs: number;
+  createdBy: string;
+};
+
+type TopologyLogger = {
+  info: (obj: Record<string, unknown>, msg?: string) => void;
+  warn: (obj: Record<string, unknown>, msg?: string) => void;
+  error: (obj: Record<string, unknown>, msg?: string) => void;
+};
+
+const isTruthy = (value?: string) =>
+  value !== undefined && ["1", "true", "yes", "on"].includes(value.toLowerCase());
+
+const createDefaultLogger = (): TopologyLogger =>
+  pino({
+    level: process.env.LOG_LEVEL ?? (process.env.NODE_ENV === "test" ? "silent" : "info"),
+  });
+
+export function validateTopology(dbPath: string, log: TopologyLogger): void {
+  const strictEnv = isTruthy(process.env.TOPOLOGY_GUARD_STRICT);
+  const isFly = Boolean(process.env.FLY_APP_NAME);
+  const strict = strictEnv || isFly;
+
+  const warnOrThrow = (context: Record<string, unknown>, message: string) => {
+    if (strict) {
+      log.error(context, message);
+      throw new Error(message);
+    }
+    log.warn(context, message);
+  };
+
+  if (dbPath === ":memory:") {
+    warnOrThrow(
+      { dbPath },
+      "topology.guard: in-memory database detected (acceptable for tests)"
+    );
+    return;
+  }
+
+  if (!fs.existsSync(dbPath)) {
+    log.error({ dbPath }, "topology.guard: database file does not exist");
+    throw new Error(`Database file not found: ${dbPath}`);
+  }
+
+  if (dbPath.startsWith("/tmp/")) {
+    warnOrThrow(
+      { dbPath },
+      "topology.guard: database on ephemeral storage (data will be lost on restart)"
+    );
+  }
+
+  const expectedVolumePrefix = "/data/";
+  if (!dbPath.startsWith(expectedVolumePrefix)) {
+    warnOrThrow(
+      { dbPath, expectedVolumePrefix },
+      "topology.guard: database not on Fly.io volume (may not be shared across instances)"
+    );
+  }
+
+  if (strict) {
+    const testPath = join("/data", `.topology_write_test_${process.pid}_${Date.now()}`);
+    try {
+      fs.writeFileSync(testPath, "ok");
+      fs.unlinkSync(testPath);
+    } catch (error) {
+      log.error(
+        { evt: "topology.guard.volume_not_writable_fatal", error: String(error) },
+        "topology.guard.volume_not_writable_fatal"
+      );
+      throw new Error("Topology guard: /data volume is not writable");
+    }
+  }
+
+  const processGroup = process.env.FLY_PROCESS_GROUP;
+  if (processGroup && processGroup !== "app") {
+    warnOrThrow(
+      { processGroup, expected: "app" },
+      "topology.guard: unexpected Fly.io process group (may indicate topology change)"
+    );
+  }
+
+  log.info({ dbPath, processGroup }, "topology.guard: validation passed");
+}
+
 export class SqliteControlPlaneStore implements ControlPlaneStore {
   private db: Database.Database;
+  private log: TopologyLogger;
 
-  constructor(dbPath: string = "./data/control_plane.db") {
+  constructor(
+    dbPath: string = "./data/control_plane.db",
+    log: TopologyLogger = createDefaultLogger()
+  ) {
+    this.log = log;
     if (dbPath !== ":memory:") {
       const dir = dirname(dbPath);
-      mkdirSync(dir, { recursive: true });
+      fs.mkdirSync(dir, { recursive: true });
     }
     this.db = new Database(dbPath);
+    validateTopology(dbPath, this.log);
     this.db.pragma("foreign_keys = ON");
     this.initSchema();
   }
 
   private initSchema() {
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS topology_meta (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        topology_key TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        created_by TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS transmissions (
         id TEXT PRIMARY KEY,
         packet_type TEXT NOT NULL,
@@ -204,6 +304,47 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     try {
       this.db.exec("ALTER TABLE trace_runs ADD COLUMN persona_label TEXT");
     } catch {}
+  }
+
+  readTopologyKey(): TopologyMeta | null {
+    const row = this.db
+      .prepare("SELECT topology_key, created_at_ms, created_by FROM topology_meta WHERE id = 1")
+      .get() as { topology_key: string; created_at_ms: number; created_by: string } | undefined;
+
+    if (!row) return null;
+    return {
+      topologyKey: row.topology_key,
+      createdAtMs: row.created_at_ms,
+      createdBy: row.created_by,
+    };
+  }
+
+  ensureTopologyKeyPrimary(args: { createdBy?: string } = {}): TopologyMeta {
+    const existing = this.readTopologyKey();
+    if (existing) return existing;
+
+    const createdBy = args.createdBy ?? "api";
+    const topologyKey = randomUUID();
+    const createdAtMs = Date.now();
+
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO topology_meta (id, topology_key, created_at_ms, created_by)
+      VALUES (1, ?, ?, ?)
+    `);
+    const result = stmt.run(topologyKey, createdAtMs, createdBy);
+
+    if (result.changes > 0) {
+      this.log.info(
+        { evt: "topology.guard.api_primary_key_created", createdAtMs, createdBy },
+        "topology.guard.api_primary_key_created"
+      );
+    }
+
+    const meta = this.readTopologyKey();
+    if (!meta) {
+      throw new Error("Topology guard: failed to initialize topology key");
+    }
+    return meta;
   }
 
   async createTransmission(args: {

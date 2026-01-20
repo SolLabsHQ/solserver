@@ -48,6 +48,17 @@ jobs:
             exit 1
           fi
 
+      - name: Assert topology guard strict in Fly config
+        run: |
+          if ! grep -Eq 'TOPOLOGY_GUARD_STRICT[[:space:]]*=[[:space:]]*\"?true\"?' fly.toml; then
+            echo "TOPOLOGY_GUARD_STRICT must be set to true in fly.toml for staging."
+            exit 1
+          fi
+          if ! grep -Eq 'TOPOLOGY_GUARD_STRICT[[:space:]]*=[[:space:]]*\"?true\"?' fly.prod.toml; then
+            echo "TOPOLOGY_GUARD_STRICT must be set to true in fly.prod.toml for production."
+            exit 1
+          fi
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

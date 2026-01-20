@@ -10,6 +10,7 @@ import { resolvePersonaLabel } from "./control-plane/router";
 import { processTransmission } from "./routes/chat";
 import { SqliteControlPlaneStore } from "./store/sqlite_control_plane_store";
 import type { Transmission } from "./store/control_plane_store";
+import { runTopologyHandshake } from "./topology/worker_handshake";
 
 if (process.env.NODE_ENV !== "production") {
   loadEnv();
@@ -51,7 +52,12 @@ const emptyScanLimit = Number(process.env.WORKER_EMPTY_SCANS ?? 2) || 2;
 const jitterMinMs = Number(process.env.WORKER_LEASE_JITTER_MIN_MS ?? 10) || 10;
 const jitterMaxMs = Number(process.env.WORKER_LEASE_JITTER_MAX_MS ?? 50) || 50;
 
-const store = new SqliteControlPlaneStore(dbPath);
+const resolveInternalApiBase = () => {
+  const base = process.env.SOL_INTERNAL_API_BASE;
+  if (base) return base;
+  const port = Number(process.env.PORT ?? 3333) || 3333;
+  return `http://127.0.0.1:${port}`;
+};
 
 const pickFilter = {
   eligibleStatuses: ["created", "processing"] as const,
@@ -63,6 +69,7 @@ let leaseAttempts = 0;
 let leaseWins = 0;
 let leaseContention = 0;
 let leaseEmpty = 0;
+let store: SqliteControlPlaneStore | null = null;
 
 const getDbStat = (path: string): { exists: boolean; sizeBytes?: number; mtime?: string } => {
   try {
@@ -105,8 +112,16 @@ function packetFromTransmission(tx: Transmission): PacketInputType {
   return parsedFallback.data;
 }
 
+const requireStore = (): SqliteControlPlaneStore => {
+  if (!store) {
+    throw new Error("worker.store_not_initialized");
+  }
+  return store;
+};
+
 async function logHeartbeat(reason: "startup" | "poll") {
-  const stats = await store.getLeaseableStats({
+  const activeStore = requireStore();
+  const stats = await activeStore.getLeaseableStats({
     eligibleStatuses: [...pickFilter.eligibleStatuses],
     packetType: pickFilter.packetType,
   });
@@ -136,13 +151,14 @@ async function logHeartbeat(reason: "startup" | "poll") {
 }
 
 async function processOne(opts: { logIdle: boolean }) {
-  let leased: Awaited<ReturnType<typeof store.leaseNextTransmission>> | null = null;
+  const activeStore = requireStore();
+  let leased: Awaited<ReturnType<SqliteControlPlaneStore["leaseNextTransmission"]>> | null = null;
   let emptyScans = 0;
   let lastOutcome: "empty" | "contention" = "empty";
 
   for (let attempt = 1; attempt <= leaseAttemptLimit; attempt += 1) {
     leaseAttempts += 1;
-    leased = await store.leaseNextTransmission({
+    leased = await activeStore.leaseNextTransmission({
       leaseOwner: workerId,
       leaseDurationSeconds: leaseSeconds,
       eligibleStatuses: [...pickFilter.eligibleStatuses],
@@ -196,9 +212,9 @@ async function processOne(opts: { logIdle: boolean }) {
   const packet = packetFromTransmission(transmission);
   const traceLevel = packet.traceConfig?.level ?? "info";
 
-  let traceRun = await store.getTraceRunByTransmission(transmission.id);
+  let traceRun = await activeStore.getTraceRunByTransmission(transmission.id);
   if (!traceRun) {
-    traceRun = await store.createTraceRun({
+    traceRun = await activeStore.createTraceRun({
       transmissionId: transmission.id,
       level: traceLevel,
       personaLabel: resolvePersonaLabel(transmission.modeDecision),
@@ -207,7 +223,7 @@ async function processOne(opts: { logIdle: boolean }) {
 
   try {
     const result = await processTransmission({
-      store,
+      store: activeStore,
       packet,
       transmission,
       modeDecision: transmission.modeDecision,
@@ -228,14 +244,14 @@ async function processOne(opts: { logIdle: boolean }) {
       ? "openai"
       : "fake";
 
-    await store.appendDeliveryAttempt({
+    await activeStore.appendDeliveryAttempt({
       transmissionId: transmission.id,
       provider,
       status: "failed",
       error: message,
     });
 
-    await store.updateTransmissionStatus({
+    await activeStore.updateTransmissionStatus({
       transmissionId: transmission.id,
       status: "failed",
       statusCode: 500,
@@ -265,23 +281,46 @@ async function tick() {
   }
 }
 
-log.info(
-  {
-    evt: "worker.started",
-    workerId,
-    dbPath,
-    dbStat: getDbStat(dbPath),
-    pollIntervalMs,
-    leaseSeconds,
-    heartbeatEvery,
-    leaseAttemptLimit,
-    emptyScanLimit,
-    jitterMinMs,
-    jitterMaxMs,
-  },
-  "worker.started"
-);
+async function main() {
+  store = new SqliteControlPlaneStore(dbPath, log);
 
-void logHeartbeat("startup");
-tick();
-setInterval(tick, pollIntervalMs);
+  const handshakeAttempts = Number(process.env.TOPOLOGY_HANDSHAKE_ATTEMPTS ?? 12) || 12;
+  const handshakeDelayMs = Number(process.env.TOPOLOGY_HANDSHAKE_RETRY_MS ?? 5000) || 5000;
+
+  await runTopologyHandshake({
+    store,
+    log,
+    apiBaseUrl: resolveInternalApiBase(),
+    internalToken: process.env.SOL_INTERNAL_TOKEN,
+    maxAttempts: handshakeAttempts,
+    retryDelayMs: handshakeDelayMs,
+  });
+
+  log.info(
+    {
+      evt: "worker.started",
+      workerId,
+      dbPath,
+      dbStat: getDbStat(dbPath),
+      pollIntervalMs,
+      leaseSeconds,
+      heartbeatEvery,
+      leaseAttemptLimit,
+      emptyScanLimit,
+      jitterMinMs,
+      jitterMaxMs,
+      handshakeAttempts,
+      handshakeDelayMs,
+    },
+    "worker.started"
+  );
+
+  await logHeartbeat("startup");
+  tick();
+  setInterval(tick, pollIntervalMs);
+}
+
+main().catch((err) => {
+  log.error({ error: String(err?.message ?? err) }, "worker.fatal");
+  process.exit(1);
+});

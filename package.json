@@ -13,7 +13,8 @@
     "test": "vitest run --no-file-parallelism --testTimeout 20000",
     "build": "tsc -p tsconfig.build.json",
     "start:worker": "node dist/worker.js",
-    "deploy:staging": "fly deploy -a solserver-staging"
+    "deploy:staging": "fly deploy -a solserver-staging",
+    "deploy:prod": "fly deploy -c fly.prod.toml -a solserver-prod"
   },
   "repository": {
     "type": "git",

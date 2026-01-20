@@ -66,6 +66,7 @@ app.addHook("onResponse", async (req, reply) => {
 
 import { healthRoutes } from "./routes/healthz";
 import { chatRoutes } from "./routes/chat";
+import { internalTopologyRoutes } from "./routes/internal/topology";
 import { selectModel } from "./providers/provider_config";
 import { SqliteControlPlaneStore } from "./store/sqlite_control_plane_store";
 
@@ -89,9 +90,11 @@ const getDbStat = (path: string): { exists: boolean; sizeBytes?: number; mtime?:
     return { exists: false };
   }
 };
-const store = new SqliteControlPlaneStore(dbPath);
+const store = new SqliteControlPlaneStore(dbPath, app.log);
 
 async function main() {
+  store.ensureTopologyKeyPrimary({ createdBy: "api" });
+
   // CORS (v0/dev): permissive. Tighten before prod.
   app.register(cors, {
     origin: true,
@@ -100,6 +103,7 @@ async function main() {
   // Routes
   app.register(healthRoutes, { dbPath });
   app.register(chatRoutes, { prefix: "/v1", store });
+  app.register(internalTopologyRoutes, { prefix: "/internal", store, dbPath });
 
   const llmProvider =
     (process.env.LLM_PROVIDER ?? "fake").toLowerCase() === "openai" ? "openai" : "fake";
