@@ -69,6 +69,7 @@ export async function chatRoutes(
     const attempts = await store.getDeliveryAttempts(id);
     const usage = await store.getUsage(id);
     const result = await store.getChatResult(id);
+    const outputEnvelope = await store.getTransmissionOutputEnvelope(id);
     const traceRun = await store.getTraceRunByTransmission(id);
     const traceSummary = traceRun ? await store.getTraceSummary(traceRun.id) : null;
 
@@ -83,6 +84,7 @@ export async function chatRoutes(
       transmission,
       pending: transmission.status === "created" || transmission.status === "processing",
       assistant: result?.assistant ?? null,
+      ...(outputEnvelope ? { outputEnvelope } : {}),
       attempts,
       usage,
       trace: traceRun

@@ -66,6 +66,7 @@ app.addHook("onResponse", async (req, reply) => {
 
 import { healthRoutes } from "./routes/healthz";
 import { chatRoutes } from "./routes/chat";
+import { memoryRoutes } from "./routes/memories";
 import { internalTopologyRoutes } from "./routes/internal/topology";
 import { selectModel } from "./providers/provider_config";
 import { SqliteControlPlaneStore } from "./store/sqlite_control_plane_store";
@@ -103,6 +104,7 @@ async function main() {
   // Routes
   app.register(healthRoutes, { dbPath });
   app.register(chatRoutes, { prefix: "/v1", store });
+  app.register(memoryRoutes, { prefix: "/v1", store });
   app.register(internalTopologyRoutes, { prefix: "/internal", store, dbPath });
 
   const llmProvider =
