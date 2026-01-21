@@ -78,8 +78,23 @@ SolServer exposes a minimal API:
 - `POST /v1/memories`  
   Persists a user-explicit memory object
 
+- `POST /v1/memories/distill`  
+  Asynchronous distillation request; delivers a muted Ghost Card later
+
 - `GET /v1/memories`  
   Lists explicit memory summaries
+
+- `PATCH /v1/memories/{memory_id}`  
+  Updates a memory artifact
+
+- `DELETE /v1/memories/{memory_id}`  
+  Forgets a memory artifact
+
+- `POST /v1/memories/batch_delete`  
+  High-friction batch delete for memories
+
+- `POST /v1/memories/clear_all`  
+  High-friction full reset of memories
 
 - `GET /v1/usage/daily`  
   Returns token usage and estimated cost data
