@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 
-import type { PacketInput, ModeDecision, Evidence } from "../contracts/chat";
+import type { PacketInput, ModeDecision, Evidence, NotificationPolicy } from "../contracts/chat";
 
-export type TransmissionStatus = "created" | "completed" | "failed";
+export type TransmissionStatus = "created" | "processing" | "completed" | "failed";
 export type DeliveryStatus = "succeeded" | "failed";
 
 export type Transmission = {
@@ -12,10 +12,18 @@ export type Transmission = {
   clientRequestId?: string;
   message: string;
   modeDecision: ModeDecision;
+  notificationPolicy?: NotificationPolicy;
+  forcedPersona?: ModeDecision["personaLabel"] | null;
   createdAt: string;
   status: TransmissionStatus;
   statusCode?: number;
   retryable?: boolean;
+  errorCode?: string;
+  errorDetail?: Record<string, any>;
+  packetJson?: string;
+  packet?: PacketInput;
+  leaseExpiresAt?: string | null;
+  leaseOwner?: string | null;
 };
 
 export type DeliveryAttempt = {
@@ -48,6 +56,7 @@ export type TraceRun = {
   id: string;
   transmissionId: string;
   level: TraceLevel;
+  personaLabel?: string | null;
   createdAt: string;
 };
 
@@ -57,7 +66,8 @@ export type TraceEventPhase =
   | "evidence_intake"
   | "url_extraction"
   | "gate_normalize_modality"
-  | "gate_intent_risk"
+  | "gate_intent"
+  | "gate_sentinel"
   | "gate_lattice"
   | "modality_gate"
   | "intent_gate"
@@ -95,6 +105,8 @@ export interface ControlPlaneStore {
   createTransmission(args: {
     packet: PacketInput;
     modeDecision: ModeDecision;
+    notificationPolicy?: NotificationPolicy;
+    forcedPersona?: ModeDecision["personaLabel"] | null;
   }): Promise<Transmission>;
 
   getTransmissionByClientRequestId(clientRequestId: string): Promise<Transmission | null>;
@@ -104,6 +116,14 @@ export interface ControlPlaneStore {
     status: TransmissionStatus;
     statusCode?: number;
     retryable?: boolean;
+    errorCode?: string | null;
+    errorDetail?: Record<string, any> | null;
+  }): Promise<void>;
+
+  updateTransmissionPolicy(args: {
+    transmissionId: string;
+    notificationPolicy?: NotificationPolicy | null;
+    forcedPersona?: ModeDecision["personaLabel"] | null;
   }): Promise<void>;
 
   appendDeliveryAttempt(args: {
@@ -132,6 +152,7 @@ export interface ControlPlaneStore {
   createTraceRun(args: {
     transmissionId: string;
     level: TraceLevel;
+    personaLabel?: string | null;
   }): Promise<TraceRun>;
 
   appendTraceEvent(args: {
@@ -179,6 +200,8 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
   async createTransmission(args: {
     packet: PacketInput;
     modeDecision: ModeDecision;
+    notificationPolicy?: NotificationPolicy;
+    forcedPersona?: ModeDecision["personaLabel"] | null;
   }): Promise<Transmission> {
     const id = randomUUID();
     const clientRequestId = (args.packet as any).clientRequestId as string | undefined;
@@ -190,10 +213,18 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       clientRequestId,
       message: args.packet.message,
       modeDecision: args.modeDecision,
+      notificationPolicy: args.notificationPolicy,
+      forcedPersona: args.forcedPersona ?? null,
       createdAt: new Date().toISOString(),
       status: "created",
       statusCode: undefined,
       retryable: undefined,
+      errorCode: undefined,
+      errorDetail: undefined,
+      packetJson: JSON.stringify(args.packet),
+      packet: args.packet,
+      leaseExpiresAt: null,
+      leaseOwner: null,
     };
 
     this.transmissions.set(id, t);
@@ -203,6 +234,20 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     }
 
     return t;
+  }
+
+  async updateTransmissionPolicy(args: {
+    transmissionId: string;
+    notificationPolicy?: NotificationPolicy | null;
+    forcedPersona?: ModeDecision["personaLabel"] | null;
+  }): Promise<void> {
+    const existing = this.transmissions.get(args.transmissionId);
+    if (!existing) return;
+    this.transmissions.set(args.transmissionId, {
+      ...existing,
+      notificationPolicy: args.notificationPolicy ?? existing.notificationPolicy,
+      forcedPersona: args.forcedPersona ?? existing.forcedPersona,
+    });
   }
 
   async getTransmissionByClientRequestId(clientRequestId: string): Promise<Transmission | null> {
@@ -216,6 +261,8 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     status: TransmissionStatus;
     statusCode?: number;
     retryable?: boolean;
+    errorCode?: string | null;
+    errorDetail?: Record<string, any> | null;
   }): Promise<void> {
     const existing = this.transmissions.get(args.transmissionId);
     if (!existing) return;
@@ -224,6 +271,8 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       status: args.status,
       statusCode: args.statusCode ?? existing.statusCode,
       retryable: args.retryable ?? existing.retryable,
+      errorCode: args.errorCode === undefined ? existing.errorCode : args.errorCode ?? undefined,
+      errorDetail: args.errorDetail === undefined ? existing.errorDetail : args.errorDetail ?? undefined,
     });
   }
 
@@ -298,11 +347,13 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
   async createTraceRun(args: {
     transmissionId: string;
     level: TraceLevel;
+    personaLabel?: string | null;
   }): Promise<TraceRun> {
     const tr: TraceRun = {
       id: randomUUID(),
       transmissionId: args.transmissionId,
       level: args.level,
+      personaLabel: args.personaLabel ?? null,
       createdAt: new Date().toISOString(),
     };
     this.traceRuns.set(tr.id, tr);

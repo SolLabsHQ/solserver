@@ -9,6 +9,7 @@ const basePacket = {
 
 const baseModeDecision = {
   modeLabel: "Ida",
+  personaLabel: "ida",
   domainFlags: [],
   confidence: 0.5,
   checkpointNeeded: false,

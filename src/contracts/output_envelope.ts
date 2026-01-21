@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { NotificationPolicy } from "./chat";
+
 const EvidenceRefSchema = z.object({
   evidence_id: z.string().min(1),
   span_id: z.string().min(1).optional(),
@@ -51,6 +53,7 @@ const OutputEnvelopeMetaSchema = z.object({
   claims: z.array(ClaimSchema).min(1).optional(),
   used_evidence_ids: z.array(z.string().min(1)).optional(),
   evidence_pack_id: z.string().min(1).optional(),
+  notification_policy: NotificationPolicy.optional(),
   capture_suggestion: CaptureSuggestionSchema.optional(),
 }).passthrough();
 

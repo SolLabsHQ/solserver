@@ -1,3 +1,5 @@
+import type { ModeDecision } from "../contracts/chat";
+import { resolvePersonaLabel } from "../control-plane/router";
 import type { AssembledDriverBlock } from "../control-plane/driver_blocks";
 
 export type PostLinterViolation = {
@@ -17,13 +19,31 @@ export type PostLinterBlockResult = {
 };
 
 export type PostLinterResult =
-  | { ok: true; blockResults: PostLinterBlockResult[] }
+  | { ok: true; blockResults: PostLinterBlockResult[]; warnings?: PostLinterViolation[]; skipped?: boolean }
   | { ok: false; violations: PostLinterViolation[]; blockResults: PostLinterBlockResult[] };
 
 type ParsedRule = {
   rule: "must-not" | "must-have";
   pattern: string;
 };
+
+export type DriverBlockEnforcementMode = "strict" | "warn" | "off";
+
+const HIGH_RIGOR_DOMAIN_FLAGS = new Set([
+  "finance",
+  "legal",
+  "schemas",
+  "governance",
+  "security",
+  "ip",
+  "high-rigor",
+]);
+
+function normalizeEnforcementMode(value?: string): DriverBlockEnforcementMode {
+  const raw = (value ?? "").trim().toLowerCase();
+  if (raw === "warn" || raw === "off" || raw === "strict") return raw;
+  return "strict";
+}
 
 function expandSlashPattern(pattern: string): string[] {
   const parts = pattern.split("/").map((part) => part.trim()).filter(Boolean);
@@ -99,47 +119,81 @@ export function parseValidatorsFromDefinition(definition: string): ParsedRule[] 
 }
 
 export function postOutputLinter(args: {
-  modeLabel: string;
+  modeDecision: ModeDecision;
   content: string;
   driverBlocks: AssembledDriverBlock[];
+  enforcementMode?: DriverBlockEnforcementMode;
 }): PostLinterResult {
+  const enforcementMode = normalizeEnforcementMode(args.enforcementMode);
+  if (enforcementMode === "off") {
+    return { ok: true, blockResults: [], warnings: [], skipped: true };
+  }
+
+  const personaLabel = resolvePersonaLabel(args.modeDecision);
+  const domainFlags = args.modeDecision.domainFlags ?? [];
+  const hasHighRigorDomain = domainFlags.some((flag) =>
+    HIGH_RIGOR_DOMAIN_FLAGS.has(String(flag).toLowerCase())
+  );
+  const shouldBypassDb003 =
+    personaLabel === "ida"
+    && !args.modeDecision.checkpointNeeded
+    && !hasHighRigorDomain;
+
   const contentLower = args.content.toLowerCase();
   const violations: PostLinterViolation[] = [];
+  const warnings: PostLinterViolation[] = [];
   const blockResults: PostLinterBlockResult[] = [];
 
   for (const block of args.driverBlocks) {
     const startedAt = Date.now();
     const blockViolations: PostLinterViolation[] = [];
+    const blockWarnings: PostLinterViolation[] = [];
     const rules = parseValidatorsFromDefinition(block.definition);
     for (const rule of rules) {
       const patternLower = rule.pattern.toLowerCase();
       if (rule.rule === "must-not") {
         if (contentLower.includes(patternLower)) {
-          const violation = {
+          const violation: PostLinterViolation = {
             blockId: block.id,
             rule: "must-not",
             pattern: rule.pattern,
           };
-          violations.push(violation);
-          blockViolations.push(violation);
+          const treatAsWarning =
+            enforcementMode === "warn"
+            || (block.id === "DB-003" && shouldBypassDb003);
+          if (treatAsWarning) {
+            warnings.push(violation);
+            blockWarnings.push(violation);
+          } else {
+            violations.push(violation);
+            blockViolations.push(violation);
+          }
         }
       } else {
         if (!contentLower.includes(patternLower)) {
-          const violation = {
+          const violation: PostLinterViolation = {
             blockId: block.id,
             rule: "must-have",
             pattern: rule.pattern,
           };
-          violations.push(violation);
-          blockViolations.push(violation);
+          const treatAsWarning =
+            enforcementMode === "warn"
+            || (block.id === "DB-003" && shouldBypassDb003);
+          if (treatAsWarning) {
+            warnings.push(violation);
+            blockWarnings.push(violation);
+          } else {
+            violations.push(violation);
+            blockViolations.push(violation);
+          }
         }
       }
     }
     const durationMs = Date.now() - startedAt;
-    const firstViolation = blockViolations[0];
+    const firstViolation = blockViolations[0] ?? blockWarnings[0];
     blockResults.push({
       blockId: block.id,
-      ok: blockViolations.length === 0,
+      ok: blockViolations.length === 0 && blockWarnings.length === 0,
       reason: firstViolation
         ? { rule: firstViolation.rule, pattern: firstViolation.pattern }
         : undefined,
@@ -148,7 +202,7 @@ export function postOutputLinter(args: {
   }
 
   if (violations.length === 0) {
-    return { ok: true, blockResults };
+    return { ok: true, blockResults, warnings };
   }
 
   return { ok: false, violations, blockResults };

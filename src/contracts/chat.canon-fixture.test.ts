@@ -79,7 +79,7 @@ describe("Canon Fixture Conformance (v0)", () => {
     const result = CanonicalPacketInputV0.safeParse(fixtureData);
     
     if (!result.success) {
-      console.error("Validation errors:", JSON.stringify(result.error.errors, null, 2));
+      console.error("Validation errors:", JSON.stringify(result.error.issues, null, 2));
     }
     
     expect(result.success).toBe(true);
@@ -93,7 +93,7 @@ describe("Canon Fixture Conformance (v0)", () => {
     const result = CanonicalPacketInputV0.safeParse(fixtureData);
     
     if (!result.success) {
-      console.error("Validation errors:", JSON.stringify(result.error.errors, null, 2));
+      console.error("Validation errors:", JSON.stringify(result.error.issues, null, 2));
     }
     
     expect(result.success).toBe(true);

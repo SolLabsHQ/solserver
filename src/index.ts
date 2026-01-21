@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import pino from "pino";
+import { statSync } from "node:fs";
 import { config as loadEnv } from "dotenv";
 
 if (process.env.NODE_ENV !== "production") {
@@ -65,14 +66,35 @@ app.addHook("onResponse", async (req, reply) => {
 
 import { healthRoutes } from "./routes/healthz";
 import { chatRoutes } from "./routes/chat";
+import { internalTopologyRoutes } from "./routes/internal/topology";
 import { selectModel } from "./providers/provider_config";
 import { SqliteControlPlaneStore } from "./store/sqlite_control_plane_store";
 
 const dbPath =
   process.env.CONTROL_PLANE_DB_PATH ?? process.env.DB_PATH ?? "./data/control_plane.db";
-const store = new SqliteControlPlaneStore(dbPath);
+const hasExplicitDbPath = Boolean(process.env.CONTROL_PLANE_DB_PATH || process.env.DB_PATH);
+
+if (!isDev && !hasExplicitDbPath) {
+  throw new Error("CONTROL_PLANE_DB_PATH must be set in non-dev environments.");
+}
+
+const getDbStat = (path: string): { exists: boolean; sizeBytes?: number; mtime?: string } => {
+  try {
+    const stat = statSync(path);
+    return {
+      exists: true,
+      sizeBytes: stat.size,
+      mtime: stat.mtime.toISOString(),
+    };
+  } catch {
+    return { exists: false };
+  }
+};
+const store = new SqliteControlPlaneStore(dbPath, app.log);
 
 async function main() {
+  store.ensureTopologyKeyPrimary({ createdBy: "api" });
+
   // CORS (v0/dev): permissive. Tighten before prod.
   app.register(cors, {
     origin: true,
@@ -81,6 +103,7 @@ async function main() {
   // Routes
   app.register(healthRoutes, { dbPath });
   app.register(chatRoutes, { prefix: "/v1", store });
+  app.register(internalTopologyRoutes, { prefix: "/internal", store, dbPath });
 
   const llmProvider =
     (process.env.LLM_PROVIDER ?? "fake").toLowerCase() === "openai" ? "openai" : "fake";
@@ -102,7 +125,22 @@ async function main() {
   );
 
   const port = Number(process.env.PORT ?? 3333);
-  await app.listen({ port, host: "0.0.0.0" });
+  const address = await app.listen({ port, host: "0.0.0.0" });
+
+  app.log.info(
+    { evt: "server.started", address, port, dbPath, dbStat: getDbStat(dbPath) },
+    "server.started"
+  );
+
+  if (isDev) {
+    app.log.info(
+      {
+        evt: "worker.reminder",
+        hint: "If responses remain pending, start the worker: npm run dev:worker (or npm run dev:all).",
+      },
+      "worker.reminder"
+    );
+  }
 }
 
 main().catch((err) => {

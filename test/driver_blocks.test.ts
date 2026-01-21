@@ -9,8 +9,12 @@ import type { PacketInput } from "../src/contracts/chat";
 describe("Driver Blocks (v0)", () => {
   let app: any;
   let store: MemoryControlPlaneStore;
+  let previousEnforcement: string | undefined;
 
   beforeAll(async () => {
+    previousEnforcement = process.env.DRIVER_BLOCK_ENFORCEMENT;
+    process.env.DRIVER_BLOCK_ENFORCEMENT = "strict";
+
     store = new MemoryControlPlaneStore();
     app = Fastify({ logger: false });
     app.register(cors, { origin: true });
@@ -20,6 +24,12 @@ describe("Driver Blocks (v0)", () => {
 
   afterAll(async () => {
     await app.close();
+
+    if (previousEnforcement === undefined) {
+      delete process.env.DRIVER_BLOCK_ENFORCEMENT;
+    } else {
+      process.env.DRIVER_BLOCK_ENFORCEMENT = previousEnforcement;
+    }
   });
 
   describe("Schema Validation", () => {

@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import * as fs from "node:fs";
+import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
+import pino from "pino";
 
 import type {
   ControlPlaneStore,
@@ -17,35 +18,147 @@ import type {
   TraceEventActor,
   TraceEventPhase,
   TraceEventStatus,
+  TraceSummary,
 } from "./control_plane_store";
-import type { PacketInput, ModeDecision, Evidence } from "../contracts/chat";
+import type { PacketInput, ModeDecision, Evidence, NotificationPolicy } from "../contracts/chat";
+
+type LeaseNextTransmissionResult =
+  | { outcome: "leased"; transmission: Transmission; previousStatus: TransmissionStatus }
+  | { outcome: "empty" }
+  | { outcome: "contention" };
+
+export type TopologyMeta = {
+  topologyKey: string;
+  createdAtMs: number;
+  createdBy: string;
+};
+
+type TopologyLogger = {
+  info: (obj: Record<string, unknown>, msg?: string) => void;
+  warn: (obj: Record<string, unknown>, msg?: string) => void;
+  error: (obj: Record<string, unknown>, msg?: string) => void;
+};
+
+const isTruthy = (value?: string) =>
+  value !== undefined && ["1", "true", "yes", "on"].includes(value.toLowerCase());
+
+const createDefaultLogger = (): TopologyLogger =>
+  pino({
+    level: process.env.LOG_LEVEL ?? (process.env.NODE_ENV === "test" ? "silent" : "info"),
+  });
+
+export function validateTopology(dbPath: string, log: TopologyLogger): void {
+  const strictEnv = isTruthy(process.env.TOPOLOGY_GUARD_STRICT);
+  const isFly = Boolean(process.env.FLY_APP_NAME);
+  const strict = strictEnv || isFly;
+
+  const warnOrThrow = (context: Record<string, unknown>, message: string) => {
+    if (strict) {
+      log.error(context, message);
+      throw new Error(message);
+    }
+    log.warn(context, message);
+  };
+
+  if (dbPath === ":memory:") {
+    warnOrThrow(
+      { dbPath },
+      "topology.guard: in-memory database detected (acceptable for tests)"
+    );
+    return;
+  }
+
+  if (!fs.existsSync(dbPath)) {
+    log.error({ dbPath }, "topology.guard: database file does not exist");
+    throw new Error(`Database file not found: ${dbPath}`);
+  }
+
+  if (dbPath.startsWith("/tmp/")) {
+    warnOrThrow(
+      { dbPath },
+      "topology.guard: database on ephemeral storage (data will be lost on restart)"
+    );
+  }
+
+  const expectedVolumePrefix = "/data/";
+  if (!dbPath.startsWith(expectedVolumePrefix)) {
+    warnOrThrow(
+      { dbPath, expectedVolumePrefix },
+      "topology.guard: database not on Fly.io volume (may not be shared across instances)"
+    );
+  }
+
+  if (strict) {
+    const testPath = join("/data", `.topology_write_test_${process.pid}_${Date.now()}`);
+    try {
+      fs.writeFileSync(testPath, "ok");
+      fs.unlinkSync(testPath);
+    } catch (error) {
+      log.error(
+        { evt: "topology.guard.volume_not_writable_fatal", error: String(error) },
+        "topology.guard.volume_not_writable_fatal"
+      );
+      throw new Error("Topology guard: /data volume is not writable");
+    }
+  }
+
+  const processGroup = process.env.FLY_PROCESS_GROUP;
+  if (processGroup && processGroup !== "app") {
+    warnOrThrow(
+      { processGroup, expected: "app" },
+      "topology.guard: unexpected Fly.io process group (may indicate topology change)"
+    );
+  }
+
+  log.info({ dbPath, processGroup }, "topology.guard: validation passed");
+}
 
 export class SqliteControlPlaneStore implements ControlPlaneStore {
   private db: Database.Database;
+  private log: TopologyLogger;
 
-  constructor(dbPath: string = "./data/control_plane.db") {
+  constructor(
+    dbPath: string = "./data/control_plane.db",
+    log: TopologyLogger = createDefaultLogger()
+  ) {
+    this.log = log;
     if (dbPath !== ":memory:") {
       const dir = dirname(dbPath);
-      mkdirSync(dir, { recursive: true });
+      fs.mkdirSync(dir, { recursive: true });
     }
     this.db = new Database(dbPath);
+    validateTopology(dbPath, this.log);
     this.db.pragma("foreign_keys = ON");
     this.initSchema();
   }
 
   private initSchema() {
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS topology_meta (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        topology_key TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        created_by TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS transmissions (
         id TEXT PRIMARY KEY,
         packet_type TEXT NOT NULL,
         thread_id TEXT NOT NULL,
         client_request_id TEXT,
         message TEXT NOT NULL,
+        packet_json TEXT,
         mode_decision TEXT NOT NULL,
+        notification_policy TEXT,
+        forced_persona TEXT,
         created_at TEXT NOT NULL,
         status TEXT NOT NULL,
         status_code INTEGER,
-        retryable INTEGER
+        retryable INTEGER,
+        error_code TEXT,
+        error_detail_json TEXT,
+        lease_expires_at TEXT,
+        lease_owner TEXT
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_client_request_id ON transmissions(client_request_id);
@@ -85,6 +198,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         id TEXT PRIMARY KEY,
         transmission_id TEXT NOT NULL,
         level TEXT NOT NULL,
+        persona_label TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY (transmission_id) REFERENCES transmissions(id)
       );
@@ -174,11 +288,78 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     try {
       this.db.exec("ALTER TABLE transmissions ADD COLUMN retryable INTEGER");
     } catch {}
+    try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN packet_json TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN error_code TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN error_detail_json TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN notification_policy TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN forced_persona TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN lease_expires_at TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE transmissions ADD COLUMN lease_owner TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE trace_runs ADD COLUMN persona_label TEXT");
+    } catch {}
+  }
+
+  readTopologyKey(): TopologyMeta | null {
+    const row = this.db
+      .prepare("SELECT topology_key, created_at_ms, created_by FROM topology_meta WHERE id = 1")
+      .get() as { topology_key: string; created_at_ms: number; created_by: string } | undefined;
+
+    if (!row) return null;
+    return {
+      topologyKey: row.topology_key,
+      createdAtMs: row.created_at_ms,
+      createdBy: row.created_by,
+    };
+  }
+
+  ensureTopologyKeyPrimary(args: { createdBy?: string } = {}): TopologyMeta {
+    const existing = this.readTopologyKey();
+    if (existing) return existing;
+
+    const createdBy = args.createdBy ?? "api";
+    const topologyKey = randomUUID();
+    const createdAtMs = Date.now();
+
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO topology_meta (id, topology_key, created_at_ms, created_by)
+      VALUES (1, ?, ?, ?)
+    `);
+    const result = stmt.run(topologyKey, createdAtMs, createdBy);
+
+    if (result.changes > 0) {
+      this.log.info(
+        { evt: "topology.guard.api_primary_key_created", createdAtMs, createdBy },
+        "topology.guard.api_primary_key_created"
+      );
+    }
+
+    const meta = this.readTopologyKey();
+    if (!meta) {
+      throw new Error("Topology guard: failed to initialize topology key");
+    }
+    return meta;
   }
 
   async createTransmission(args: {
     packet: PacketInput;
     modeDecision: ModeDecision;
+    notificationPolicy?: NotificationPolicy;
+    forcedPersona?: ModeDecision["personaLabel"] | null;
   }): Promise<Transmission> {
     const id = randomUUID();
     const clientRequestId = (args.packet as any).clientRequestId as string | undefined;
@@ -190,6 +371,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       clientRequestId,
       message: args.packet.message,
       modeDecision: args.modeDecision,
+      notificationPolicy: args.notificationPolicy,
+      forcedPersona: args.forcedPersona ?? null,
       createdAt: new Date().toISOString(),
       status: "created",
       statusCode: undefined,
@@ -197,8 +380,26 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     };
 
     const stmt = this.db.prepare(`
-      INSERT INTO transmissions (id, packet_type, thread_id, client_request_id, message, mode_decision, created_at, status, status_code, retryable)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO transmissions (
+        id,
+        packet_type,
+        thread_id,
+        client_request_id,
+        message,
+        packet_json,
+        mode_decision,
+        notification_policy,
+        forced_persona,
+        created_at,
+        status,
+        status_code,
+        retryable,
+        error_code,
+        error_detail_json,
+        lease_expires_at,
+        lease_owner
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     try {
@@ -208,11 +409,18 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         t.threadId,
         t.clientRequestId ?? null,
         t.message,
+        JSON.stringify(args.packet),
         JSON.stringify(t.modeDecision),
+        t.notificationPolicy ?? null,
+        t.forcedPersona ?? null,
         t.createdAt,
         t.status,
         t.statusCode ?? null,
-        t.retryable === undefined ? null : (t.retryable ? 1 : 0)
+        t.retryable === undefined ? null : (t.retryable ? 1 : 0),
+        null,
+        null,
+        null,
+        null
       );
     } catch (err) {
       const code = (err as { code?: string } | null)?.code;
@@ -244,15 +452,159 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     status: TransmissionStatus;
     statusCode?: number;
     retryable?: boolean;
+    errorCode?: string | null;
+    errorDetail?: Record<string, any> | null;
   }): Promise<void> {
     const stmt = this.db.prepare(`
       UPDATE transmissions
-      SET status = ?, status_code = COALESCE(?, status_code), retryable = COALESCE(?, retryable)
+      SET status = ?,
+        status_code = COALESCE(?, status_code),
+        retryable = COALESCE(?, retryable),
+        error_code = COALESCE(?, error_code),
+        error_detail_json = COALESCE(?, error_detail_json)
       WHERE id = ?
     `);
 
     const retryableValue = args.retryable === undefined ? null : (args.retryable ? 1 : 0);
-    stmt.run(args.status, args.statusCode ?? null, retryableValue, args.transmissionId);
+    const errorDetailJson = args.errorDetail === undefined
+      ? null
+      : args.errorDetail === null
+        ? null
+        : JSON.stringify(args.errorDetail);
+    stmt.run(
+      args.status,
+      args.statusCode ?? null,
+      retryableValue,
+      args.errorCode ?? null,
+      errorDetailJson,
+      args.transmissionId
+    );
+  }
+
+  async updateTransmissionPolicy(args: {
+    transmissionId: string;
+    notificationPolicy?: NotificationPolicy | null;
+    forcedPersona?: ModeDecision["personaLabel"] | null;
+  }): Promise<void> {
+    const stmt = this.db.prepare(`
+      UPDATE transmissions
+      SET notification_policy = COALESCE(?, notification_policy),
+        forced_persona = COALESCE(?, forced_persona)
+      WHERE id = ?
+    `);
+
+    stmt.run(
+      args.notificationPolicy ?? null,
+      args.forcedPersona ?? null,
+      args.transmissionId
+    );
+  }
+
+  async leaseNextTransmission(args: {
+    leaseOwner: string;
+    leaseDurationSeconds: number;
+    eligibleStatuses?: TransmissionStatus[];
+    packetType?: Transmission["packetType"];
+  }): Promise<LeaseNextTransmissionResult> {
+    const eligible = (args.eligibleStatuses ?? ["created", "processing"])
+      .filter((status) => status === "created" || status === "processing");
+    if (eligible.length === 0) return { outcome: "empty" };
+
+    const statusList = eligible.map((status) => `'${status}'`).join(", ");
+    const nowIso = new Date().toISOString();
+    const leaseExpiresAt = new Date(Date.now() + args.leaseDurationSeconds * 1000).toISOString();
+    const packetClause = args.packetType ? "AND packet_type = ?" : "";
+
+    try {
+      this.db.exec("BEGIN IMMEDIATE");
+    } catch (error) {
+      const code = (error as { code?: string } | null)?.code;
+      if (code === "SQLITE_BUSY" || code === "SQLITE_BUSY_SNAPSHOT" || code === "SQLITE_BUSY_TIMEOUT") {
+        return { outcome: "contention" };
+      }
+      throw error;
+    }
+
+    try {
+      const row = this.db.prepare(`
+        SELECT * FROM transmissions
+        WHERE status IN (${statusList})
+          ${packetClause}
+          AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+        ORDER BY created_at ASC
+        LIMIT 1
+      `).get(...(args.packetType ? [args.packetType, nowIso] : [nowIso])) as any;
+
+      if (!row) {
+        this.db.exec("ROLLBACK");
+        return { outcome: "empty" };
+      }
+
+      const updateParams = [leaseExpiresAt, args.leaseOwner, row.id];
+      if (args.packetType) updateParams.push(args.packetType);
+      updateParams.push(nowIso);
+
+      const update = this.db.prepare(`
+        UPDATE transmissions
+        SET status = 'processing', lease_expires_at = ?, lease_owner = ?
+        WHERE id = ?
+          ${packetClause}
+          AND status IN (${statusList})
+          AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+      `).run(...updateParams);
+
+      if (update.changes === 0) {
+        this.db.exec("ROLLBACK");
+        return { outcome: "contention" };
+      }
+
+      this.db.exec("COMMIT");
+
+      const transmission = this.rowToTransmission({
+        ...row,
+        status: "processing",
+        lease_expires_at: leaseExpiresAt,
+        lease_owner: args.leaseOwner,
+      });
+
+      return { outcome: "leased", transmission, previousStatus: row.status as TransmissionStatus };
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
+  async getLeaseableStats(args: {
+    eligibleStatuses?: TransmissionStatus[];
+    packetType?: Transmission["packetType"];
+  }): Promise<{ leaseableCount: number; oldestCreatedAt: string | null }> {
+    const eligible = (args.eligibleStatuses ?? ["created", "processing"])
+      .filter((status) => status === "created" || status === "processing");
+    if (eligible.length === 0) {
+      return { leaseableCount: 0, oldestCreatedAt: null };
+    }
+
+    const statusList = eligible.map((status) => `'${status}'`).join(", ");
+    const nowIso = new Date().toISOString();
+    const packetClause = args.packetType ? "AND packet_type = ?" : "";
+    const params = args.packetType ? [args.packetType, nowIso] : [nowIso];
+
+    const row = this.db.prepare(`
+      SELECT
+        COUNT(*) as count,
+        MIN(CASE WHEN status = 'created' THEN created_at END) as oldest_created_at
+      FROM transmissions
+      WHERE status IN (${statusList})
+        ${packetClause}
+        AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+    `).get(...params) as { count?: number; oldest_created_at?: string | null } | undefined;
+
+    return {
+      leaseableCount: Number(row?.count ?? 0),
+      oldestCreatedAt: row?.oldest_created_at ?? null,
+    };
   }
 
   async appendDeliveryAttempt(args: {
@@ -390,20 +742,25 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     return r;
   }
 
-  async createTraceRun(args: { transmissionId: string; level: TraceLevel }): Promise<TraceRun> {
+  async createTraceRun(args: {
+    transmissionId: string;
+    level: TraceLevel;
+    personaLabel?: string | null;
+  }): Promise<TraceRun> {
     const tr: TraceRun = {
       id: randomUUID(),
       transmissionId: args.transmissionId,
       level: args.level,
+      personaLabel: args.personaLabel ?? null,
       createdAt: new Date().toISOString(),
     };
 
     const stmt = this.db.prepare(`
-      INSERT INTO trace_runs (id, transmission_id, level, created_at)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO trace_runs (id, transmission_id, level, persona_label, created_at)
+      VALUES (?, ?, ?, ?, ?)
     `);
 
-    stmt.run(tr.id, tr.transmissionId, tr.level, tr.createdAt);
+    stmt.run(tr.id, tr.transmissionId, tr.level, tr.personaLabel ?? null, tr.createdAt);
     return tr;
   }
 
@@ -470,6 +827,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       id: row.id,
       transmissionId: row.transmission_id,
       level: row.level,
+      personaLabel: row.persona_label ?? null,
       createdAt: row.created_at,
     };
   }
@@ -489,6 +847,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       id: row.id,
       transmissionId: row.transmission_id,
       level: row.level,
+      personaLabel: row.persona_label ?? null,
       createdAt: row.created_at,
     };
   }
@@ -562,7 +921,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       WHERE trace_run_id = ?
       GROUP BY phase
     `);
-    const phaseRows = phaseStmt.all(traceRunId) as any[];
+    const phaseRows = phaseStmt.all(traceRunId) as Array<{ phase: TraceEventPhase; count: number }>;
 
     const phaseCounts: Record<TraceEventPhase, number> = {} as Record<TraceEventPhase, number>;
     for (const row of phaseRows) {
@@ -577,6 +936,20 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
   }
 
   private rowToTransmission(row: any): Transmission {
+    let packet: PacketInput | undefined;
+    const packetJson = row.packet_json ?? undefined;
+    if (packetJson) {
+      try {
+        packet = JSON.parse(packetJson);
+      } catch {}
+    }
+    let errorDetail: Record<string, any> | undefined;
+    if (row.error_detail_json) {
+      try {
+        errorDetail = JSON.parse(row.error_detail_json);
+      } catch {}
+    }
+
     return {
       id: row.id,
       packetType: row.packet_type,
@@ -584,10 +957,18 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       clientRequestId: row.client_request_id ?? undefined,
       message: row.message,
       modeDecision: JSON.parse(row.mode_decision),
+      notificationPolicy: row.notification_policy ?? undefined,
+      forcedPersona: row.forced_persona ?? null,
       createdAt: row.created_at,
       status: row.status,
       statusCode: row.status_code ?? undefined,
       retryable: row.retryable === null || row.retryable === undefined ? undefined : Boolean(row.retryable),
+      errorCode: row.error_code ?? undefined,
+      errorDetail,
+      packetJson,
+      packet,
+      leaseExpiresAt: row.lease_expires_at ?? null,
+      leaseOwner: row.lease_owner ?? null,
     };
   }
 

@@ -16,6 +16,10 @@ export const ProviderHints = z.object({
 
 export type ProviderHints = z.infer<typeof ProviderHints>;
 
+export const NotificationPolicy = z.enum(["silent", "muted", "alert", "urgent"]);
+
+export type NotificationPolicy = z.infer<typeof NotificationPolicy>;
+
 // Driver Block reference (for system defaults)
 export const DriverBlockRef = z.object({
   id: z.string().min(1),
@@ -104,6 +108,8 @@ export const PacketInput = z.object({
   // Idempotency key from client (SolMobile). If provided, server will dedupe retries.
   clientRequestId: z.string().min(1).optional(),
   message: z.string().min(1).max(20_000),
+  notification_policy: NotificationPolicy.optional(),
+  simulate: z.boolean().optional(),
   traceConfig: TraceConfig.optional(),
   providerHints: ProviderHints.optional(),
   // Driver Blocks (v0) - always additive
@@ -118,42 +124,12 @@ export type PacketInput = z.infer<typeof PacketInput>;
 
 export type ModeDecision = {
   modeLabel: "Ida" | "Sole" | "System-mode";
+  personaLabel?: "ida" | "sole" | "cassandra" | "diogenes" | "system";
   domainFlags: string[];
   confidence: number;
   checkpointNeeded: boolean;
   reasons: string[];
   version: string;
-};
-
-export type Capture = {
-  captureId: string;
-  kind: "url";
-  url: string;
-  capturedAt: string;
-  title?: string;
-  source: "user_provided" | "auto_detected";
-};
-
-export type ClaimSupport = {
-  supportId: string;
-  type: "url_capture" | "text_snippet";
-  captureId?: string;
-  snippetText?: string;
-  snippetHash?: string;
-  createdAt: string;
-};
-
-export type ClaimMapEntry = {
-  claimId: string;
-  claimText: string;
-  supportIds: string[];
-  createdAt: string;
-};
-
-export type Evidence = {
-  captures?: Capture[];
-  supports?: ClaimSupport[];
-  claims?: ClaimMapEntry[];
 };
 
 export type { EvidenceSummary, EvidenceWarning };
