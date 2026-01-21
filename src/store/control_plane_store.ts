@@ -114,6 +114,7 @@ export type TraceEventPhase =
   | "gate_intent"
   | "gate_sentinel"
   | "gate_lattice"
+  | "synaptic_gate"
   | "modality_gate"
   | "intent_gate"
   | "risk_gate"

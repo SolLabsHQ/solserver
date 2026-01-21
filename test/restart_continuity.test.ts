@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
-import { setTimeout } from "node:timers/promises";
+import Fastify from "fastify";
+import cors from "@fastify/cors";
 import { existsSync, unlinkSync } from "node:fs";
 import { resolve as pathResolve } from "node:path";
-import { connect } from "node:net";
+
+import { chatRoutes } from "../src/routes/chat";
+import { SqliteControlPlaneStore } from "../src/store/sqlite_control_plane_store";
 
 /**
  * Restart Continuity Test
@@ -21,101 +23,14 @@ import { connect } from "node:net";
  */
 
 const TEST_DB_PATH = pathResolve(__dirname, "../data/test_restart.db");
-const SERVER_PORT = 3334;
-const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
-const HEALTH_URL = `${SERVER_URL}/health`;
-
 describe.skipIf(process.env.CI)("Restart Continuity", () => {
-  let serverProcess: ChildProcess | null = null;
-
-  const waitForHealth = async (timeoutMs = 8000): Promise<void> => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      try {
-        const response = await fetch(HEALTH_URL);
-        if (response.ok) return;
-      } catch (err) {
-        // ignore until timeout
-      }
-      await setTimeout(200);
-    }
-    throw new Error("Server health endpoint did not become ready.");
-  };
-
-  const waitForPort = async (timeoutMs = 4000): Promise<void> => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const socket = connect(SERVER_PORT, "127.0.0.1");
-          socket.once("connect", () => {
-            socket.end();
-            resolve();
-          });
-          socket.once("error", (error) => {
-            socket.destroy();
-            reject(error);
-          });
-        });
-        return;
-      } catch (err) {
-        // ignore until timeout
-      }
-      await setTimeout(200);
-    }
-    throw new Error("Server port did not open within timeout.");
-  };
-
-  const waitForReady = async (): Promise<void> => {
-    try {
-      await waitForHealth();
-    } catch (err) {
-      await waitForPort();
-    }
-  };
-
-  const startServer = async (): Promise<void> => {
-    return new Promise((finish, reject) => {
-      const tsxPath = pathResolve(__dirname, "..", "node_modules", "tsx", "dist", "cli.mjs");
-      serverProcess = spawn(process.execPath, [tsxPath, "src/index.ts"], {
-        cwd: pathResolve(__dirname, ".."),
-        env: {
-          ...process.env,
-          PORT: String(SERVER_PORT),
-          CONTROL_PLANE_DB_PATH: TEST_DB_PATH,
-          NODE_ENV: "test",
-        },
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-
-      const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
-        reject(new Error(`Server exited before ready (code ${code}, signal ${signal})`));
-      };
-
-      serverProcess.once("exit", onExit);
-      serverProcess.on("error", reject);
-      serverProcess.stderr?.on("data", (data) => {
-        console.error("Server stderr:", data.toString());
-      });
-
-      waitForReady()
-        .then(() => {
-          serverProcess?.off("exit", onExit);
-          finish();
-        })
-        .catch((err) => {
-          serverProcess?.off("exit", onExit);
-          reject(err);
-        });
-    });
-  };
-
-  const stopServer = async (): Promise<void> => {
-    if (serverProcess) {
-      serverProcess.kill("SIGTERM");
-      await setTimeout(1000);
-      serverProcess = null;
-    }
+  const startServer = async () => {
+    const store = new SqliteControlPlaneStore(TEST_DB_PATH);
+    const app = Fastify({ logger: false });
+    app.register(cors, { origin: true });
+    app.register(chatRoutes, { prefix: "/v1", store });
+    await app.ready();
+    return { app, store };
   };
 
   beforeAll(() => {
@@ -125,8 +40,7 @@ describe.skipIf(process.env.CI)("Restart Continuity", () => {
     }
   });
 
-  afterAll(async () => {
-    await stopServer();
+  afterAll(() => {
     // Clean up test database
     if (existsSync(TEST_DB_PATH)) {
       unlinkSync(TEST_DB_PATH);
@@ -134,9 +48,7 @@ describe.skipIf(process.env.CI)("Restart Continuity", () => {
   });
 
   it("should maintain idempotency across server restarts", async () => {
-    // Start server
-    await startServer();
-    await setTimeout(2000); // Give server time to fully initialize
+    const first = await startServer();
 
     const clientRequestId = "test-restart-" + Date.now();
     const payload = {
@@ -147,44 +59,35 @@ describe.skipIf(process.env.CI)("Restart Continuity", () => {
     };
 
     // First request
-    const response1 = await fetch(`${SERVER_URL}/v1/chat`, {
+    const response1 = await first.app.inject({
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      url: "/v1/chat",
+      payload,
     });
-
-    if (!response1.ok) {
-      const errorText = await response1.text();
-      console.error("First request failed:", response1.status, errorText);
-    }
-    expect(response1.ok).toBe(true);
-    const data1 = await response1.json();
+    expect(response1.statusCode).toBe(200);
+    const data1 = response1.json();
     const transmissionId1 = data1.transmissionId;
     expect(transmissionId1).toBeDefined();
 
-    // Stop server
-    await stopServer();
-    await setTimeout(1000);
+    await first.app.close();
+    first.store.close();
 
-    // Restart server
-    await startServer();
-    await setTimeout(2000);
+    const second = await startServer();
 
     // Second request with same clientRequestId
-    const response2 = await fetch(`${SERVER_URL}/v1/chat`, {
+    const response2 = await second.app.inject({
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      url: "/v1/chat",
+      payload,
     });
-
-    expect(response2.ok).toBe(true);
-    const data2 = await response2.json();
+    expect(response2.statusCode).toBe(200);
+    const data2 = response2.json();
     const transmissionId2 = data2.transmissionId;
 
     // Verify idempotency: same transmissionId returned
     expect(transmissionId2).toBe(transmissionId1);
 
-    // Stop server
-    await stopServer();
+    await second.app.close();
+    second.store.close();
   }, 30000); // 30 second timeout for this test
 });

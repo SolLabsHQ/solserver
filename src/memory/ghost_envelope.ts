@@ -9,6 +9,7 @@ export type GhostEnvelopePayload = {
   snippet: string | null;
   factNull: boolean;
   ghostKind?: "memory_artifact" | "journal_moment" | "action_proposal";
+  traceRunId?: string | null;
 };
 
 export function buildGhostCardEnvelope(payload: GhostEnvelopePayload): OutputEnvelope {
@@ -23,6 +24,7 @@ export function buildGhostCardEnvelope(payload: GhostEnvelopePayload): OutputEnv
         rigor_level: payload.rigorLevel,
         snippet: payload.snippet,
         fact_null: payload.factNull,
+        ...(payload.traceRunId ? { trace_run_id: payload.traceRunId } : {}),
       },
     },
     personaLabel: "system",

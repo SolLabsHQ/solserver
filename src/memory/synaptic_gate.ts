@@ -7,11 +7,55 @@ export type ContextMessage = {
   createdAt: string;
 };
 
+export type SynapticTraceRecorder = {
+  level: "info" | "debug";
+  enabled: boolean;
+  emit: (eventName: string, payload: Record<string, any>) => void;
+};
+
+export type DistillTraceContext = {
+  trace?: SynapticTraceRecorder;
+  requestId?: string;
+  threadId?: string | null;
+};
+
 const MAX_FACT_CHARS = 150;
 const MIN_SIGNAL_CHARS = 12;
-const LOW_SIGNAL_PATTERNS = [
-  /\b(hi|hello|hey|thanks|thank you|ok|okay|cool|nice|great|bye|goodbye)\b/i,
-  /\b(lol|lmao|haha|sure|yep|nope)\b/i,
+const NOISE_REGISTRY_VERSION = "v0.1";
+const MAX_NOISE_EVENTS = 1;
+
+type NamedPattern = {
+  id: string;
+  regex: RegExp;
+  description: string;
+};
+
+const LOW_SIGNAL_REGISTRY: NamedPattern[] = [
+  {
+    id: "greetings_gratitude",
+    regex: /\b(hi|hello|hey|thanks|thank you|ok|okay|cool|nice|great|bye|goodbye)\b/i,
+    description: "Standard conversational fillers",
+  },
+  {
+    id: "reactive_noise",
+    regex: /\b(lol|lmao|haha|wow|oh|ugh|hmm)\b/i,
+    description: "One-word emotional reactions",
+  },
+  {
+    id: "affirmation_negation",
+    regex: /\b(yes|yeah|yep|no|nope|nah|sure|ok|okay)\b/i,
+    description: "Binary conversational signals",
+  },
+  {
+    id: "testing_noise",
+    regex: /\b(test|testing|ping|are you there|can you hear me)\b/i,
+    description: "Developer/user connection checks",
+  },
+  {
+    id: "unicode_spam",
+    regex: /^[\p{Emoji}\s\p{Punctuation}]+$/u,
+    description: "Emoji/punct-only",
+  },
 ];
 
 export const FALLBACK_PROMPT =
@@ -32,9 +76,23 @@ export type DistillResult = {
 
 const normalizeContent = (content: string) => content.trim().replace(/\s+/g, " ");
 
-const isLowSignal = (content: string) => {
-  if (content.length < MIN_SIGNAL_CHARS) return true;
-  return LOW_SIGNAL_PATTERNS.some((pattern) => pattern.test(content));
+const isLowSignal = (
+  content: string,
+  emitNoise?: (patternId: string, contentLength: number) => void
+) => {
+  if (content.length < MIN_SIGNAL_CHARS) {
+    emitNoise?.("length_guard", content.length);
+    return true;
+  }
+
+  for (const pattern of LOW_SIGNAL_REGISTRY) {
+    if (pattern.regex.test(content)) {
+      emitNoise?.(pattern.id, content.length);
+      return true;
+    }
+  }
+
+  return false;
 };
 
 const truncateToMax = (content: string) => {
@@ -47,15 +105,35 @@ const truncateToMax = (content: string) => {
   return trimmed.slice(0, MAX_FACT_CHARS).trim();
 };
 
-export function distillContextWindow(messages: ContextMessage[]): {
+export function distillContextWindow(
+  messages: ContextMessage[],
+  opts: DistillTraceContext = {}
+): {
   fact: string | null;
   sourceMessageId?: string;
 } {
+  let emitted = 0;
+  const emitNoise = (patternId: string, contentLength: number) => {
+    if (!opts.trace?.enabled) return;
+    if (emitted >= MAX_NOISE_EVENTS) return;
+    emitted += 1;
+    try {
+      opts.trace.emit("synaptic_gate_noise_filtered", {
+        gate: "synaptic_gate",
+        pattern_id: patternId,
+        content_length: contentLength,
+        registry_version: NOISE_REGISTRY_VERSION,
+        ...(opts.requestId ? { request_id: opts.requestId } : {}),
+        ...(opts.threadId ? { thread_id: opts.threadId } : {}),
+      });
+    } catch {}
+  };
+
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
     if (message.role !== "user") continue;
     const normalized = normalizeContent(message.content);
-    if (!normalized || isLowSignal(normalized)) continue;
+    if (!normalized || isLowSignal(normalized, emitNoise)) continue;
     return { fact: truncateToMax(normalized), sourceMessageId: message.messageId };
   }
   return { fact: null };
@@ -85,8 +163,11 @@ const moodAnchorFromSentiment = (sentiment: SentinelSentiment): string => {
 const shouldEscalateRigor = (assessment: SentinelAssessment): boolean =>
   assessment.severity_signal > 0.8;
 
-export async function processDistillation(messages: ContextMessage[]): Promise<DistillResult> {
-  const distill = distillContextWindow(messages);
+export async function processDistillation(
+  messages: ContextMessage[],
+  opts: DistillTraceContext = {}
+): Promise<DistillResult> {
+  const distill = distillContextWindow(messages, opts);
   const fact = distill.fact;
   if (!fact) {
     return {

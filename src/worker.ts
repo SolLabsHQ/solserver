@@ -19,6 +19,8 @@ if (process.env.NODE_ENV !== "production") {
 }
 
 const isDev = process.env.NODE_ENV !== "production";
+const traceDebugEnabled =
+  process.env.SOL_TRACE_DEBUG === "1" || isDev;
 
 const log = pino({
   level: process.env.LOG_LEVEL ?? (isDev ? "debug" : "info"),
@@ -144,6 +146,33 @@ async function processMemoryDistillTransmission(transmission: Transmission) {
     return;
   }
 
+  const existingTraceRun = await activeStore.getTraceRunByTransmission(transmission.id);
+  const traceRun = existingTraceRun ?? await activeStore.createTraceRun({
+    transmissionId: transmission.id,
+    level: traceDebugEnabled ? "debug" : "info",
+    personaLabel: "system",
+  });
+
+  const shouldEmitTrace = traceDebugEnabled || traceRun.level === "debug";
+  const synapticTrace = {
+    level: traceRun.level,
+    enabled: shouldEmitTrace,
+    emit: (eventName: string, payload: Record<string, any>) => {
+      if (!shouldEmitTrace) return;
+      try {
+        void activeStore.appendTraceEvent({
+          traceRunId: traceRun.id,
+          transmissionId: transmission.id,
+          actor: "solserver",
+          phase: "synaptic_gate",
+          status: "warning",
+          summary: eventName,
+          metadata: payload,
+        }).catch(() => {});
+      } catch {}
+    },
+  };
+
   const contextWindow = await activeStore.consumeMemoryDistillContext({
     userId: request.userId,
     requestId: request.requestId,
@@ -167,7 +196,11 @@ async function processMemoryDistillTransmission(transmission: Transmission) {
   }
 
   try {
-    const distillResult = await processDistillation(contextWindow as ContextMessage[]);
+    const distillResult = await processDistillation(contextWindow as ContextMessage[], {
+      trace: synapticTrace,
+      requestId: request.requestId,
+      threadId: request.threadId,
+    });
     const fact = distillResult.fact;
     const factNull = fact === null;
     let memoryId: string | null = null;
@@ -198,6 +231,7 @@ async function processMemoryDistillTransmission(transmission: Transmission) {
       snippet: fact ?? null,
       factNull,
       ghostKind: "memory_artifact",
+      traceRunId: shouldEmitTrace ? traceRun.id : null,
     });
 
     await activeStore.setTransmissionOutputEnvelope({

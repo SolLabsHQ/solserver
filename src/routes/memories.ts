@@ -127,6 +127,8 @@ export async function memoryRoutes(
   opts: { store?: ControlPlaneStore } = {}
 ) {
   const store = opts.store ?? new MemoryControlPlaneStore();
+  const traceDebugEnabled =
+    process.env.SOL_TRACE_DEBUG === "1" || process.env.NODE_ENV !== "production";
 
   app.addHook("preHandler", async (req, reply) => {
     const apiKey = process.env.SOLSERVER_API_KEY;
@@ -217,11 +219,24 @@ export async function memoryRoutes(
         }
       }
 
+      let traceRun = await store.getTraceRunByTransmission(existing.transmissionId);
+      if (!traceRun) {
+        traceRun = await store.createTraceRun({
+          transmissionId: existing.transmissionId,
+          level: traceDebugEnabled ? "debug" : "info",
+          personaLabel: "system",
+        });
+      }
+
       reply.header("x-sol-transmission-id", existing.transmissionId);
+      if (traceDebugEnabled && traceRun) {
+        reply.header("x-sol-trace-run-id", traceRun.id);
+      }
       return reply.code(202).send({
         request_id: data.request_id,
         transmission_id: existing.transmissionId,
         status: "pending",
+        ...(traceDebugEnabled && traceRun ? { trace_run_id: traceRun.id } : {}),
       });
     }
 
@@ -230,6 +245,11 @@ export async function memoryRoutes(
       transmissionId,
       threadId: data.thread_id,
       notificationPolicy: "muted",
+    });
+    const traceRun = await store.createTraceRun({
+      transmissionId,
+      level: traceDebugEnabled ? "debug" : "info",
+      personaLabel: "system",
     });
     await store.createMemoryDistillRequest({
       userId,
@@ -247,10 +267,14 @@ export async function memoryRoutes(
     });
 
     reply.header("x-sol-transmission-id", transmissionId);
+    if (traceDebugEnabled) {
+      reply.header("x-sol-trace-run-id", traceRun.id);
+    }
     reply.code(202).send({
       request_id: data.request_id,
       transmission_id: transmissionId,
       status: "pending",
+      ...(traceDebugEnabled ? { trace_run_id: traceRun.id } : {}),
     });
   });
 
