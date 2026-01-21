@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import { PacketInput, type ModeDecision } from "../contracts/chat";
+import type { OutputEnvelope } from "../contracts/output_envelope";
 import { resolvePersonaLabel } from "../control-plane/router";
 import {
   buildOutputEnvelopeMeta,
@@ -29,6 +30,29 @@ export async function chatRoutes(
 
   // Dev-only async completion guard for simulated 202 (prevents duplicate background timers per transmission).
   const pendingCompletions = new Set<string>();
+
+  const normalizeGhostEnvelope = (envelope: OutputEnvelope | null) => {
+    if (!envelope || !envelope.meta) return envelope;
+    const meta = envelope.meta as Record<string, any>;
+    if (meta.ghost_kind || !meta.ghost_type) return envelope;
+
+    const mapping: Record<string, string> = {
+      memory: "memory_artifact",
+      journal: "journal_moment",
+      action: "action_proposal",
+    };
+
+    const mapped = mapping[String(meta.ghost_type)];
+    if (!mapped) return envelope;
+
+    return {
+      ...envelope,
+      meta: {
+        ...meta,
+        ghost_kind: mapped,
+      },
+    };
+  };
 
   app.addHook("preHandler", async (req, reply) => {
     const apiKey = process.env.SOLSERVER_API_KEY;
@@ -69,7 +93,9 @@ export async function chatRoutes(
     const attempts = await store.getDeliveryAttempts(id);
     const usage = await store.getUsage(id);
     const result = await store.getChatResult(id);
-    const outputEnvelope = await store.getTransmissionOutputEnvelope(id);
+    const outputEnvelope = normalizeGhostEnvelope(
+      await store.getTransmissionOutputEnvelope(id)
+    );
     const traceRun = await store.getTraceRunByTransmission(id);
     const traceSummary = traceRun ? await store.getTraceSummary(traceRun.id) : null;
 

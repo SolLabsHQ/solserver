@@ -62,6 +62,7 @@ export const OutputEnvelopeSchema = z.object({
   assumptions: z.array(z.string()).optional(),
   unknowns: z.array(z.string()).optional(),
   used_context_ids: z.array(z.string()).optional(),
+  notification_policy: NotificationPolicy.optional(),
   // Future structured outputs (e.g., capture_suggestion) live under meta.
   meta: OutputEnvelopeMetaSchema.optional(),
 }).strict();

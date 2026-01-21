@@ -95,7 +95,7 @@ export function buildOutputEnvelopeMeta(args: {
     persona_label: args.personaLabel,
     notification_policy: args.notificationPolicy,
   };
-  return { ...args.envelope, meta };
+  return { ...args.envelope, meta, notification_policy: args.notificationPolicy };
 }
 
 export function resolveSafetyIsUrgent(args: {

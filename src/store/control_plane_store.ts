@@ -67,6 +67,7 @@ export type MemoryArtifact = {
   snippet: string;
   moodAnchor?: string | null;
   rigorLevel: MemoryRigorLevel;
+  rigorReason?: string | null;
   tags: string[];
   importance?: string | null;
   fidelity: MemoryFidelity;
@@ -220,6 +221,10 @@ export interface ControlPlaneStore {
     requestId: string;
   }): Promise<MemoryDistillRequest | null>;
 
+  getMemoryDistillRequestByTransmissionId(args: {
+    transmissionId: string;
+  }): Promise<MemoryDistillRequest | null>;
+
   updateMemoryDistillRequestReaffirm(args: {
     userId: string;
     requestId: string;
@@ -235,6 +240,41 @@ export interface ControlPlaneStore {
     memoryId?: string | null;
   }): Promise<void>;
 
+  setMemoryDistillContext(args: {
+    userId: string;
+    requestId: string;
+    contextWindow: Array<{
+      messageId: string;
+      role: "user" | "assistant" | "system";
+      content: string;
+      createdAt: string;
+    }>;
+  }): Promise<void>;
+
+  getMemoryDistillContext(args: {
+    userId: string;
+    requestId: string;
+  }): Promise<
+    Array<{
+      messageId: string;
+      role: "user" | "assistant" | "system";
+      content: string;
+      createdAt: string;
+    }> | null
+  >;
+
+  consumeMemoryDistillContext(args: {
+    userId: string;
+    requestId: string;
+  }): Promise<
+    Array<{
+      messageId: string;
+      role: "user" | "assistant" | "system";
+      content: string;
+      createdAt: string;
+    }> | null
+  >;
+
   createMemoryArtifact(args: {
     userId: string;
     transmissionId?: string | null;
@@ -246,6 +286,7 @@ export interface ControlPlaneStore {
     snippet: string;
     moodAnchor?: string | null;
     rigorLevel: MemoryRigorLevel;
+    rigorReason?: string | null;
     tags: string[];
     importance?: string | null;
     fidelity: MemoryFidelity;
@@ -298,7 +339,7 @@ export interface ControlPlaneStore {
 
   recordMemoryAudit(args: {
     userId: string;
-    action: "batch_delete" | "clear_all";
+    action: "delete" | "batch_delete" | "clear_all";
     requestId: string;
     threadId?: string | null;
     filter?: Record<string, any> | null;
@@ -355,11 +396,17 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
   private traceEvents = new Map<string, TraceEvent[]>(); // traceRunId -> TraceEvent[]
   private evidence = new Map<string, Evidence>(); // transmissionId -> Evidence
   private memoryDistillRequests = new Map<string, MemoryDistillRequest>(); // userId:requestId -> request
+  private memoryDistillContexts = new Map<string, Array<{
+    messageId: string;
+    role: "user" | "assistant" | "system";
+    content: string;
+    createdAt: string;
+  }>>(); // userId:requestId -> context window
   private memoryArtifacts = new Map<string, MemoryArtifact>(); // memoryId -> artifact
   private memoryAudit = new Map<string, {
     id: string;
     userId: string;
-    action: "batch_delete" | "clear_all";
+    action: "delete" | "batch_delete" | "clear_all";
     requestId: string;
     threadId?: string | null;
     filter?: Record<string, any> | null;
@@ -498,6 +545,17 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     return this.memoryDistillRequests.get(key) ?? null;
   }
 
+  async getMemoryDistillRequestByTransmissionId(args: {
+    transmissionId: string;
+  }): Promise<MemoryDistillRequest | null> {
+    for (const request of this.memoryDistillRequests.values()) {
+      if (request.transmissionId === args.transmissionId) {
+        return request;
+      }
+    }
+    return null;
+  }
+
   async updateMemoryDistillRequestReaffirm(args: {
     userId: string;
     requestId: string;
@@ -534,6 +592,50 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     });
   }
 
+  async setMemoryDistillContext(args: {
+    userId: string;
+    requestId: string;
+    contextWindow: Array<{
+      messageId: string;
+      role: "user" | "assistant" | "system";
+      content: string;
+      createdAt: string;
+    }>;
+  }): Promise<void> {
+    const key = `${args.userId}:${args.requestId}`;
+    this.memoryDistillContexts.set(key, args.contextWindow);
+  }
+
+  async getMemoryDistillContext(args: {
+    userId: string;
+    requestId: string;
+  }): Promise<Array<{
+    messageId: string;
+    role: "user" | "assistant" | "system";
+    content: string;
+    createdAt: string;
+  }> | null> {
+    const key = `${args.userId}:${args.requestId}`;
+    return this.memoryDistillContexts.get(key) ?? null;
+  }
+
+  async consumeMemoryDistillContext(args: {
+    userId: string;
+    requestId: string;
+  }): Promise<Array<{
+    messageId: string;
+    role: "user" | "assistant" | "system";
+    content: string;
+    createdAt: string;
+  }> | null> {
+    const key = `${args.userId}:${args.requestId}`;
+    const context = this.memoryDistillContexts.get(key) ?? null;
+    if (context) {
+      this.memoryDistillContexts.delete(key);
+    }
+    return context;
+  }
+
   async createMemoryArtifact(args: {
     userId: string;
     transmissionId?: string | null;
@@ -545,6 +647,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     snippet: string;
     moodAnchor?: string | null;
     rigorLevel: MemoryRigorLevel;
+    rigorReason?: string | null;
     tags: string[];
     importance?: string | null;
     fidelity: MemoryFidelity;
@@ -572,6 +675,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       snippet: args.snippet,
       moodAnchor: args.moodAnchor ?? null,
       rigorLevel: args.rigorLevel,
+      rigorReason: args.rigorReason ?? null,
       tags: [...args.tags],
       importance: args.importance ?? null,
       fidelity: args.fidelity,
@@ -711,7 +815,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
 
   async recordMemoryAudit(args: {
     userId: string;
-    action: "batch_delete" | "clear_all";
+    action: "delete" | "batch_delete" | "clear_all";
     requestId: string;
     threadId?: string | null;
     filter?: Record<string, any> | null;

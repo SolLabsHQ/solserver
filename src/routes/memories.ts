@@ -2,14 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
-import { buildOutputEnvelopeMeta } from "../control-plane/orchestrator";
-import type { OutputEnvelope } from "../contracts/output_envelope";
-import {
-  distillContextWindow,
-  FALLBACK_PROMPT,
-  inferRigorLevel,
-  type ContextMessage,
-} from "../memory/synaptic_gate";
+import type { ContextMessage } from "../memory/synaptic_gate";
 import { MemoryControlPlaneStore, type ControlPlaneStore } from "../store/control_plane_store";
 
 const ConsentSchema = z.object({
@@ -82,15 +75,15 @@ const ClearAllRequestSchema = z.object({
   confirm_phrase: z.literal("DELETE ALL"),
 }).strict();
 
-const resolveUserId = (req: { headers: Record<string, string | string[] | undefined> }) => {
+const getUserId = (req: { headers: Record<string, string | string[] | undefined> }) => {
   const header = req.headers["x-sol-user-id"] ?? req.headers["x-user-id"];
   if (Array.isArray(header)) {
-    return header[0] ?? "anonymous";
+    return header[0]?.trim() ?? null;
   }
   if (typeof header === "string" && header.trim().length > 0) {
     return header.trim();
   }
-  return "anonymous";
+  return null;
 };
 
 const extractUnrecognizedKeys = (error: z.ZodError) => {
@@ -110,18 +103,24 @@ const hashContextWindow = (contextWindow: ContextMessage[]) =>
     .update(JSON.stringify(contextWindow))
     .digest("hex");
 
-const buildGhostCardEnvelope = (text: string): OutputEnvelope =>
-  buildOutputEnvelopeMeta({
-    envelope: {
-      assistant_text: text,
-      meta: {
-        display_hint: "ghost_card",
-        ghost_kind: "memory_artifact",
-      },
+const requireUserId = (req: any, reply: any): string | null => {
+  const userId = getUserId(req);
+  if (!userId) {
+    reply.code(401).send({ error: "unauthorized" });
+    return null;
+  }
+  return userId;
+};
+
+const notifyLibrarian = (req: any, payload: Record<string, any>) => {
+  req.log.info(
+    {
+      evt: "librarian.reindex",
+      ...payload,
     },
-    personaLabel: "system",
-    notificationPolicy: "muted",
-  });
+    "librarian.reindex"
+  );
+};
 
 export async function memoryRoutes(
   app: FastifyInstance,
@@ -168,7 +167,8 @@ export async function memoryRoutes(
     }
 
     const data = parsed.data;
-    const userId = resolveUserId(req as any);
+    const userId = requireUserId(req, reply);
+    if (!userId) return;
     const contextWindow: ContextMessage[] = data.context_window.map((message) => ({
       messageId: message.message_id,
       role: message.role,
@@ -195,13 +195,27 @@ export async function memoryRoutes(
         });
       }
 
-      const nextReaffirm = existing.reaffirmCount + 1;
+      const nextReaffirm = Math.max(existing.reaffirmCount + 1, data.reaffirm_count ?? 0);
       await store.updateMemoryDistillRequestReaffirm({
         userId,
         requestId: data.request_id,
         reaffirmCount: nextReaffirm,
         lastReaffirmedAt: new Date().toISOString(),
       });
+
+      if (existing.status === "pending") {
+        const existingContext = await store.getMemoryDistillContext({
+          userId,
+          requestId: data.request_id,
+        });
+        if (!existingContext) {
+          await store.setMemoryDistillContext({
+            userId,
+            requestId: data.request_id,
+            contextWindow,
+          });
+        }
+      }
 
       reply.header("x-sol-transmission-id", existing.transmissionId);
       return reply.code(202).send({
@@ -226,6 +240,11 @@ export async function memoryRoutes(
       contextHash,
       reaffirmCount: data.reaffirm_count ?? 0,
     });
+    await store.setMemoryDistillContext({
+      userId,
+      requestId: data.request_id,
+      contextWindow,
+    });
 
     reply.header("x-sol-transmission-id", transmissionId);
     reply.code(202).send({
@@ -233,76 +252,6 @@ export async function memoryRoutes(
       transmission_id: transmissionId,
       status: "pending",
     });
-
-    const distillJob = async () => {
-      try {
-        const distill = distillContextWindow(contextWindow);
-        const fact = distill.fact;
-        const outputText = fact ?? FALLBACK_PROMPT;
-        const envelope = buildGhostCardEnvelope(outputText);
-
-        await store.setTransmissionOutputEnvelope({
-          transmissionId,
-          outputEnvelope: envelope,
-        });
-
-        if (fact) {
-          const artifact = await store.createMemoryArtifact({
-            userId,
-            transmissionId,
-            threadId: data.thread_id,
-            triggerMessageId: data.trigger_message_id,
-            type: "memory",
-            snippet: fact,
-            moodAnchor: null,
-            rigorLevel: inferRigorLevel(fact),
-            tags: [],
-            fidelity: "direct",
-            transitionToHazyAt: null,
-          });
-
-          await store.completeMemoryDistillRequest({
-            userId,
-            requestId: data.request_id,
-            status: "completed",
-            outputEnvelopeJson: JSON.stringify(envelope),
-            memoryId: artifact.id,
-          });
-        } else {
-          await store.completeMemoryDistillRequest({
-            userId,
-            requestId: data.request_id,
-            status: "completed",
-            outputEnvelopeJson: JSON.stringify(envelope),
-            memoryId: null,
-          });
-        }
-
-        await store.updateTransmissionStatus({
-          transmissionId,
-          status: "completed",
-        });
-      } catch (error) {
-        req.log.error(
-          { evt: "memory.distill.failed", transmissionId, error: String(error) },
-          "memory.distill.failed"
-        );
-        await store.updateTransmissionStatus({
-          transmissionId,
-          status: "failed",
-          statusCode: 500,
-          retryable: false,
-          errorCode: "distill_failed",
-        });
-        await store.completeMemoryDistillRequest({
-          userId,
-          requestId: data.request_id,
-          status: "failed",
-        });
-      }
-    };
-
-    setImmediate(distillJob);
   });
 
   app.post("/memories", async (req, reply) => {
@@ -323,7 +272,8 @@ export async function memoryRoutes(
     }
 
     const data = parsed.data;
-    const userId = resolveUserId(req as any);
+    const userId = requireUserId(req, reply);
+    if (!userId) return;
 
     const existing = await store.getMemoryArtifactByRequestId({
       userId,
@@ -425,7 +375,8 @@ export async function memoryRoutes(
       });
     }
 
-    const userId = resolveUserId(req as any);
+    const userId = requireUserId(req, reply);
+    if (!userId) return;
     const result = await store.listMemoryArtifacts({
       userId,
       domain,
@@ -473,7 +424,8 @@ export async function memoryRoutes(
 
     const data = parsed.data;
     const memoryId = (req.params as any).memory_id as string;
-    const userId = resolveUserId(req as any);
+    const userId = requireUserId(req, reply);
+    if (!userId) return;
 
     if (
       data.patch.snippet === undefined
@@ -509,7 +461,8 @@ export async function memoryRoutes(
 
   app.delete("/memories/:memory_id", async (req, reply) => {
     const memoryId = (req.params as any).memory_id as string;
-    const userId = resolveUserId(req as any);
+    const userId = requireUserId(req, reply);
+    if (!userId) return;
     const confirm = String((req.query as any)?.confirm ?? "").toLowerCase() === "true";
 
     const existing = await store.getMemoryArtifact({ userId, memoryId });
@@ -525,6 +478,20 @@ export async function memoryRoutes(
     }
 
     await store.deleteMemoryArtifact({ userId, memoryId });
+    await store.recordMemoryAudit({
+      userId,
+      action: "delete",
+      requestId: randomUUID(),
+      threadId: existing.threadId ?? null,
+      filter: { memory_id: memoryId },
+      deletedCount: 1,
+    });
+    notifyLibrarian(req, {
+      userId,
+      memoryId,
+      threadId: existing.threadId ?? null,
+      action: "delete",
+    });
     return reply.code(204).send();
   });
 
@@ -546,7 +513,8 @@ export async function memoryRoutes(
     }
 
     const data = parsed.data;
-    const userId = resolveUserId(req as any);
+    const userId = requireUserId(req, reply);
+    if (!userId) return;
     const deletedCount = await store.batchDeleteMemoryArtifacts({
       userId,
       filter: {
@@ -567,6 +535,13 @@ export async function memoryRoutes(
         deletedCount,
       });
     }
+
+    notifyLibrarian(req, {
+      userId,
+      action: "batch_delete",
+      threadId: data.filter.thread_id ?? null,
+      deletedCount,
+    });
 
     return reply.code(200).send({
       request_id: data.request_id,
@@ -592,13 +567,20 @@ export async function memoryRoutes(
     }
 
     const data = parsed.data;
-    const userId = resolveUserId(req as any);
+    const userId = requireUserId(req, reply);
+    if (!userId) return;
     const deletedCount = await store.clearMemoryArtifacts({ userId });
 
     await store.recordMemoryAudit({
       userId,
       action: "clear_all",
       requestId: data.request_id,
+      deletedCount,
+    });
+
+    notifyLibrarian(req, {
+      userId,
+      action: "clear_all",
       deletedCount,
     });
 

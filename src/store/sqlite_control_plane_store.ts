@@ -313,6 +313,17 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       CREATE INDEX IF NOT EXISTS idx_memory_distill_transmission
         ON memory_distill_requests(transmission_id);
 
+      CREATE TABLE IF NOT EXISTS memory_distill_contexts (
+        user_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        context_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, request_id),
+        FOREIGN KEY (user_id, request_id)
+          REFERENCES memory_distill_requests(user_id, request_id)
+          ON DELETE CASCADE
+      );
+
       CREATE TABLE IF NOT EXISTS memory_artifacts (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -325,6 +336,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         snippet TEXT NOT NULL,
         mood_anchor TEXT,
         rigor_level TEXT NOT NULL,
+        rigor_reason TEXT,
         tags_json TEXT NOT NULL,
         importance TEXT,
         fidelity TEXT NOT NULL,
@@ -385,6 +397,9 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     } catch {}
     try {
       this.db.exec("ALTER TABLE trace_runs ADD COLUMN persona_label TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE memory_artifacts ADD COLUMN rigor_reason TEXT");
     } catch {}
   }
 
@@ -1210,6 +1225,17 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     return this.rowToMemoryDistillRequest(row);
   }
 
+  async getMemoryDistillRequestByTransmissionId(args: {
+    transmissionId: string;
+  }): Promise<MemoryDistillRequest | null> {
+    const row = this.db.prepare(`
+      SELECT * FROM memory_distill_requests WHERE transmission_id = ?
+    `).get(args.transmissionId) as any;
+
+    if (!row) return null;
+    return this.rowToMemoryDistillRequest(row);
+  }
+
   async updateMemoryDistillRequestReaffirm(args: {
     userId: string;
     requestId: string;
@@ -1259,6 +1285,104 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     );
   }
 
+  async setMemoryDistillContext(args: {
+    userId: string;
+    requestId: string;
+    contextWindow: Array<{
+      messageId: string;
+      role: "user" | "assistant" | "system";
+      content: string;
+      createdAt: string;
+    }>;
+  }): Promise<void> {
+    const stmt = this.db.prepare(`
+      INSERT INTO memory_distill_contexts (user_id, request_id, context_json, created_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(user_id, request_id) DO UPDATE SET
+        context_json = excluded.context_json,
+        created_at = excluded.created_at
+    `);
+
+    stmt.run(
+      args.userId,
+      args.requestId,
+      JSON.stringify(args.contextWindow),
+      new Date().toISOString()
+    );
+  }
+
+  async getMemoryDistillContext(args: {
+    userId: string;
+    requestId: string;
+  }): Promise<Array<{
+    messageId: string;
+    role: "user" | "assistant" | "system";
+    content: string;
+    createdAt: string;
+  }> | null> {
+    const row = this.db.prepare(`
+      SELECT context_json FROM memory_distill_contexts
+      WHERE user_id = ? AND request_id = ?
+    `).get(args.userId, args.requestId) as { context_json?: string } | undefined;
+
+    if (!row?.context_json) return null;
+    try {
+      return JSON.parse(row.context_json);
+    } catch {
+      return null;
+    }
+  }
+
+  async consumeMemoryDistillContext(args: {
+    userId: string;
+    requestId: string;
+  }): Promise<Array<{
+    messageId: string;
+    role: "user" | "assistant" | "system";
+    content: string;
+    createdAt: string;
+  }> | null> {
+    try {
+      this.db.exec("BEGIN IMMEDIATE");
+    } catch (error) {
+      const code = (error as { code?: string } | null)?.code;
+      if (code === "SQLITE_BUSY" || code === "SQLITE_BUSY_SNAPSHOT" || code === "SQLITE_BUSY_TIMEOUT") {
+        return null;
+      }
+      throw error;
+    }
+
+    try {
+      const row = this.db.prepare(`
+        SELECT context_json FROM memory_distill_contexts
+        WHERE user_id = ? AND request_id = ?
+      `).get(args.userId, args.requestId) as { context_json?: string } | undefined;
+
+      if (!row?.context_json) {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+
+      this.db.prepare(`
+        DELETE FROM memory_distill_contexts
+        WHERE user_id = ? AND request_id = ?
+      `).run(args.userId, args.requestId);
+
+      this.db.exec("COMMIT");
+
+      try {
+        return JSON.parse(row.context_json);
+      } catch {
+        return null;
+      }
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
   async createMemoryArtifact(args: {
     userId: string;
     transmissionId?: string | null;
@@ -1270,6 +1394,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     snippet: string;
     moodAnchor?: string | null;
     rigorLevel: MemoryArtifact["rigorLevel"];
+    rigorReason?: string | null;
     tags: string[];
     importance?: string | null;
     fidelity: MemoryArtifact["fidelity"];
@@ -1299,6 +1424,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         snippet,
         mood_anchor,
         rigor_level,
+        rigor_reason,
         tags_json,
         importance,
         fidelity,
@@ -1307,7 +1433,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         created_at,
         updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -1322,6 +1448,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       args.snippet,
       args.moodAnchor ?? null,
       args.rigorLevel,
+      args.rigorReason ?? null,
       this.serializeTags(args.tags),
       args.importance ?? null,
       args.fidelity,
@@ -1343,6 +1470,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       snippet: args.snippet,
       moodAnchor: args.moodAnchor ?? null,
       rigorLevel: args.rigorLevel,
+      rigorReason: args.rigorReason ?? null,
       tags: [...args.tags],
       importance: args.importance ?? null,
       fidelity: args.fidelity,
@@ -1399,11 +1527,9 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     }
 
     if (args.tagsAny && args.tagsAny.length > 0) {
-      const tagClauses = args.tagsAny.map((tag) => {
-        params.push(`%\"${tag}\"%`);
-        return "tags_json LIKE ?";
-      });
-      where.push(`(${tagClauses.join(" OR ")})`);
+      const placeholders = args.tagsAny.map(() => "?").join(", ");
+      where.push(`EXISTS (SELECT 1 FROM json_each(tags_json) WHERE value IN (${placeholders}))`);
+      params.push(...args.tagsAny);
     }
 
     params.push(limit);
@@ -1510,11 +1636,9 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     }
 
     if (args.filter.tagsAny && args.filter.tagsAny.length > 0) {
-      const tagClauses = args.filter.tagsAny.map((tag) => {
-        params.push(`%\"${tag}\"%`);
-        return "tags_json LIKE ?";
-      });
-      where.push(`(${tagClauses.join(" OR ")})`);
+      const placeholders = args.filter.tagsAny.map(() => "?").join(", ");
+      where.push(`EXISTS (SELECT 1 FROM json_each(tags_json) WHERE value IN (${placeholders}))`);
+      params.push(...args.filter.tagsAny);
     }
 
     const ids = this.db.prepare(`
@@ -1542,7 +1666,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
 
   async recordMemoryAudit(args: {
     userId: string;
-    action: "batch_delete" | "clear_all";
+    action: "delete" | "batch_delete" | "clear_all";
     requestId: string;
     threadId?: string | null;
     filter?: Record<string, any> | null;
@@ -1638,6 +1762,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       snippet: row.snippet,
       moodAnchor: row.mood_anchor ?? null,
       rigorLevel: row.rigor_level,
+      rigorReason: row.rigor_reason ?? null,
       tags: this.parseTags(row.tags_json),
       importance: row.importance ?? null,
       fidelity: row.fidelity,
