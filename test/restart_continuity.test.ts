@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { setTimeout } from "node:timers/promises";
 import { existsSync, unlinkSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve as pathResolve } from "node:path";
 import { connect } from "node:net";
 
 /**
@@ -20,7 +20,7 @@ import { connect } from "node:net";
  * 7. Verify idempotent response (same transmissionId)
  */
 
-const TEST_DB_PATH = resolve(__dirname, "../data/test_restart.db");
+const TEST_DB_PATH = pathResolve(__dirname, "../data/test_restart.db");
 const SERVER_PORT = 3334;
 const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
 const HEALTH_URL = `${SERVER_URL}/health`;
@@ -75,9 +75,10 @@ describe.skipIf(process.env.CI)("Restart Continuity", () => {
   };
 
   const startServer = async (): Promise<void> => {
-    return new Promise((resolve, reject) => {
-      serverProcess = spawn("npm", ["run", "dev"], {
-        cwd: resolve(__dirname, ".."),
+    return new Promise((finish, reject) => {
+      const tsxPath = pathResolve(__dirname, "..", "node_modules", "tsx", "dist", "cli.mjs");
+      serverProcess = spawn(process.execPath, [tsxPath, "src/index.ts"], {
+        cwd: pathResolve(__dirname, ".."),
         env: {
           ...process.env,
           PORT: String(SERVER_PORT),
@@ -100,7 +101,7 @@ describe.skipIf(process.env.CI)("Restart Continuity", () => {
       waitForReady()
         .then(() => {
           serverProcess?.off("exit", onExit);
-          resolve();
+          finish();
         })
         .catch((err) => {
           serverProcess?.off("exit", onExit);
