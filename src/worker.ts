@@ -50,6 +50,9 @@ if (!isDev && !hasExplicitDbPath) {
 const leaseSeconds = Number(process.env.WORKER_LEASE_SECONDS ?? 120) || 120;
 const pollIntervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? 500) || 500;
 const heartbeatEvery = Number(process.env.WORKER_HEARTBEAT_EVERY ?? 20) || 20;
+const suppressIdleLogs = ["1", "true", "yes"].includes(
+  String(process.env.WORKER_SUPPRESS_IDLE_LOGS ?? "").toLowerCase()
+);
 const workerId = process.env.WORKER_ID ?? randomUUID();
 const leaseAttemptLimit = Number(process.env.WORKER_LEASE_ATTEMPTS ?? 5) || 5;
 const emptyScanLimit = Number(process.env.WORKER_EMPTY_SCANS ?? 2) || 2;
@@ -227,6 +230,7 @@ async function processMemoryDistillTransmission(transmission: Transmission) {
     const envelope = buildGhostCardEnvelope({
       text: fact ?? FALLBACK_PROMPT,
       memoryId,
+      triggerMessageId: request.triggerMessageId,
       rigorLevel: distillResult.rigorLevel,
       snippet: fact ?? null,
       factNull,
@@ -275,6 +279,9 @@ async function processMemoryDistillTransmission(transmission: Transmission) {
 }
 
 async function logHeartbeat(reason: "startup" | "poll") {
+  if (suppressIdleLogs) {
+    return;
+  }
   const activeStore = requireStore();
   const chatStats = await activeStore.getLeaseableStats({
     eligibleStatuses: [...chatFilter.eligibleStatuses],
@@ -360,10 +367,12 @@ async function processChat(opts: { logIdle: boolean }) {
   }
 
   if (!leased || leased.outcome !== "leased") {
-    const payload = { evt: "worker.transmission.none", filter: chatFilter, reason: lastOutcome };
-    log.debug(payload, "worker.transmission.none");
-    if (opts.logIdle) {
-      log.info(payload, "worker.transmission.none");
+    if (!suppressIdleLogs) {
+      const payload = { evt: "worker.transmission.none", filter: chatFilter, reason: lastOutcome };
+      log.debug(payload, "worker.transmission.none");
+      if (opts.logIdle) {
+        log.info(payload, "worker.transmission.none");
+      }
     }
     return;
   }
@@ -478,10 +487,12 @@ async function processMemory(opts: { logIdle: boolean }) {
   }
 
   if (!leased || leased.outcome !== "leased") {
-    const payload = { evt: "worker.transmission.none", filter: memoryFilter, reason: lastOutcome };
-    log.debug(payload, "worker.transmission.none");
-    if (opts.logIdle) {
-      log.info(payload, "worker.transmission.none");
+    if (!suppressIdleLogs) {
+      const payload = { evt: "worker.transmission.none", filter: memoryFilter, reason: lastOutcome };
+      log.debug(payload, "worker.transmission.none");
+      if (opts.logIdle) {
+        log.info(payload, "worker.transmission.none");
+      }
     }
     return;
   }

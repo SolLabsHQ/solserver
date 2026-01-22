@@ -415,6 +415,8 @@ export async function memoryRoutes(
         memory_id: artifact.id,
         type: artifact.type,
         snippet: artifact.snippet,
+        thread_id: artifact.threadId ?? null,
+        trigger_message_id: artifact.triggerMessageId ?? null,
         domain: artifact.domain ?? null,
         title: artifact.title ?? null,
         tags: artifact.tags,
