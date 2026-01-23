@@ -5,7 +5,7 @@ import type { MemoryArtifact } from "../store/control_plane_store";
 export type GhostEnvelopePayload = {
   text: string;
   memoryId: string | null;
-  triggerMessageId?: string | null;
+  triggerMessageId?: string;
   rigorLevel: MemoryArtifact["rigorLevel"] | null;
   snippet: string | null;
   factNull: boolean;
@@ -22,7 +22,7 @@ export function buildGhostCardEnvelope(payload: GhostEnvelopePayload): OutputEnv
         display_hint: "ghost_card",
         ghost_kind: payload.ghostKind ?? "memory_artifact",
         memory_id: payload.memoryId,
-        trigger_message_id: payload.triggerMessageId ?? null,
+        ...(payload.triggerMessageId ? { trigger_message_id: payload.triggerMessageId } : {}),
         rigor_level: payload.rigorLevel,
         snippet: payload.snippet,
         fact_null: payload.factNull,
