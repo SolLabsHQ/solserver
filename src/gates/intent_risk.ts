@@ -170,7 +170,18 @@ function classifyRisk(text: string): { risk: Risk; riskReasons: RiskReason[] } {
   const highRiskKeywords = {
     FINANCE: ["invest", "stock", "crypto", "loan", "mortgage", "tax", "financial advice"],
     LEGAL: ["lawsuit", "legal advice", "contract", "sue", "lawyer", "attorney"],
-    MEDICAL: ["diagnose", "treatment", "medication", "doctor", "medical advice", "symptom"],
+    MEDICAL: [
+      "diagnose",
+      "treatment",
+      "medication",
+      "doctor",
+      "medical advice",
+      "symptom",
+      "allergy",
+      "allergic",
+      "anaphylaxis",
+      "epipen",
+    ],
     SELF_HARM: ["suicide", "self harm", "kill myself", "end my life"],
     VIOLENCE: ["kill", "hurt", "attack", "weapon", "bomb"],
   };

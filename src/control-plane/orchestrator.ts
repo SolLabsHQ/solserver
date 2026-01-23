@@ -28,7 +28,11 @@ import { openAIModelReplyWithMeta, OpenAIProviderError } from "../providers/open
 import { selectModel } from "../providers/provider_config";
 import { GATE_SENTINEL, type GateOutput } from "../gates/gate_interfaces";
 import type { ControlPlaneStore, TraceRun, Transmission } from "../store/control_plane_store";
-import { OutputEnvelopeSchema, type OutputEnvelope } from "../contracts/output_envelope";
+import {
+  OutputEnvelopeSchema,
+  OUTPUT_ENVELOPE_META_ALLOWED_KEYS,
+  type OutputEnvelope,
+} from "../contracts/output_envelope";
 import type { PacketInput, ModeDecision, NotificationPolicy } from "../contracts/chat";
 
 export type OrchestrationSource = "api" | "worker";
@@ -95,7 +99,7 @@ export function buildOutputEnvelopeMeta(args: {
     persona_label: args.personaLabel,
     notification_policy: args.notificationPolicy,
   };
-  return { ...args.envelope, meta };
+  return { ...args.envelope, meta, notification_policy: args.notificationPolicy };
 }
 
 export function resolveSafetyIsUrgent(args: {
@@ -596,6 +600,7 @@ export async function runOrchestrationPipeline(args: {
     }
 
     let parsed: unknown;
+    let strippedMetaKeys: string[] = [];
     try {
       parsed = JSON.parse(args.rawText);
     } catch (error) {
@@ -620,6 +625,13 @@ export async function runOrchestrationPipeline(args: {
       return { ok: false, reason: "invalid_json" };
     }
 
+    const rawMeta = (parsed as any)?.meta;
+    if (rawMeta && typeof rawMeta === "object" && !Array.isArray(rawMeta)) {
+      strippedMetaKeys = Object.keys(rawMeta).filter(
+        (key) => !OUTPUT_ENVELOPE_META_ALLOWED_KEYS.has(key)
+      );
+    }
+
     const result = OutputEnvelopeSchema.safeParse(parsed);
     if (!result.success) {
       const meta = buildOutputEnvelopeMetadata({
@@ -642,6 +654,23 @@ export async function runOrchestrationPipeline(args: {
       });
 
       return { ok: false, reason: "schema_invalid", issuesCount: result.error.issues.length };
+    }
+
+    if (traceLevel === "debug" && strippedMetaKeys.length > 0) {
+      const trimmed = strippedMetaKeys.slice(0, 10);
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: "warning",
+        summary: "Output envelope meta keys stripped",
+        metadata: {
+          kind: "output_envelope_meta_strip",
+          strippedCount: strippedMetaKeys.length,
+          strippedKeys: trimmed,
+        },
+      });
     }
 
     const meta = buildOutputEnvelopeMetadata({

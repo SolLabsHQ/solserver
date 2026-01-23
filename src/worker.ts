@@ -8,6 +8,8 @@ import pino from "pino";
 import { PacketInput, type PacketInput as PacketInputType } from "./contracts/chat";
 import { resolvePersonaLabel } from "./control-plane/router";
 import { runOrchestrationPipeline } from "./control-plane/orchestrator";
+import { buildGhostCardEnvelope } from "./memory/ghost_envelope";
+import { FALLBACK_PROMPT, processDistillation, type ContextMessage } from "./memory/synaptic_gate";
 import { SqliteControlPlaneStore } from "./store/sqlite_control_plane_store";
 import type { Transmission } from "./store/control_plane_store";
 import { runTopologyHandshake } from "./topology/worker_handshake";
@@ -17,6 +19,8 @@ if (process.env.NODE_ENV !== "production") {
 }
 
 const isDev = process.env.NODE_ENV !== "production";
+const traceDebugEnabled =
+  process.env.SOL_TRACE_DEBUG === "1" || isDev;
 
 const log = pino({
   level: process.env.LOG_LEVEL ?? (isDev ? "debug" : "info"),
@@ -46,6 +50,9 @@ if (!isDev && !hasExplicitDbPath) {
 const leaseSeconds = Number(process.env.WORKER_LEASE_SECONDS ?? 120) || 120;
 const pollIntervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? 500) || 500;
 const heartbeatEvery = Number(process.env.WORKER_HEARTBEAT_EVERY ?? 20) || 20;
+const suppressIdleLogs = ["1", "true", "yes"].includes(
+  String(process.env.WORKER_SUPPRESS_IDLE_LOGS ?? "").toLowerCase()
+);
 const workerId = process.env.WORKER_ID ?? randomUUID();
 const leaseAttemptLimit = Number(process.env.WORKER_LEASE_ATTEMPTS ?? 5) || 5;
 const emptyScanLimit = Number(process.env.WORKER_EMPTY_SCANS ?? 2) || 2;
@@ -59,9 +66,15 @@ const resolveInternalApiBase = () => {
   return `http://127.0.0.1:${port}`;
 };
 
-const pickFilter = {
+const chatFilter = {
   eligibleStatuses: ["created", "processing"] as const,
   packetType: "chat" as const,
+  leaseCondition: "lease_expires_at IS NULL OR lease_expires_at < now",
+};
+
+const memoryFilter = {
+  eligibleStatuses: ["created", "processing"] as const,
+  packetType: "memory_distill" as const,
   leaseCondition: "lease_expires_at IS NULL OR lease_expires_at < now",
 };
 
@@ -119,15 +132,171 @@ const requireStore = (): SqliteControlPlaneStore => {
   return store;
 };
 
-async function logHeartbeat(reason: "startup" | "poll") {
+async function processMemoryDistillTransmission(transmission: Transmission) {
   const activeStore = requireStore();
-  const stats = await activeStore.getLeaseableStats({
-    eligibleStatuses: [...pickFilter.eligibleStatuses],
-    packetType: pickFilter.packetType,
+  const request = await activeStore.getMemoryDistillRequestByTransmissionId({
+    transmissionId: transmission.id,
   });
 
-  const oldestCreatedAgeMs = stats.oldestCreatedAt
-    ? Date.now() - Date.parse(stats.oldestCreatedAt)
+  if (!request) {
+    await activeStore.updateTransmissionStatus({
+      transmissionId: transmission.id,
+      status: "failed",
+      statusCode: 404,
+      retryable: false,
+      errorCode: "distill_request_missing",
+    });
+    return;
+  }
+
+  const existingTraceRun = await activeStore.getTraceRunByTransmission(transmission.id);
+  const traceRun = existingTraceRun ?? await activeStore.createTraceRun({
+    transmissionId: transmission.id,
+    level: traceDebugEnabled ? "debug" : "info",
+    personaLabel: "system",
+  });
+
+  const shouldEmitTrace = traceDebugEnabled || traceRun.level === "debug";
+  const synapticTrace = {
+    level: traceRun.level,
+    enabled: shouldEmitTrace,
+    emit: (eventName: string, payload: Record<string, any>) => {
+      if (!shouldEmitTrace) return;
+      try {
+        void activeStore.appendTraceEvent({
+          traceRunId: traceRun.id,
+          transmissionId: transmission.id,
+          actor: "solserver",
+          phase: "synaptic_gate",
+          status: "warning",
+          summary: eventName,
+          metadata: payload,
+        }).catch(() => {});
+      } catch {}
+    },
+  };
+
+  const contextWindow = await activeStore.consumeMemoryDistillContext({
+    userId: request.userId,
+    requestId: request.requestId,
+  });
+
+  if (!contextWindow) {
+    await activeStore.updateTransmissionStatus({
+      transmissionId: transmission.id,
+      status: "failed",
+      statusCode: 422,
+      retryable: false,
+      errorCode: "context_missing",
+      errorDetail: { requestId: request.requestId },
+    });
+    await activeStore.completeMemoryDistillRequest({
+      userId: request.userId,
+      requestId: request.requestId,
+      status: "failed",
+    });
+    return;
+  }
+
+  try {
+    const distillResult = await processDistillation(contextWindow as ContextMessage[], {
+      trace: synapticTrace,
+      requestId: request.requestId,
+      threadId: request.threadId,
+    });
+    const fact = distillResult.fact;
+    const factNull = fact === null;
+    let memoryId: string | null = null;
+
+    if (fact) {
+      const artifact = await activeStore.createMemoryArtifact({
+        userId: request.userId,
+        transmissionId: transmission.id,
+        threadId: request.threadId,
+        triggerMessageId: request.triggerMessageId,
+        type: "memory",
+        snippet: fact,
+        moodAnchor: distillResult.moodAnchor,
+        rigorLevel: distillResult.rigorLevel,
+        rigorReason: distillResult.rigorReason ?? null,
+        tags: [],
+        fidelity: "direct",
+        transitionToHazyAt: null,
+        requestId: request.requestId,
+      });
+      memoryId = artifact.id;
+    }
+
+    const envelope = buildGhostCardEnvelope({
+      text: fact ?? FALLBACK_PROMPT,
+      memoryId,
+      triggerMessageId: request.triggerMessageId,
+      rigorLevel: distillResult.rigorLevel,
+      snippet: fact ?? null,
+      factNull,
+      ghostKind: "memory_artifact",
+      traceRunId: shouldEmitTrace ? traceRun.id : null,
+    });
+
+    await activeStore.setTransmissionOutputEnvelope({
+      transmissionId: transmission.id,
+      outputEnvelope: envelope,
+    });
+
+    await activeStore.completeMemoryDistillRequest({
+      userId: request.userId,
+      requestId: request.requestId,
+      status: "completed",
+      outputEnvelopeJson: JSON.stringify(envelope),
+      memoryId,
+    });
+
+    await activeStore.updateTransmissionStatus({
+      transmissionId: transmission.id,
+      status: "completed",
+      statusCode: 200,
+    });
+  } catch (error) {
+    const message = String((error as Error)?.message ?? error);
+    await activeStore.updateTransmissionStatus({
+      transmissionId: transmission.id,
+      status: "failed",
+      statusCode: 500,
+      retryable: false,
+      errorCode: "distill_failed",
+      errorDetail: { message },
+    });
+    await activeStore.completeMemoryDistillRequest({
+      userId: request.userId,
+      requestId: request.requestId,
+      status: "failed",
+    });
+    log.error(
+      { transmissionId: transmission.id, error: message },
+      "worker.memory_distill.error"
+    );
+  }
+}
+
+async function logHeartbeat(reason: "startup" | "poll") {
+  if (suppressIdleLogs) {
+    return;
+  }
+  const activeStore = requireStore();
+  const chatStats = await activeStore.getLeaseableStats({
+    eligibleStatuses: [...chatFilter.eligibleStatuses],
+    packetType: chatFilter.packetType,
+  });
+  const memoryStats = await activeStore.getLeaseableStats({
+    eligibleStatuses: [...memoryFilter.eligibleStatuses],
+    packetType: memoryFilter.packetType,
+  });
+
+  const oldestChatAgeMs = chatStats.oldestCreatedAt
+    ? Date.now() - Date.parse(chatStats.oldestCreatedAt)
+    : null;
+  const oldestMemoryAgeMs = memoryStats.oldestCreatedAt
+    ? Date.now() - Date.parse(memoryStats.oldestCreatedAt)
     : null;
 
   log.info(
@@ -136,9 +305,16 @@ async function logHeartbeat(reason: "startup" | "poll") {
       reason,
       dbPath,
       dbStat: getDbStat(dbPath),
-      leaseableCount: stats.leaseableCount,
-      oldestCreatedAgeMs,
-      filter: pickFilter,
+      chat: {
+        leaseableCount: chatStats.leaseableCount,
+        oldestCreatedAgeMs: oldestChatAgeMs,
+        filter: chatFilter,
+      },
+      memoryDistill: {
+        leaseableCount: memoryStats.leaseableCount,
+        oldestCreatedAgeMs: oldestMemoryAgeMs,
+        filter: memoryFilter,
+      },
       leaseStats: {
         attempts: leaseAttempts,
         wins: leaseWins,
@@ -150,7 +326,7 @@ async function logHeartbeat(reason: "startup" | "poll") {
   );
 }
 
-async function processOne(opts: { logIdle: boolean }) {
+async function processChat(opts: { logIdle: boolean }) {
   const activeStore = requireStore();
   let leased: Awaited<ReturnType<SqliteControlPlaneStore["leaseNextTransmission"]>> | null = null;
   let emptyScans = 0;
@@ -161,8 +337,8 @@ async function processOne(opts: { logIdle: boolean }) {
     leased = await activeStore.leaseNextTransmission({
       leaseOwner: workerId,
       leaseDurationSeconds: leaseSeconds,
-      eligibleStatuses: [...pickFilter.eligibleStatuses],
-      packetType: pickFilter.packetType,
+      eligibleStatuses: [...chatFilter.eligibleStatuses],
+      packetType: chatFilter.packetType,
     });
 
     if (leased.outcome === "leased") {
@@ -191,17 +367,19 @@ async function processOne(opts: { logIdle: boolean }) {
   }
 
   if (!leased || leased.outcome !== "leased") {
-    const payload = { evt: "worker.transmission.none", filter: pickFilter, reason: lastOutcome };
-    log.debug(payload, "worker.transmission.none");
-    if (opts.logIdle) {
-      log.info(payload, "worker.transmission.none");
+    if (!suppressIdleLogs) {
+      const payload = { evt: "worker.transmission.none", filter: chatFilter, reason: lastOutcome };
+      log.debug(payload, "worker.transmission.none");
+      if (opts.logIdle) {
+        log.info(payload, "worker.transmission.none");
+      }
     }
     return;
   }
 
   const { transmission, previousStatus } = leased;
   log.info(
-    { transmissionId: transmission.id, status: previousStatus, filter: pickFilter },
+    { transmissionId: transmission.id, status: previousStatus, filter: chatFilter },
     "worker.transmission.picked"
   );
   log.info(
@@ -268,6 +446,70 @@ async function processOne(opts: { logIdle: boolean }) {
   }
 }
 
+async function processMemory(opts: { logIdle: boolean }) {
+  const activeStore = requireStore();
+  let leased: Awaited<ReturnType<SqliteControlPlaneStore["leaseNextTransmission"]>> | null = null;
+  let emptyScans = 0;
+  let lastOutcome: "empty" | "contention" = "empty";
+
+  for (let attempt = 1; attempt <= leaseAttemptLimit; attempt += 1) {
+    leaseAttempts += 1;
+    leased = await activeStore.leaseNextTransmission({
+      leaseOwner: workerId,
+      leaseDurationSeconds: leaseSeconds,
+      eligibleStatuses: [...memoryFilter.eligibleStatuses],
+      packetType: memoryFilter.packetType,
+    });
+
+    if (leased.outcome === "leased") {
+      leaseWins += 1;
+      break;
+    }
+
+    if (leased.outcome === "contention") {
+      leaseContention += 1;
+      lastOutcome = "contention";
+    } else {
+      leaseEmpty += 1;
+      emptyScans += 1;
+      lastOutcome = "empty";
+      if (emptyScans >= emptyScanLimit) {
+        leased = null;
+        break;
+      }
+    }
+
+    const jitter = Math.max(
+      0,
+      jitterMinMs + Math.floor(Math.random() * Math.max(1, jitterMaxMs - jitterMinMs + 1))
+    );
+    await sleep(jitter);
+  }
+
+  if (!leased || leased.outcome !== "leased") {
+    if (!suppressIdleLogs) {
+      const payload = { evt: "worker.transmission.none", filter: memoryFilter, reason: lastOutcome };
+      log.debug(payload, "worker.transmission.none");
+      if (opts.logIdle) {
+        log.info(payload, "worker.transmission.none");
+      }
+    }
+    return;
+  }
+
+  const { transmission, previousStatus } = leased;
+  log.info(
+    { transmissionId: transmission.id, status: previousStatus, filter: memoryFilter },
+    "worker.transmission.picked"
+  );
+  log.info(
+    { transmissionId: transmission.id, prevStatus: previousStatus, newStatus: "processing" },
+    "worker.transmission.processing"
+  );
+
+  await processMemoryDistillTransmission(transmission);
+}
+
 let running = false;
 let pollCount = 0;
 
@@ -280,7 +522,8 @@ async function tick() {
       await logHeartbeat("poll");
     }
     const logIdle = pollCount % heartbeatEvery === 0;
-    await processOne({ logIdle });
+    await processChat({ logIdle });
+    await processMemory({ logIdle });
   } finally {
     running = false;
   }

@@ -10,6 +10,9 @@ import type {
   DeliveryAttempt,
   UsageRecord,
   ChatResult,
+  MemoryArtifact,
+  MemoryDistillRequest,
+  MemoryDistillStatus,
   TransmissionStatus,
   DeliveryStatus,
   TraceRun,
@@ -21,6 +24,7 @@ import type {
   TraceSummary,
 } from "./control_plane_store";
 import type { PacketInput, ModeDecision, Evidence, NotificationPolicy } from "../contracts/chat";
+import type { OutputEnvelope } from "../contracts/output_envelope";
 
 type LeaseNextTransmissionResult =
   | { outcome: "leased"; transmission: Transmission; previousStatus: TransmissionStatus }
@@ -280,6 +284,88 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       CREATE INDEX IF NOT EXISTS idx_claims_transmission ON claim_map_entries(transmission_id);
       CREATE INDEX IF NOT EXISTS idx_claims_thread ON claim_map_entries(thread_id);
       CREATE INDEX IF NOT EXISTS idx_claims_tx_claim ON claim_map_entries(transmission_id, claim_id);
+
+      -- Memory tables (PR #8)
+      CREATE TABLE IF NOT EXISTS transmission_outputs (
+        transmission_id TEXT PRIMARY KEY,
+        output_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (transmission_id) REFERENCES transmissions(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS memory_distill_requests (
+        user_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        transmission_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        trigger_message_id TEXT NOT NULL,
+        context_hash TEXT NOT NULL,
+        reaffirm_count INTEGER NOT NULL DEFAULT 0,
+        last_reaffirmed_at TEXT,
+        status TEXT NOT NULL,
+        output_envelope_json TEXT,
+        memory_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, request_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_distill_transmission
+        ON memory_distill_requests(transmission_id);
+
+      CREATE TABLE IF NOT EXISTS memory_distill_contexts (
+        user_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        context_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, request_id),
+        FOREIGN KEY (user_id, request_id)
+          REFERENCES memory_distill_requests(user_id, request_id)
+          ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS memory_artifacts (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        transmission_id TEXT,
+        thread_id TEXT,
+        trigger_message_id TEXT,
+        type TEXT NOT NULL,
+        domain TEXT,
+        title TEXT,
+        snippet TEXT NOT NULL,
+        mood_anchor TEXT,
+        rigor_level TEXT NOT NULL,
+        rigor_reason TEXT,
+        tags_json TEXT NOT NULL,
+        importance TEXT,
+        fidelity TEXT NOT NULL,
+        transition_to_hazy_at TEXT,
+        request_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_artifacts_user_created
+        ON memory_artifacts(user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_memory_artifacts_thread
+        ON memory_artifacts(thread_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_artifacts_request
+        ON memory_artifacts(user_id, request_id) WHERE request_id IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS memory_audit_log (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        thread_id TEXT,
+        filter_json TEXT,
+        deleted_count INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_memory_audit_user
+        ON memory_audit_log(user_id, created_at DESC);
     `);
 
     try {
@@ -311,6 +397,9 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     } catch {}
     try {
       this.db.exec("ALTER TABLE trace_runs ADD COLUMN persona_label TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE memory_artifacts ADD COLUMN rigor_reason TEXT");
     } catch {}
   }
 
@@ -434,6 +523,132 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     }
 
     return t;
+  }
+
+  async setTransmissionOutputEnvelope(args: {
+    transmissionId: string;
+    outputEnvelope: OutputEnvelope;
+  }): Promise<void> {
+    const stmt = this.db.prepare(`
+      INSERT INTO transmission_outputs (transmission_id, output_json, created_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(transmission_id) DO UPDATE SET
+        output_json = excluded.output_json,
+        created_at = excluded.created_at
+    `);
+
+    stmt.run(
+      args.transmissionId,
+      JSON.stringify(args.outputEnvelope),
+      new Date().toISOString()
+    );
+  }
+
+  async getTransmissionOutputEnvelope(transmissionId: string): Promise<OutputEnvelope | null> {
+    const row = this.db.prepare(`
+      SELECT output_json FROM transmission_outputs WHERE transmission_id = ?
+    `).get(transmissionId) as { output_json?: string } | undefined;
+
+    if (!row?.output_json) return null;
+    try {
+      return JSON.parse(row.output_json) as OutputEnvelope;
+    } catch {
+      return null;
+    }
+  }
+
+  async createMemoryTransmission(args: {
+    transmissionId: string;
+    threadId: string;
+    notificationPolicy?: NotificationPolicy | null;
+  }): Promise<Transmission> {
+    const now = new Date().toISOString();
+    const modeDecision: ModeDecision = {
+      modeLabel: "System-mode",
+      personaLabel: "system",
+      domainFlags: [],
+      confidence: 1,
+      checkpointNeeded: false,
+      reasons: ["memory_distill"],
+      version: "memory-v0",
+    };
+
+    const transmission: Transmission = {
+      id: args.transmissionId,
+      packetType: "memory_distill",
+      threadId: args.threadId,
+      clientRequestId: undefined,
+      message: "[memory_distill]",
+      modeDecision,
+      notificationPolicy: args.notificationPolicy ?? "muted",
+      forcedPersona: null,
+      createdAt: now,
+      status: "created",
+      statusCode: undefined,
+      retryable: undefined,
+      errorCode: undefined,
+      errorDetail: undefined,
+      packetJson: JSON.stringify({ packetType: "memory_distill", threadId: args.threadId }),
+      packet: undefined,
+      leaseExpiresAt: null,
+      leaseOwner: null,
+    };
+
+    const stmt = this.db.prepare(`
+      INSERT INTO transmissions (
+        id,
+        packet_type,
+        thread_id,
+        client_request_id,
+        message,
+        packet_json,
+        mode_decision,
+        notification_policy,
+        forced_persona,
+        created_at,
+        status,
+        status_code,
+        retryable,
+        error_code,
+        error_detail_json,
+        lease_expires_at,
+        lease_owner
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    try {
+      stmt.run(
+        transmission.id,
+        transmission.packetType,
+        transmission.threadId,
+        null,
+        transmission.message,
+        transmission.packetJson ?? null,
+        JSON.stringify(transmission.modeDecision),
+        transmission.notificationPolicy ?? null,
+        transmission.forcedPersona ?? null,
+        transmission.createdAt,
+        transmission.status,
+        transmission.statusCode ?? null,
+        transmission.retryable === undefined ? null : (transmission.retryable ? 1 : 0),
+        null,
+        null,
+        null,
+        null
+      );
+    } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      if (code === "SQLITE_CONSTRAINT_PRIMARYKEY") {
+        const existing = await this.getTransmission(transmission.id);
+        if (existing) {
+          return existing;
+        }
+      }
+      throw err;
+    }
+
+    return transmission;
   }
 
   async getTransmissionByClientRequestId(clientRequestId: string): Promise<Transmission | null> {
@@ -935,6 +1150,554 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     };
   }
 
+  async createMemoryDistillRequest(args: {
+    userId: string;
+    requestId: string;
+    transmissionId: string;
+    threadId: string;
+    triggerMessageId: string;
+    contextHash: string;
+    reaffirmCount: number;
+  }): Promise<MemoryDistillRequest> {
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT INTO memory_distill_requests (
+        user_id,
+        request_id,
+        transmission_id,
+        thread_id,
+        trigger_message_id,
+        context_hash,
+        reaffirm_count,
+        last_reaffirmed_at,
+        status,
+        output_envelope_json,
+        memory_id,
+        created_at,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      args.userId,
+      args.requestId,
+      args.transmissionId,
+      args.threadId,
+      args.triggerMessageId,
+      args.contextHash,
+      args.reaffirmCount,
+      null,
+      "pending",
+      null,
+      null,
+      now,
+      now
+    );
+
+    return {
+      userId: args.userId,
+      requestId: args.requestId,
+      transmissionId: args.transmissionId,
+      threadId: args.threadId,
+      triggerMessageId: args.triggerMessageId,
+      contextHash: args.contextHash,
+      reaffirmCount: args.reaffirmCount,
+      lastReaffirmedAt: null,
+      status: "pending",
+      outputEnvelopeJson: null,
+      memoryId: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  async getMemoryDistillRequestByRequestId(args: {
+    userId: string;
+    requestId: string;
+  }): Promise<MemoryDistillRequest | null> {
+    const row = this.db.prepare(`
+      SELECT * FROM memory_distill_requests
+      WHERE user_id = ? AND request_id = ?
+    `).get(args.userId, args.requestId) as any;
+
+    if (!row) return null;
+    return this.rowToMemoryDistillRequest(row);
+  }
+
+  async getMemoryDistillRequestByTransmissionId(args: {
+    transmissionId: string;
+  }): Promise<MemoryDistillRequest | null> {
+    const row = this.db.prepare(`
+      SELECT * FROM memory_distill_requests WHERE transmission_id = ?
+    `).get(args.transmissionId) as any;
+
+    if (!row) return null;
+    return this.rowToMemoryDistillRequest(row);
+  }
+
+  async updateMemoryDistillRequestReaffirm(args: {
+    userId: string;
+    requestId: string;
+    reaffirmCount: number;
+    lastReaffirmedAt: string;
+  }): Promise<void> {
+    const stmt = this.db.prepare(`
+      UPDATE memory_distill_requests
+      SET reaffirm_count = ?,
+        last_reaffirmed_at = ?,
+        updated_at = ?
+      WHERE user_id = ? AND request_id = ?
+    `);
+
+    stmt.run(
+      args.reaffirmCount,
+      args.lastReaffirmedAt,
+      new Date().toISOString(),
+      args.userId,
+      args.requestId
+    );
+  }
+
+  async completeMemoryDistillRequest(args: {
+    userId: string;
+    requestId: string;
+    status: MemoryDistillStatus;
+    outputEnvelopeJson?: string | null;
+    memoryId?: string | null;
+  }): Promise<void> {
+    const stmt = this.db.prepare(`
+      UPDATE memory_distill_requests
+      SET status = ?,
+        output_envelope_json = COALESCE(?, output_envelope_json),
+        memory_id = COALESCE(?, memory_id),
+        updated_at = ?
+      WHERE user_id = ? AND request_id = ?
+    `);
+
+    stmt.run(
+      args.status,
+      args.outputEnvelopeJson ?? null,
+      args.memoryId ?? null,
+      new Date().toISOString(),
+      args.userId,
+      args.requestId
+    );
+  }
+
+  async setMemoryDistillContext(args: {
+    userId: string;
+    requestId: string;
+    contextWindow: Array<{
+      messageId: string;
+      role: "user" | "assistant" | "system";
+      content: string;
+      createdAt: string;
+    }>;
+  }): Promise<void> {
+    const stmt = this.db.prepare(`
+      INSERT INTO memory_distill_contexts (user_id, request_id, context_json, created_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(user_id, request_id) DO UPDATE SET
+        context_json = excluded.context_json,
+        created_at = excluded.created_at
+    `);
+
+    stmt.run(
+      args.userId,
+      args.requestId,
+      JSON.stringify(args.contextWindow),
+      new Date().toISOString()
+    );
+  }
+
+  async getMemoryDistillContext(args: {
+    userId: string;
+    requestId: string;
+  }): Promise<Array<{
+    messageId: string;
+    role: "user" | "assistant" | "system";
+    content: string;
+    createdAt: string;
+  }> | null> {
+    const row = this.db.prepare(`
+      SELECT context_json FROM memory_distill_contexts
+      WHERE user_id = ? AND request_id = ?
+    `).get(args.userId, args.requestId) as { context_json?: string } | undefined;
+
+    if (!row?.context_json) return null;
+    try {
+      return JSON.parse(row.context_json);
+    } catch {
+      return null;
+    }
+  }
+
+  async consumeMemoryDistillContext(args: {
+    userId: string;
+    requestId: string;
+  }): Promise<Array<{
+    messageId: string;
+    role: "user" | "assistant" | "system";
+    content: string;
+    createdAt: string;
+  }> | null> {
+    try {
+      this.db.exec("BEGIN IMMEDIATE");
+    } catch (error) {
+      const code = (error as { code?: string } | null)?.code;
+      if (code === "SQLITE_BUSY" || code === "SQLITE_BUSY_SNAPSHOT" || code === "SQLITE_BUSY_TIMEOUT") {
+        return null;
+      }
+      throw error;
+    }
+
+    try {
+      const row = this.db.prepare(`
+        SELECT context_json FROM memory_distill_contexts
+        WHERE user_id = ? AND request_id = ?
+      `).get(args.userId, args.requestId) as { context_json?: string } | undefined;
+
+      if (!row?.context_json) {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+
+      this.db.prepare(`
+        DELETE FROM memory_distill_contexts
+        WHERE user_id = ? AND request_id = ?
+      `).run(args.userId, args.requestId);
+
+      this.db.exec("COMMIT");
+
+      try {
+        return JSON.parse(row.context_json);
+      } catch {
+        return null;
+      }
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
+  async createMemoryArtifact(args: {
+    userId: string;
+    transmissionId?: string | null;
+    threadId?: string | null;
+    triggerMessageId?: string | null;
+    type: MemoryArtifact["type"];
+    domain?: string | null;
+    title?: string | null;
+    snippet: string;
+    moodAnchor?: string | null;
+    rigorLevel: MemoryArtifact["rigorLevel"];
+    rigorReason?: string | null;
+    tags: string[];
+    importance?: string | null;
+    fidelity: MemoryArtifact["fidelity"];
+    transitionToHazyAt?: string | null;
+    requestId?: string | null;
+  }): Promise<MemoryArtifact> {
+    if (args.requestId) {
+      const existing = this.db.prepare(`
+        SELECT * FROM memory_artifacts WHERE user_id = ? AND request_id = ?
+      `).get(args.userId, args.requestId) as any;
+      if (existing) {
+        return this.rowToMemoryArtifact(existing);
+      }
+    }
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT INTO memory_artifacts (
+        id,
+        user_id,
+        transmission_id,
+        thread_id,
+        trigger_message_id,
+        type,
+        domain,
+        title,
+        snippet,
+        mood_anchor,
+        rigor_level,
+        rigor_reason,
+        tags_json,
+        importance,
+        fidelity,
+        transition_to_hazy_at,
+        request_id,
+        created_at,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      id,
+      args.userId,
+      args.transmissionId ?? null,
+      args.threadId ?? null,
+      args.triggerMessageId ?? null,
+      args.type,
+      args.domain ?? null,
+      args.title ?? null,
+      args.snippet,
+      args.moodAnchor ?? null,
+      args.rigorLevel,
+      args.rigorReason ?? null,
+      this.serializeTags(args.tags),
+      args.importance ?? null,
+      args.fidelity,
+      args.transitionToHazyAt ?? null,
+      args.requestId ?? null,
+      now,
+      now
+    );
+
+    return {
+      id,
+      userId: args.userId,
+      transmissionId: args.transmissionId ?? null,
+      threadId: args.threadId ?? null,
+      triggerMessageId: args.triggerMessageId ?? null,
+      type: args.type,
+      domain: args.domain ?? null,
+      title: args.title ?? null,
+      snippet: args.snippet,
+      moodAnchor: args.moodAnchor ?? null,
+      rigorLevel: args.rigorLevel,
+      rigorReason: args.rigorReason ?? null,
+      tags: [...args.tags],
+      importance: args.importance ?? null,
+      fidelity: args.fidelity,
+      transitionToHazyAt: args.transitionToHazyAt ?? null,
+      requestId: args.requestId ?? null,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  async getMemoryArtifact(args: {
+    userId: string;
+    memoryId: string;
+  }): Promise<MemoryArtifact | null> {
+    const row = this.db.prepare(`
+      SELECT * FROM memory_artifacts WHERE id = ? AND user_id = ?
+    `).get(args.memoryId, args.userId) as any;
+
+    if (!row) return null;
+    return this.rowToMemoryArtifact(row);
+  }
+
+  async getMemoryArtifactByRequestId(args: {
+    userId: string;
+    requestId: string;
+  }): Promise<MemoryArtifact | null> {
+    const row = this.db.prepare(`
+      SELECT * FROM memory_artifacts WHERE user_id = ? AND request_id = ?
+    `).get(args.userId, args.requestId) as any;
+
+    if (!row) return null;
+    return this.rowToMemoryArtifact(row);
+  }
+
+  async listMemoryArtifacts(args: {
+    userId: string;
+    domain?: string | null;
+    tagsAny?: string[] | null;
+    before?: string | null;
+    limit?: number;
+  }): Promise<{ items: MemoryArtifact[]; nextCursor: string | null }> {
+    const limit = args.limit ?? 50;
+    const params: Array<string | number> = [args.userId];
+    const where: string[] = ["user_id = ?"];
+
+    if (args.domain) {
+      where.push("domain = ?");
+      params.push(args.domain);
+    }
+
+    if (args.before) {
+      where.push("created_at < ?");
+      params.push(args.before);
+    }
+
+    if (args.tagsAny && args.tagsAny.length > 0) {
+      const placeholders = args.tagsAny.map(() => "?").join(", ");
+      where.push(`EXISTS (SELECT 1 FROM json_each(tags_json) WHERE value IN (${placeholders}))`);
+      params.push(...args.tagsAny);
+    }
+
+    params.push(limit);
+
+    const rows = this.db.prepare(`
+      SELECT * FROM memory_artifacts
+      WHERE ${where.join(" AND ")}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `).all(...params) as any[];
+
+    const items = rows.map((row) => this.rowToMemoryArtifact(row));
+    const nextCursor = items.length === limit ? items[items.length - 1]?.createdAt ?? null : null;
+    return { items, nextCursor };
+  }
+
+  async updateMemoryArtifact(args: {
+    userId: string;
+    memoryId: string;
+    snippet?: string | null;
+    tags?: string[] | null;
+    moodAnchor?: string | null;
+  }): Promise<MemoryArtifact | null> {
+    const existing = await this.getMemoryArtifact({
+      userId: args.userId,
+      memoryId: args.memoryId,
+    });
+    if (!existing) return null;
+
+    const nextSnippet = args.snippet ?? existing.snippet;
+    const nextTags = args.tags === undefined ? existing.tags : args.tags ?? [];
+    const nextMoodAnchor =
+      args.moodAnchor === undefined ? existing.moodAnchor ?? null : args.moodAnchor;
+
+    const stmt = this.db.prepare(`
+      UPDATE memory_artifacts
+      SET snippet = ?,
+        tags_json = ?,
+        mood_anchor = ?,
+        updated_at = ?
+      WHERE id = ? AND user_id = ?
+    `);
+
+    stmt.run(
+      nextSnippet,
+      this.serializeTags(nextTags),
+      nextMoodAnchor,
+      new Date().toISOString(),
+      args.memoryId,
+      args.userId
+    );
+
+    return {
+      ...existing,
+      snippet: nextSnippet,
+      tags: nextTags,
+      moodAnchor: nextMoodAnchor,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  async deleteMemoryArtifact(args: {
+    userId: string;
+    memoryId: string;
+  }): Promise<{ deleted: boolean; artifact?: MemoryArtifact | null }> {
+    const existing = await this.getMemoryArtifact({
+      userId: args.userId,
+      memoryId: args.memoryId,
+    });
+    if (!existing) return { deleted: false };
+
+    const stmt = this.db.prepare(`
+      DELETE FROM memory_artifacts WHERE id = ? AND user_id = ?
+    `);
+    stmt.run(args.memoryId, args.userId);
+    return { deleted: true, artifact: existing };
+  }
+
+  async batchDeleteMemoryArtifacts(args: {
+    userId: string;
+    filter: {
+      threadId?: string | null;
+      domain?: string | null;
+      tagsAny?: string[] | null;
+      createdBefore?: string | null;
+    };
+  }): Promise<number> {
+    const params: Array<string | number> = [args.userId];
+    const where: string[] = ["user_id = ?"];
+
+    if (args.filter.threadId) {
+      where.push("thread_id = ?");
+      params.push(args.filter.threadId);
+    }
+
+    if (args.filter.domain) {
+      where.push("domain = ?");
+      params.push(args.filter.domain);
+    }
+
+    if (args.filter.createdBefore) {
+      where.push("created_at < ?");
+      params.push(args.filter.createdBefore);
+    }
+
+    if (args.filter.tagsAny && args.filter.tagsAny.length > 0) {
+      const placeholders = args.filter.tagsAny.map(() => "?").join(", ");
+      where.push(`EXISTS (SELECT 1 FROM json_each(tags_json) WHERE value IN (${placeholders}))`);
+      params.push(...args.filter.tagsAny);
+    }
+
+    const ids = this.db.prepare(`
+      SELECT id FROM memory_artifacts WHERE ${where.join(" AND ")}
+    `).all(...params) as Array<{ id: string }>;
+
+    if (ids.length === 0) return 0;
+
+    const idParams = ids.map((row) => row.id);
+    const placeholders = idParams.map(() => "?").join(", ");
+    const delStmt = this.db.prepare(`
+      DELETE FROM memory_artifacts WHERE id IN (${placeholders})
+    `);
+    delStmt.run(...idParams);
+    return ids.length;
+  }
+
+  async clearMemoryArtifacts(args: { userId: string }): Promise<number> {
+    const stmt = this.db.prepare(`
+      DELETE FROM memory_artifacts WHERE user_id = ?
+    `);
+    const result = stmt.run(args.userId);
+    return result.changes ?? 0;
+  }
+
+  async recordMemoryAudit(args: {
+    userId: string;
+    action: "delete" | "batch_delete" | "clear_all";
+    requestId: string;
+    threadId?: string | null;
+    filter?: Record<string, any> | null;
+    deletedCount: number;
+  }): Promise<void> {
+    const stmt = this.db.prepare(`
+      INSERT INTO memory_audit_log (
+        id,
+        user_id,
+        action,
+        request_id,
+        thread_id,
+        filter_json,
+        deleted_count,
+        created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      randomUUID(),
+      args.userId,
+      args.action,
+      args.requestId,
+      args.threadId ?? null,
+      args.filter ? JSON.stringify(args.filter) : null,
+      args.deletedCount,
+      new Date().toISOString()
+    );
+  }
+
   private rowToTransmission(row: any): Transmission {
     let packet: PacketInput | undefined;
     const packetJson = row.packet_json ?? undefined;
@@ -969,6 +1732,62 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       packet,
       leaseExpiresAt: row.lease_expires_at ?? null,
       leaseOwner: row.lease_owner ?? null,
+    };
+  }
+
+  private serializeTags(tags: string[]): string {
+    return JSON.stringify(tags ?? []);
+  }
+
+  private parseTags(tagsJson: string | null | undefined): string[] {
+    if (!tagsJson) return [];
+    try {
+      const parsed = JSON.parse(tagsJson);
+      return Array.isArray(parsed) ? parsed.filter((tag) => typeof tag === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private rowToMemoryArtifact(row: any): MemoryArtifact {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      transmissionId: row.transmission_id ?? null,
+      threadId: row.thread_id ?? null,
+      triggerMessageId: row.trigger_message_id ?? null,
+      type: row.type,
+      domain: row.domain ?? null,
+      title: row.title ?? null,
+      snippet: row.snippet,
+      moodAnchor: row.mood_anchor ?? null,
+      rigorLevel: row.rigor_level,
+      rigorReason: row.rigor_reason ?? null,
+      tags: this.parseTags(row.tags_json),
+      importance: row.importance ?? null,
+      fidelity: row.fidelity,
+      transitionToHazyAt: row.transition_to_hazy_at ?? null,
+      requestId: row.request_id ?? null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private rowToMemoryDistillRequest(row: any): MemoryDistillRequest {
+    return {
+      userId: row.user_id,
+      requestId: row.request_id,
+      transmissionId: row.transmission_id,
+      threadId: row.thread_id,
+      triggerMessageId: row.trigger_message_id,
+      contextHash: row.context_hash,
+      reaffirmCount: Number(row.reaffirm_count ?? 0),
+      lastReaffirmedAt: row.last_reaffirmed_at ?? null,
+      status: row.status,
+      outputEnvelopeJson: row.output_envelope_json ?? null,
+      memoryId: row.memory_id ?? null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
     };
   }
 

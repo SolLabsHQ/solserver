@@ -47,21 +47,163 @@ const CaptureSuggestionSchema = z.object({
     });
   }
 });
-// Meta is passthrough on ingest for forward-compatibility; response egress is allowlisted.
+const GhostKindSchema = z.enum(["memory_artifact", "journal_moment", "action_proposal"]);
+const GhostRigorSchema = z.enum(["normal", "high"]);
+
+const OutputEnvelopeMetaKeys = [
+  "meta_version",
+  "trace_run_id",
+  "claims",
+  "used_evidence_ids",
+  "evidence_pack_id",
+  "notification_policy",
+  "capture_suggestion",
+  "display_hint",
+  "ghost_kind",
+  "ghost_type",
+  "memory_id",
+  "trigger_message_id",
+  "rigor_level",
+  "snippet",
+  "fact_null",
+  "mood_anchor",
+] as const;
+
+export const OUTPUT_ENVELOPE_META_ALLOWED_KEYS = new Set<string>(OutputEnvelopeMetaKeys);
+
 const OutputEnvelopeMetaSchema = z.object({
   meta_version: z.literal("v1").optional(),
+  trace_run_id: z.string().min(1).optional(),
   claims: z.array(ClaimSchema).min(1).optional(),
   used_evidence_ids: z.array(z.string().min(1)).optional(),
   evidence_pack_id: z.string().min(1).optional(),
   notification_policy: NotificationPolicy.optional(),
   capture_suggestion: CaptureSuggestionSchema.optional(),
-}).passthrough();
+  display_hint: z.literal("ghost_card").optional(),
+  ghost_kind: GhostKindSchema.optional(),
+  ghost_type: z.enum(["memory", "journal", "action"]).optional(),
+  memory_id: z.string().nullable().optional(),
+  trigger_message_id: z.string().min(1).optional(),
+  rigor_level: GhostRigorSchema.nullable().optional(),
+  snippet: z.string().nullable().optional(),
+  fact_null: z.boolean().optional(),
+  mood_anchor: z.string().nullable().optional(),
+})
+  .strip()
+  .superRefine((value, ctx) => {
+    const ghostKeys = [
+      "ghost_kind",
+      "ghost_type",
+      "memory_id",
+      "rigor_level",
+      "snippet",
+      "fact_null",
+      "mood_anchor",
+    ] as const;
+
+    const hasAnyGhostField = ghostKeys.some((key) => value[key] !== undefined);
+    const isGhost = value.display_hint === "ghost_card";
+
+    if (value.ghost_type !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["ghost_type"],
+        message: "ghost_type is deprecated; use ghost_kind",
+      });
+    }
+
+    if (hasAnyGhostField && !isGhost) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["display_hint"],
+        message: "display_hint must be ghost_card when ghost metadata is present",
+      });
+      return;
+    }
+
+    if (!isGhost) return;
+
+    if (value.ghost_kind === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["ghost_kind"],
+        message: "ghost_kind is required for ghost_card",
+      });
+    }
+
+    if (value.memory_id === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["memory_id"],
+        message: "memory_id is required for ghost_card (nullable allowed)",
+      });
+    }
+
+    if (value.rigor_level === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["rigor_level"],
+        message: "rigor_level is required for ghost_card (nullable allowed)",
+      });
+    }
+
+    if (value.snippet === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["snippet"],
+        message: "snippet is required for ghost_card (nullable allowed)",
+      });
+    }
+
+    if (value.fact_null === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["fact_null"],
+        message: "fact_null is required for ghost_card",
+      });
+    }
+
+    if (value.fact_null === true) {
+      if (value.memory_id !== null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["memory_id"],
+          message: "memory_id must be null when fact_null is true",
+        });
+      }
+      if (value.snippet !== null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["snippet"],
+          message: "snippet must be null when fact_null is true",
+        });
+      }
+    }
+
+    if (value.fact_null === false) {
+      if (value.memory_id === null || value.memory_id === "") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["memory_id"],
+          message: "memory_id must be a non-empty string when fact_null is false",
+        });
+      }
+      if (value.snippet === null || value.snippet === "") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["snippet"],
+          message: "snippet must be a non-empty string when fact_null is false",
+        });
+      }
+    }
+  });
 
 export const OutputEnvelopeSchema = z.object({
   assistant_text: z.string().min(1),
   assumptions: z.array(z.string()).optional(),
   unknowns: z.array(z.string()).optional(),
   used_context_ids: z.array(z.string()).optional(),
+  notification_policy: NotificationPolicy.optional(),
   // Future structured outputs (e.g., capture_suggestion) live under meta.
   meta: OutputEnvelopeMetaSchema.optional(),
 }).strict();

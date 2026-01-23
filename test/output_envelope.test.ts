@@ -126,6 +126,36 @@ describe("OutputEnvelope v0-min", () => {
     expect(body.outputEnvelope.meta.unexpected_key).toBeUndefined();
   });
 
+  it("emits a debug trace when meta keys are stripped", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": JSON.stringify({
+          assistant_text: SHAPE_ASSISTANT_TEXT,
+          meta: { meta_version: "v1", unexpected_key: "nope" },
+        }),
+      },
+      payload: {
+        packetType: "chat",
+        threadId: "thread-output-envelope-005-trace",
+        message: "Test message",
+        traceConfig: { level: "debug" },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const traceRunId = response.headers["x-sol-trace-run-id"] as string;
+    expect(traceRunId).toBeTruthy();
+
+    const events = await store.getTraceEvents(traceRunId, { limit: 50 });
+    const stripEvent = events.find((event) =>
+      event.metadata?.kind === "output_envelope_meta_strip"
+    );
+    expect(stripEvent).toBeTruthy();
+    expect(stripEvent?.metadata?.strippedKeys).toContain("unexpected_key");
+  });
+
   it("fills capture_suggestion suggestion_id and returns it", async () => {
     const response = await app.inject({
       method: "POST",

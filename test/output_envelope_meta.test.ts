@@ -17,5 +17,6 @@ describe("buildOutputEnvelopeMeta", () => {
 
     expect(result.meta?.persona_label).toBe("ida");
     expect(result.meta?.notification_policy).toBe("muted");
+    expect(result.notification_policy).toBe("muted");
   });
 });
