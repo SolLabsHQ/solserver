@@ -43,21 +43,16 @@ function redactUrlForTrace(urlString: string): string | null {
  */
 function buildGateInput(packet: PacketInput): {
   gateInput: GateInput;
-  inlineUrls: string[];
-  urlWarningsCount: number;
+  messageText: string;
+  captureUrls: string[];
 } {
   const messageText = packet.message;
+  const urlRegex = /https?:\/\/[^\s]+/gi;
+  const urlHintCount = (messageText.match(urlRegex) || []).length;
 
-  // Extract URLs from message text (robust, fail-open)
-  const extracted = extractUrls(messageText);
-  const inlineUrls = extracted.urls;
-  const urlWarningsCount = extracted.warnings.length;
-
-  // Extract URLs from evidence captures
-  const captureUrls = packet.evidence?.captures?.map((c) => c.url) || [];
-
-  // Combine all URLs (dedupe)
-  const allUrls = Array.from(new Set([...inlineUrls, ...captureUrls].filter(Boolean)));
+  // Extract URLs from evidence captures (count only here)
+  const captureUrls = (packet.evidence?.captures?.map((c) => c.url) || []).filter(Boolean);
+  const captureUrlCount = captureUrls.length;
 
   // Count evidence items
   const captureCount = packet.evidence?.captures?.length || 0;
@@ -73,7 +68,8 @@ function buildGateInput(packet: PacketInput): {
   return {
     gateInput: {
       messageText,
-      urls: allUrls,
+      urlHintCount,
+      captureUrlCount,
       evidenceCounts: {
         captureCount,
         supportCount,
@@ -81,8 +77,8 @@ function buildGateInput(packet: PacketInput): {
         snippetCharTotal,
       },
     },
-    inlineUrls,
-    urlWarningsCount,
+    messageText,
+    captureUrls,
   };
 }
 
@@ -97,8 +93,11 @@ function buildGateInput(packet: PacketInput): {
  * 5. Lattice (stub)
  */
 export function runGatesPipeline(packet: PacketInput): GatesPipelineOutput {
-  const { gateInput, inlineUrls, urlWarningsCount } = buildGateInput(packet);
-  const captureUrls = packet.evidence?.captures?.map((c) => c.url) || [];
+  const { gateInput, messageText, captureUrls } = buildGateInput(packet);
+  const extracted = extractUrls(messageText);
+  const inlineUrls = extracted.urls;
+  const urlWarningsCount = extracted.warnings.length;
+  const allUrls = Array.from(new Set([...inlineUrls, ...captureUrls].filter(Boolean)));
   const urlPreviews = inlineUrls
     .map((url) => redactUrlForTrace(url))
     .filter((url): url is string => Boolean(url))
@@ -124,11 +123,11 @@ export function runGatesPipeline(packet: PacketInput): GatesPipelineOutput {
     {
       gateName: "url_extraction",
       status: "pass",
-      summary: `URLs: inline=${inlineUrls.length}, captures=${captureUrls.length}, total=${gateInput.urls.length}`,
+      summary: `URLs: inline=${inlineUrls.length}, captures=${captureUrls.length}, total=${allUrls.length}`,
       metadata: {
         inlineUrlCount: inlineUrls.length,
         captureUrlCount: captureUrls.length,
-        totalUrlCount: gateInput.urls.length,
+        totalUrlCount: allUrls.length,
         warningsCount: urlWarningsCount,
         urlPreviews,
       },

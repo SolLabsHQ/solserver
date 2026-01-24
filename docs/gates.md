@@ -38,7 +38,7 @@ Ordered with exact call sites:
 ### normalize_modality
 - **Purpose:** Detect input modalities (text/url/snippet/unknown). 【F:src/gates/normalize_modality.ts†L28-L74】
 - **Function(s):** `runNormalizeModality`. 【F:src/gates/normalize_modality.ts†L38-L74】
-- **Input shape:** `GateInput` (`messageText`, `urls`, `evidenceCounts`). 【F:src/gates/normalize_modality.ts†L17-L26】
+- **Input shape:** `GateInput` (`messageText`, `urlHintCount`, `captureUrlCount`, `evidenceCounts`). 【F:src/gates/normalize_modality.ts†L17-L26】
 - **Output fields:** `{ modalities, modalitySummary }`. 【F:src/gates/normalize_modality.ts†L12-L15】
 - **Warnings vs hard-fails:** None. 【F:src/gates/normalize_modality.ts†L38-L74】
 - **Trace event:** `phase: "gate_normalize_modality"` with gate metadata. 【F:src/control-plane/orchestrator.ts†L1086-L1117】
@@ -147,11 +147,11 @@ Ordered with exact call sites:
 
 **Where it is computed today:** `buildGateInput` runs `extractUrls(messageText)` before `runNormalizeModality`, so inline URLs are known prior to modality detection. 【F:src/gates/gates_pipeline.ts†L44-L109】
 
-**Why it is precomputed:** `runNormalizeModality` consumes `GateInput.urls` to decide URL modality. 【F:src/gates/normalize_modality.ts†L17-L74】
+**Why it is precomputed:** `runNormalizeModality` consumes `GateInput` URL counts to decide URL modality. 【F:src/gates/normalize_modality.ts†L17-L74】
 
 **Minimal refactor (Option A) to align execution + trace order:**
 - Move `extractUrls` to the gate_url_extraction gate step (after normalize).
-- Update `runNormalizeModality` to use URL count derived from evidence captures or a new `captureUrlCount` field (so normalize no longer depends on inline URLs computed earlier).
+- Update `runNormalizeModality` to use URL count derived from `urlHintCount` + `captureUrlCount` (so normalize no longer depends on validated inline URLs computed earlier).
 - Keep the gate_url_extraction gate responsible for inline URL detection + warnings metadata. 【F:src/gates/gates_pipeline.ts†L44-L162】【F:src/gates/normalize_modality.ts†L17-L74】
 
 ## Librarian gate insertion (recommended)

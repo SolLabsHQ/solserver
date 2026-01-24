@@ -60,7 +60,8 @@ export async function assessSentinel(snippet: string): Promise<SentinelAssessmen
 
   const gateInput: GateInput = {
     messageText: snippet,
-    urls: [],
+    urlHintCount: 0,
+    captureUrlCount: 0,
     evidenceCounts: {
       captureCount: 0,
       supportCount: 0,
