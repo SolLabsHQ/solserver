@@ -7,11 +7,11 @@ This document captures the current SolServer gate catalog, routing order, and tr
 Ordered with exact call sites:
 
 1. **Evidence intake** (`runEvidenceIntake`) — URL extraction + auto-capture merge + evidence validation + persistence. Executed before pre-model gates. 【F:src/control-plane/orchestrator.ts†L935-L977】【F:src/gates/evidence_intake.ts†L223-L268】
-2. **Pre-model gates pipeline** (`runGatesPipeline`) — ordered: normalize/modality → url_extraction → intent → sentinel → lattice (stub). 【F:src/control-plane/orchestrator.ts†L1040-L1048】【F:src/gates/gates_pipeline.ts†L89-L162】
+2. **Pre-model gates pipeline** (`runGatesPipeline`) — ordered: normalize/modality → gate_url_extraction → intent → sentinel → lattice (stub). 【F:src/control-plane/orchestrator.ts†L1040-L1048】【F:src/gates/gates_pipeline.ts†L89-L162】
 3. **Model call** (`runModelAttempt`) — executed after prompt pack assembly. 【F:src/control-plane/orchestrator.ts†L1161-L1287】【F:src/control-plane/orchestrator.ts†L1345-L1365】
 4. **OutputEnvelope parse + schema validation** (`parseOutputEnvelope` with `OutputEnvelopeSchema.safeParse`). 【F:src/control-plane/orchestrator.ts†L644-L727】【F:src/contracts/output_envelope.ts†L217-L225】
 5. **Evidence output gates** (`runEvidenceOutputGates`) — binding then budget. 【F:src/control-plane/orchestrator.ts†L765-L821】【F:src/gates/evidence_output_gates.ts†L70-L218】
-6. **Post-output linter + driver-block enforcement** (`postOutputLinter` + per-block trace; strict failure is `driver_block_enforcement`). 【F:src/control-plane/orchestrator.ts†L1445-L1489】【F:src/gates/post_linter.ts†L121-L209】【F:src/control-plane/orchestrator.ts†L1756-L1794】
+6. **Post-output linter + driver_block_output_enforcement** (`postOutputLinter` + per-block trace; strict failure is `driver_block_enforcement`). 【F:src/control-plane/orchestrator.ts†L1445-L1489】【F:src/gates/post_linter.ts†L121-L209】【F:src/control-plane/orchestrator.ts†L1756-L1794】
 
 > Note: The synaptic (memory) gate runs in the memory distillation worker flow, not in the chat request flow. 【F:src/worker.ts†L135-L206】
 
@@ -32,7 +32,7 @@ Ordered with exact call sites:
 - **Input shape:** `text: string`. 【F:src/gates/url_extraction.ts†L64-L68】
 - **Output fields:** `{ urls, warnings }` (warnings are `EvidenceWarning`). 【F:src/gates/url_extraction.ts†L64-L67】【F:src/contracts/evidence_warning.ts†L7-L13】
 - **Warnings vs hard-fails:** Warnings only (invalid/unsupported/overflow); no hard-fail. 【F:src/gates/url_extraction.ts†L81-L158】
-- **Trace event:** No standalone trace; recorded by evidence_intake or url_extraction gate metadata. 【F:src/control-plane/orchestrator.ts†L959-L976】【F:src/gates/gates_pipeline.ts†L124-L135】
+- **Trace event:** No standalone trace; recorded by evidence_intake or gate_url_extraction gate metadata. 【F:src/control-plane/orchestrator.ts†L959-L976】【F:src/gates/gates_pipeline.ts†L124-L135】
 - **Caps / limits:** MAX_URL_COUNT 100, MAX_URL_LENGTH 2048, MAX_WARNINGS 10. 【F:src/gates/url_extraction.ts†L3-L6】
 
 ### normalize_modality
@@ -44,13 +44,13 @@ Ordered with exact call sites:
 - **Trace event:** `phase: "gate_normalize_modality"` with gate metadata. 【F:src/control-plane/orchestrator.ts†L1086-L1117】
 - **Caps / limits:** None. 【F:src/gates/normalize_modality.ts†L38-L74】
 
-### url_extraction (pre-model gate)
+### gate_url_extraction (pre-model gate)
 - **Purpose:** Emit URL counts + preview metadata for trace. 【F:src/gates/gates_pipeline.ts†L89-L162】
 - **Function(s):** `extractUrls` + gate result in `runGatesPipeline`. 【F:src/gates/gates_pipeline.ts†L44-L135】
 - **Input shape:** Derived from `PacketInput` in `buildGateInput`. 【F:src/gates/gates_pipeline.ts†L44-L86】
 - **Output fields:** Gate metadata (`inlineUrlCount`, `captureUrlCount`, `totalUrlCount`, `warningsCount`, `urlPreviews`). 【F:src/gates/gates_pipeline.ts†L124-L135】
 - **Warnings vs hard-fails:** Warnings only (via `warningsCount`). 【F:src/gates/gates_pipeline.ts†L124-L135】
-- **Trace event:** `phase: "url_extraction"`. 【F:src/control-plane/orchestrator.ts†L1086-L1117】
+- **Trace event:** `phase: "gate_url_extraction"`. 【F:src/control-plane/orchestrator.ts†L1086-L1117】
 - **Caps / limits:** Same as `extractUrls`. 【F:src/gates/url_extraction.ts†L3-L158】
 
 ### intent
@@ -116,7 +116,7 @@ Ordered with exact call sites:
 - **Trace event:** `phase: "output_gates"`, `kind: "post_linter"`, `violationsCount`, `blockIds`, `firstFailure`. 【F:src/control-plane/orchestrator.ts†L181-L207】【F:src/control-plane/orchestrator.ts†L1445-L1472】
 - **Caps / limits:** None. 【F:src/gates/post_linter.ts†L121-L209】
 
-### driver_block_enforcement (prompt assembly)
+### driver_block_compose_enforcement (prompt assembly)
 - **Purpose:** Assemble driver blocks deterministically and enforce bounds (drop/trim). 【F:src/control-plane/driver_blocks.ts†L102-L237】
 - **Function(s):** `assembleDriverBlocks`. 【F:src/control-plane/driver_blocks.ts†L112-L237】
 - **Input shape:** `PacketInput`. 【F:src/contracts/chat.ts†L105-L121】
@@ -125,7 +125,7 @@ Ordered with exact call sites:
 - **Trace event:** `phase: "compose_request"` with `dropped`, `trimmed`. 【F:src/control-plane/orchestrator.ts†L1296-L1308】
 - **Caps / limits:** MAX_REFS 10, MAX_INLINE 3, MAX_DEFINITION_BYTES 4KB, MAX_TOTAL_BLOCKS 15. 【F:src/control-plane/driver_blocks.ts†L70-L78】
 
-### driver_block_enforcement (output)
+### driver_block_output_enforcement (output)
 - **Purpose:** Fail closed if strict post-linter violations persist. 【F:src/control-plane/orchestrator.ts†L1756-L1794】
 - **Function(s):** Enforcement logic in orchestrator (post-linter). 【F:src/control-plane/orchestrator.ts†L1756-L1794】
 - **Input shape:** Linter metadata (`PostLinterMetadata`). 【F:src/control-plane/orchestrator.ts†L181-L207】
@@ -150,9 +150,9 @@ Ordered with exact call sites:
 **Why it is precomputed:** `runNormalizeModality` consumes `GateInput.urls` to decide URL modality. 【F:src/gates/normalize_modality.ts†L17-L74】
 
 **Minimal refactor (Option A) to align execution + trace order:**
-- Move `extractUrls` to the url_extraction gate step (after normalize).
+- Move `extractUrls` to the gate_url_extraction gate step (after normalize).
 - Update `runNormalizeModality` to use URL count derived from evidence captures or a new `captureUrlCount` field (so normalize no longer depends on inline URLs computed earlier).
-- Keep `url_extraction` gate responsible for inline URL detection + warnings metadata. 【F:src/gates/gates_pipeline.ts†L44-L162】【F:src/gates/normalize_modality.ts†L17-L74】
+- Keep the gate_url_extraction gate responsible for inline URL detection + warnings metadata. 【F:src/gates/gates_pipeline.ts†L44-L162】【F:src/gates/normalize_modality.ts†L17-L74】
 
 ## Librarian gate insertion (recommended)
 
@@ -197,6 +197,5 @@ Suggested tests/locations:
 ### Evidence intake caps (MAX_CLAIMS) meaning
 - **`MAX_CLAIMS` limits evidence-side claim map entries** in `PacketInput.evidence.claims` (not model OutputEnvelope claims). 【F:src/gates/evidence_intake.ts†L7-L189】【F:src/contracts/chat.ts†L86-L101】
 
-### Trace naming uniformity (gate_* vs url_extraction)
-- **Today:** phases are `gate_normalize_modality`, `gate_intent`, `gate_sentinel`, `gate_lattice`, but URL extraction uses `url_extraction`. 【F:src/control-plane/orchestrator.ts†L1040-L1117】
-- **Smallest uniform rename:** rename trace phase from `url_extraction` → `gate_url_extraction` (and update the ordering contract + tests) to match the gate_* convention. 【F:src/control-plane/orchestrator.ts†L1040-L1048】【F:src/control-plane/orchestrator.ts†L1086-L1117】
+### Trace naming uniformity (gate_* vs gate_url_extraction)
+- **Phases:** `gate_normalize_modality`, `gate_url_extraction`, `gate_intent`, `gate_sentinel`, `gate_lattice` to keep the gate_* convention. 【F:src/control-plane/orchestrator.ts†L1040-L1117】
