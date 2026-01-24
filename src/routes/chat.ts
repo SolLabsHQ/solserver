@@ -163,6 +163,21 @@ export async function chatRoutes(
    * - Persist to a real store instead of process memory.
    * - Add governance (auth, write audit, limits).
    */
+  const ThreadMementoAffectSchema = z.object({
+    points: z.array(z.object({
+      endMessageId: z.string().min(1),
+      label: z.string().min(1),
+      intensity: z.number().min(0).max(1),
+      confidence: z.enum(["low", "med", "high"]),
+      source: z.enum(["server", "device_hint"]),
+    }).strict()).max(5),
+    rollup: z.object({
+      phase: z.enum(["rising", "peak", "downshift", "settled"]),
+      intensityBucket: z.enum(["low", "med", "high"]),
+      updatedAt: z.string().datetime(),
+    }).strict(),
+  }).strict();
+
   const ThreadMementoInput = z.object({
     threadId: z.string().min(1),
     arc: z.string().min(1),
@@ -170,6 +185,7 @@ export async function chatRoutes(
     parked: z.array(z.string()).default([]),
     decisions: z.array(z.string()).default([]),
     next: z.array(z.string()).default([]),
+    affect: ThreadMementoAffectSchema.optional(),
   });
 
   const ThreadMementoDecisionInput = z.object({
@@ -178,8 +194,59 @@ export async function chatRoutes(
     decision: z.enum(["accept", "decline", "revoke"]),
   });
 
+  const normalizeThreadMementoPayload = (body: any) => {
+    if (!body || typeof body !== "object") return body;
+    const normalized: Record<string, any> = { ...body };
+    if (normalized.threadId === undefined && normalized.thread_id !== undefined) {
+      normalized.threadId = normalized.thread_id;
+    }
+    if (normalized.mementoId === undefined && normalized.memento_id !== undefined) {
+      normalized.mementoId = normalized.memento_id;
+    }
+    if (normalized.startMessageId === undefined && normalized.start_message_id !== undefined) {
+      normalized.startMessageId = normalized.start_message_id;
+    }
+    if (normalized.endMessageId === undefined && normalized.end_message_id !== undefined) {
+      normalized.endMessageId = normalized.end_message_id;
+    }
+    if (normalized.createdTs === undefined && normalized.created_ts !== undefined) {
+      normalized.createdTs = normalized.created_ts;
+    }
+    if (normalized.intensityBucket === undefined && normalized.intensity_bucket !== undefined) {
+      normalized.intensityBucket = normalized.intensity_bucket;
+    }
+    if (normalized.updatedAt === undefined && normalized.updated_at !== undefined) {
+      normalized.updatedAt = normalized.updated_at;
+    }
+    if (normalized.affect && typeof normalized.affect === "object") {
+      const affect = { ...normalized.affect };
+      if (affect.rollup && typeof affect.rollup === "object") {
+        const rollup = { ...affect.rollup };
+        if (rollup.intensityBucket === undefined && rollup.intensity_bucket !== undefined) {
+          rollup.intensityBucket = rollup.intensity_bucket;
+        }
+        if (rollup.updatedAt === undefined && rollup.updated_at !== undefined) {
+          rollup.updatedAt = rollup.updated_at;
+        }
+        affect.rollup = rollup;
+      }
+      if (Array.isArray(affect.points)) {
+        affect.points = affect.points.map((point: any) => {
+          if (!point || typeof point !== "object") return point;
+          const mapped = { ...point };
+          if (mapped.endMessageId === undefined && mapped.end_message_id !== undefined) {
+            mapped.endMessageId = mapped.end_message_id;
+          }
+          return mapped;
+        });
+      }
+      normalized.affect = affect;
+    }
+    return normalized;
+  };
+
   async function handleMementoDecision(req: any, reply: any) {
-    const parsed = ThreadMementoDecisionInput.safeParse(req.body);
+    const parsed = ThreadMementoDecisionInput.safeParse(normalizeThreadMementoPayload(req.body));
     if (!parsed.success) {
       return reply.code(400).send({
         error: "invalid_request",
@@ -248,7 +315,7 @@ export async function chatRoutes(
           plane: "memento",
           threadId,
           requestedMementoId: mementoId,
-          latestAnyId: latestAny?.id ?? null,
+          latestAnyId: latestAny?.mementoId ?? null,
           foundLatestAny: Boolean(latestAny),
           // Best-effort: some implementations may include `isDraft`.
           latestAnyIsDraft: (latestAny as any)?.isDraft ?? null,
@@ -256,7 +323,7 @@ export async function chatRoutes(
         "control_plane.memento_decision_lookup"
       );
 
-      if (latestAny && latestAny.id === mementoId) {
+      if (latestAny && latestAny.mementoId === mementoId) {
         if (decision === "accept") {
           reason = "already_accepted";
           memento = latestAny;
@@ -290,7 +357,7 @@ export async function chatRoutes(
   }
 
   async function handlePutMemento(req: any, reply: any) {
-    const parsed = ThreadMementoInput.safeParse(req.body);
+    const parsed = ThreadMementoInput.safeParse(normalizeThreadMementoPayload(req.body));
     if (!parsed.success) {
       return reply.code(400).send({
         error: "invalid_request",
@@ -309,13 +376,14 @@ export async function chatRoutes(
       parked: data.parked,
       decisions: data.decisions,
       next: data.next,
+      affect: data.affect,
     });
 
     req.log.info(
       {
         plane: "memento",
         threadId: data.threadId,
-        mementoId: memento.id,
+        mementoId: memento.mementoId,
         version: memento.version,
       },
       "control_plane.memento_put"
@@ -341,7 +409,7 @@ export async function chatRoutes(
       {
         plane: "memento",
         threadId,
-        mementoId: memento?.id ?? null,
+        mementoId: memento?.mementoId ?? null,
         found: Boolean(memento),
       },
       "control_plane.memento_get"

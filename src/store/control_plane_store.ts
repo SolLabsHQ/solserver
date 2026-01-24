@@ -77,6 +77,40 @@ export type MemoryArtifact = {
   updatedAt: string;
 };
 
+export type JournalSourceSpan = {
+  threadId: string;
+  startMessageId: string;
+  endMessageId: string;
+};
+
+export type JournalEntry = {
+  entryId: string;
+  userId: string;
+  createdTs: string;
+  updatedAt: string;
+  title: string;
+  body: string;
+  tags: string[];
+  sourceSpan: JournalSourceSpan;
+  draftMeta: {
+    mode: "assist" | "verbatim";
+    cpbId?: string | null;
+    draftId?: string | null;
+  };
+};
+
+export type TraceIngestEvent = {
+  id: string;
+  requestId: string;
+  localUserUuid: string;
+  eventType: "journal_offer_event" | "device_muse_observation";
+  threadId: string;
+  messageId?: string | null;
+  ts: string;
+  payload: Record<string, any>;
+  createdAt: string;
+};
+
 export type MemoryDistillStatus = "pending" | "completed" | "failed";
 
 export type MemoryDistillRequest = {
@@ -156,6 +190,7 @@ export interface ControlPlaneStore {
   }): Promise<Transmission>;
 
   getTransmissionByClientRequestId(clientRequestId: string): Promise<Transmission | null>;
+  listTransmissionsByThread(args: { threadId: string }): Promise<Transmission[]>;
 
   updateTransmissionStatus(args: {
     transmissionId: string;
@@ -384,6 +419,39 @@ export interface ControlPlaneStore {
     threadId: string;
     limit?: number;
   }): Promise<Array<{ transmissionId: string; evidence: Evidence }>>;
+
+  // Journal entries (PR #10)
+  createJournalEntry(args: {
+    entry: JournalEntry;
+  }): Promise<JournalEntry>;
+  getJournalEntry(args: { entryId: string; userId: string }): Promise<JournalEntry | null>;
+  listJournalEntries(args: {
+    userId: string;
+    threadId?: string | null;
+    before?: string | null;
+    limit?: number;
+  }): Promise<{ items: JournalEntry[]; nextCursor: string | null }>;
+  updateJournalEntry(args: {
+    userId: string;
+    entryId: string;
+    title?: string;
+    body?: string;
+    tags?: string[];
+  }): Promise<JournalEntry | null>;
+  deleteJournalEntry(args: { userId: string; entryId: string }): Promise<boolean>;
+
+  // Trace ingestion events (PR #10)
+  appendTraceIngestEvents(args: {
+    requestId: string;
+    localUserUuid: string;
+    events: Array<{
+      eventType: TraceIngestEvent["eventType"];
+      threadId: string;
+      messageId?: string | null;
+      ts: string;
+      payload: Record<string, any>;
+    }>;
+  }): Promise<TraceIngestEvent[]>;
 }
 
 export class MemoryControlPlaneStore implements ControlPlaneStore {
@@ -404,6 +472,8 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     createdAt: string;
   }>>(); // userId:requestId -> context window
   private memoryArtifacts = new Map<string, MemoryArtifact>(); // memoryId -> artifact
+  private journalEntries = new Map<string, JournalEntry>(); // entryId -> entry
+  private traceIngestEvents = new Map<string, TraceIngestEvent>(); // id -> event
   private memoryAudit = new Map<string, {
     id: string;
     userId: string;
@@ -856,6 +926,13 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     return this.transmissions.get(id) ?? null;
   }
 
+  async listTransmissionsByThread(args: { threadId: string }): Promise<Transmission[]> {
+    const items = Array.from(this.transmissions.values())
+      .filter((t) => t.threadId === args.threadId && t.packetType === "chat")
+      .sort((a, b) => (a.createdAt > b.createdAt ? 1 : a.createdAt < b.createdAt ? -1 : 0));
+    return items;
+  }
+
   async updateTransmissionStatus(args: {
     transmissionId: string;
     status: TransmissionStatus;
@@ -1067,5 +1144,95 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     }
 
     return results;
+  }
+
+  async createJournalEntry(args: { entry: JournalEntry }): Promise<JournalEntry> {
+    this.journalEntries.set(args.entry.entryId, args.entry);
+    return args.entry;
+  }
+
+  async getJournalEntry(args: { entryId: string; userId: string }): Promise<JournalEntry | null> {
+    const entry = this.journalEntries.get(args.entryId) ?? null;
+    if (!entry || entry.userId !== args.userId) return null;
+    return entry;
+  }
+
+  async listJournalEntries(args: {
+    userId: string;
+    threadId?: string | null;
+    before?: string | null;
+    limit?: number;
+  }): Promise<{ items: JournalEntry[]; nextCursor: string | null }> {
+    const ordered = Array.from(this.journalEntries.values())
+      .filter((entry) => entry.userId === args.userId)
+      .filter((entry) => (args.threadId ? entry.sourceSpan.threadId === args.threadId : true))
+      .sort((a, b) => (a.createdTs > b.createdTs ? -1 : a.createdTs < b.createdTs ? 1 : 0));
+
+    const filtered = args.before
+      ? ordered.filter((entry) => entry.createdTs < args.before)
+      : ordered;
+
+    const limit = args.limit ?? 50;
+    const page = filtered.slice(0, limit);
+    const nextCursor = filtered.length > limit ? page.at(-1)?.createdTs ?? null : null;
+    return { items: page, nextCursor };
+  }
+
+  async updateJournalEntry(args: {
+    userId: string;
+    entryId: string;
+    title?: string;
+    body?: string;
+    tags?: string[];
+  }): Promise<JournalEntry | null> {
+    const existing = this.journalEntries.get(args.entryId);
+    if (!existing || existing.userId !== args.userId) return null;
+
+    const updated: JournalEntry = {
+      ...existing,
+      title: args.title ?? existing.title,
+      body: args.body ?? existing.body,
+      tags: args.tags ?? existing.tags,
+      updatedAt: new Date().toISOString(),
+    };
+    this.journalEntries.set(args.entryId, updated);
+    return updated;
+  }
+
+  async deleteJournalEntry(args: { userId: string; entryId: string }): Promise<boolean> {
+    const existing = this.journalEntries.get(args.entryId);
+    if (!existing || existing.userId !== args.userId) return false;
+    this.journalEntries.delete(args.entryId);
+    return true;
+  }
+
+  async appendTraceIngestEvents(args: {
+    requestId: string;
+    localUserUuid: string;
+    events: Array<{
+      eventType: TraceIngestEvent["eventType"];
+      threadId: string;
+      messageId?: string | null;
+      ts: string;
+      payload: Record<string, any>;
+    }>;
+  }): Promise<TraceIngestEvent[]> {
+    const createdAt = new Date().toISOString();
+    const records = args.events.map((event) => {
+      const record: TraceIngestEvent = {
+        id: randomUUID(),
+        requestId: args.requestId,
+        localUserUuid: args.localUserUuid,
+        eventType: event.eventType,
+        threadId: event.threadId,
+        messageId: event.messageId ?? null,
+        ts: event.ts,
+        payload: event.payload,
+        createdAt,
+      };
+      this.traceIngestEvents.set(record.id, record);
+      return record;
+    });
+    return records;
   }
 }
