@@ -94,6 +94,9 @@ function buildGateInput(packet: PacketInput): {
  */
 export function runGatesPipeline(packet: PacketInput): GatesPipelineOutput {
   const { gateInput, messageText, captureUrls } = buildGateInput(packet);
+
+  // Run gates in order
+  const normalizeModality = runNormalizeModality(gateInput);
   const extracted = extractUrls(messageText);
   const inlineUrls = extracted.urls;
   const urlWarningsCount = extracted.warnings.length;
@@ -102,9 +105,6 @@ export function runGatesPipeline(packet: PacketInput): GatesPipelineOutput {
     .map((url) => redactUrlForTrace(url))
     .filter((url): url is string => Boolean(url))
     .slice(0, 10);
-
-  // Run gates in order
-  const normalizeModality = runNormalizeModality(gateInput);
   const intent = runIntentGate(gateInput);
   const sentinel = runSentinelGate(gateInput);
   const lattice = runLattice(gateInput);
