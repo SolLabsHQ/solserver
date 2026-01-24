@@ -62,6 +62,14 @@ const JournalOfferSchema = z.object({
   offerEligible: z.boolean(),
 }).strict();
 
+const LibrarianGateSchema = z.object({
+  version: z.literal("v0"),
+  pruned_refs: z.number().int().min(0),
+  unsupported_claims: z.number().int().min(0),
+  support_score: z.number().min(0).max(1),
+  verdict: z.enum(["pass", "prune", "flag"]),
+}).strict();
+
 const OutputEnvelopeMetaKeys = [
   "meta_version",
   "trace_run_id",
@@ -81,6 +89,7 @@ const OutputEnvelopeMetaKeys = [
   "mood_anchor",
   "journal_offer",
   "journalOffer",
+  "librarian_gate",
 ] as const;
 
 export const OUTPUT_ENVELOPE_META_ALLOWED_KEYS = new Set<string>(OutputEnvelopeMetaKeys);
@@ -104,6 +113,7 @@ const OutputEnvelopeMetaSchema = z.object({
   mood_anchor: z.string().nullable().optional(),
   journalOffer: JournalOfferSchema.optional(),
   journal_offer: JournalOfferSchema.optional(),
+  librarian_gate: LibrarianGateSchema.optional(),
 })
   .strip()
   .superRefine((value, ctx) => {

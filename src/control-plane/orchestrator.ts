@@ -11,6 +11,7 @@ import {
 import { postOutputLinter, type PostLinterViolation, type PostLinterBlockResult, type DriverBlockEnforcementMode } from "../gates/post_linter";
 import { runEvidenceIntake } from "../gates/evidence_intake";
 import { EvidenceValidationError } from "../gates/evidence_validation_error";
+import { applyLibrarianGate } from "../gates/librarian_gate";
 import {
   deriveUsedEvidenceIds,
   extractClaims,
@@ -504,6 +505,9 @@ function normalizeOutputEnvelopeForResponse(envelope: OutputEnvelope): OutputEnv
   if (envelope.meta.capture_suggestion !== undefined) {
     meta.capture_suggestion = envelope.meta.capture_suggestion;
   }
+  if (envelope.meta.librarian_gate !== undefined) {
+    meta.librarian_gate = envelope.meta.librarian_gate;
+  }
   if (envelope.meta.journalOffer !== undefined) {
     meta.journalOffer = envelope.meta.journalOffer;
   } else if (envelope.meta.journal_offer !== undefined) {
@@ -822,6 +826,48 @@ export async function runOrchestrationPipeline(args: {
     }
 
     return { ok: true, envelope: normalized };
+  };
+
+  const runLibrarianGate = async (args: {
+    envelope: OutputEnvelope;
+    attempt: 0 | 1;
+    evidencePack: EvidencePack | null;
+  }): Promise<OutputEnvelope> => {
+    const result = applyLibrarianGate({
+      envelope: args.envelope,
+      evidencePack: args.evidencePack,
+    });
+
+    if (!result) {
+      return args.envelope;
+    }
+
+    const status = result.stats.verdict === "flag" ? "warning" : "completed";
+
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "output_gates",
+      status,
+      summary: `Librarian gate ${result.stats.verdict}`,
+      metadata: {
+        kind: "librarian_gate",
+        attempt: args.attempt,
+        claimCount: result.stats.claimCount,
+        refsBefore: result.stats.refsBefore,
+        refsAfter: result.stats.refsAfter,
+        prunedRefs: result.stats.prunedRefs,
+        unsupportedClaims: result.stats.unsupportedClaims,
+        supportScore: result.stats.supportScore,
+        verdict: result.stats.verdict,
+        ...(result.stats.reasonCodes.length > 0
+          ? { reasonCodes: result.stats.reasonCodes }
+          : {}),
+      },
+    });
+
+    return result.envelope;
   };
 
   const shouldCaptureModelIo =
@@ -1403,8 +1449,14 @@ export async function runOrchestrationPipeline(args: {
             return;
           }
 
-          const evidenceGate0 = await runEvidenceOutputGates({
+          const librarianEnvelope0 = await runLibrarianGate({
             envelope: envelope0.envelope,
+            attempt: 0,
+            evidencePack,
+          });
+
+          const evidenceGate0 = await runEvidenceOutputGates({
+            envelope: librarianEnvelope0,
             attempt: 0,
             evidencePack,
             transmissionId,
@@ -1610,8 +1662,14 @@ export async function runOrchestrationPipeline(args: {
             return;
           }
 
-          const evidenceGate1 = await runEvidenceOutputGates({
+          const librarianEnvelope1 = await runLibrarianGate({
             envelope: envelope1.envelope,
+            attempt: 1,
+            evidencePack,
+          });
+
+          const evidenceGate1 = await runEvidenceOutputGates({
+            envelope: librarianEnvelope1,
             attempt: 1,
             evidencePack,
             transmissionId,
@@ -1909,8 +1967,14 @@ export async function runOrchestrationPipeline(args: {
       });
     }
 
-    const evidenceGate0 = await runEvidenceOutputGates({
+    const librarianEnvelope0 = await runLibrarianGate({
       envelope: envelope0.envelope,
+      attempt: 0,
+      evidencePack,
+    });
+
+    const evidenceGate0 = await runEvidenceOutputGates({
+      envelope: librarianEnvelope0,
       attempt: 0,
       evidencePack,
       transmissionId: transmission.id,
@@ -2085,8 +2149,14 @@ export async function runOrchestrationPipeline(args: {
         });
       }
 
-      const evidenceGate1 = await runEvidenceOutputGates({
+      const librarianEnvelope1 = await runLibrarianGate({
         envelope: envelope1.envelope,
+        attempt: 1,
+        evidencePack,
+      });
+
+      const evidenceGate1 = await runEvidenceOutputGates({
+        envelope: librarianEnvelope1,
         attempt: 1,
         evidencePack,
         transmissionId: transmission.id,

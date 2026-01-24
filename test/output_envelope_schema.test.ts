@@ -31,6 +31,23 @@ describe("OutputEnvelopeSchema strictness", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts librarian_gate meta", () => {
+    const result = OutputEnvelopeSchema.safeParse({
+      assistant_text: "shape:\n- Arc: ok\n- Active: ok\n- Parked: ok\n- Decisions: ok\n- Next: ok",
+      meta: {
+        librarian_gate: {
+          version: "v0",
+          pruned_refs: 1,
+          unsupported_claims: 0,
+          support_score: 1,
+          verdict: "pass",
+        },
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
+
   it("accepts journal suggestion with suggested_date", () => {
     const result = OutputEnvelopeSchema.safeParse({
       assistant_text: "shape:\n- Arc: ok\n- Active: ok\n- Parked: ok\n- Decisions: ok\n- Next: ok",

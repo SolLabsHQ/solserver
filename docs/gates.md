@@ -1,17 +1,18 @@
 # Gates: canonical catalog + routing (first pass)
 
-This document captures the current SolServer gate catalog, routing order, and trace fields as implemented today. It is intended as a canonical reference for gate wiring and future additions (e.g., `librarian_gate`).
+This document captures the current SolServer gate catalog, routing order, and trace fields as implemented today. It is intended as a canonical reference for gate wiring, including `librarian_gate`.
 
 ## Chat flow routing (current)
 
 Ordered with exact call sites:
 
-1. **Evidence intake** (`runEvidenceIntake`) — URL extraction + auto-capture merge + evidence validation + persistence. Executed before pre-model gates. 【F:src/control-plane/orchestrator.ts†L935-L977】【F:src/gates/evidence_intake.ts†L223-L268】
-2. **Pre-model gates pipeline** (`runGatesPipeline`) — ordered: normalize/modality → gate_url_extraction → intent → sentinel → lattice (stub). 【F:src/control-plane/orchestrator.ts†L1040-L1048】【F:src/gates/gates_pipeline.ts†L89-L162】
-3. **Model call** (`runModelAttempt`) — executed after prompt pack assembly. 【F:src/control-plane/orchestrator.ts†L1161-L1287】【F:src/control-plane/orchestrator.ts†L1345-L1365】
-4. **OutputEnvelope parse + schema validation** (`parseOutputEnvelope` with `OutputEnvelopeSchema.safeParse`). 【F:src/control-plane/orchestrator.ts†L644-L727】【F:src/contracts/output_envelope.ts†L217-L225】
-5. **Evidence output gates** (`runEvidenceOutputGates`) — binding then budget. 【F:src/control-plane/orchestrator.ts†L765-L821】【F:src/gates/evidence_output_gates.ts†L70-L218】
-6. **Post-output linter + driver_block_output_enforcement** (`postOutputLinter` + per-block trace; strict failure is `driver_block_enforcement`). 【F:src/control-plane/orchestrator.ts†L1445-L1489】【F:src/gates/post_linter.ts†L121-L209】【F:src/control-plane/orchestrator.ts†L1756-L1794】
+1. **Evidence intake** (`runEvidenceIntake`) — URL extraction + auto-capture merge + evidence validation + persistence. Executed before pre-model gates. 【F:src/control-plane/orchestrator.ts†L981-L1015】【F:src/gates/evidence_intake.ts†L223-L268】
+2. **Pre-model gates pipeline** (`runGatesPipeline`) — ordered: normalize/modality → gate_url_extraction → intent → sentinel → lattice (stub). 【F:src/control-plane/orchestrator.ts†L1086-L1094】【F:src/gates/gates_pipeline.ts†L89-L162】
+3. **Model call** (`runModelAttempt`) — executed after prompt pack assembly. 【F:src/control-plane/orchestrator.ts†L879-L935】【F:src/control-plane/orchestrator.ts†L1909-L1916】
+4. **OutputEnvelope parse + schema validation** (`parseOutputEnvelope` with `OutputEnvelopeSchema.safeParse`). 【F:src/control-plane/orchestrator.ts†L648-L766】【F:src/contracts/output_envelope.ts†L227-L235】
+5. **Librarian gate** (`runLibrarianGate`) — ghost_card-only claim ref pruning + scoring. 【F:src/control-plane/orchestrator.ts†L831-L871】【F:src/gates/librarian_gate.ts†L1-L157】
+6. **Evidence output gates** (`runEvidenceOutputGates`) — binding then budget. 【F:src/control-plane/orchestrator.ts†L769-L829】【F:src/gates/evidence_output_gates.ts†L70-L218】
+7. **Post-output linter + driver_block_output_enforcement** (`postOutputLinter` + per-block trace; strict failure is `driver_block_enforcement`). 【F:src/control-plane/orchestrator.ts†L1445-L1489】【F:src/gates/post_linter.ts†L121-L209】【F:src/control-plane/orchestrator.ts†L1756-L1794】
 
 > Note: The synaptic (memory) gate runs in the memory distillation worker flow, not in the chat request flow. 【F:src/worker.ts†L135-L206】
 
@@ -81,13 +82,21 @@ Ordered with exact call sites:
 - **Caps / limits:** None. 【F:src/gates/lattice.ts†L13-L17】
 
 ### output_envelope parse / schema validation
-- **Purpose:** Parse JSON, enforce schema/meta keys, and size limits. 【F:src/control-plane/orchestrator.ts†L644-L727】
-- **Function(s):** `parseOutputEnvelope`, `OutputEnvelopeSchema.safeParse`. 【F:src/control-plane/orchestrator.ts†L644-L727】【F:src/contracts/output_envelope.ts†L217-L225】
-- **Input shape:** `{ rawText, attempt }`. 【F:src/control-plane/orchestrator.ts†L644-L647】
-- **Output fields:** `{ ok: true, envelope }` or `{ ok: false, reason, issuesCount? }`. 【F:src/control-plane/orchestrator.ts†L644-L727】
-- **Warnings vs hard-fails:** Hard-fail on invalid JSON/schema or payload too large. 【F:src/control-plane/orchestrator.ts†L650-L726】
-- **Trace event:** `phase: "output_gates"`, `kind: "output_envelope"`, `rawLength`, `attempt`, `reason`, `issuesCount`. 【F:src/control-plane/orchestrator.ts†L651-L724】
+- **Purpose:** Parse JSON, enforce schema/meta keys, and size limits. 【F:src/control-plane/orchestrator.ts†L648-L766】
+- **Function(s):** `parseOutputEnvelope`, `OutputEnvelopeSchema.safeParse`. 【F:src/control-plane/orchestrator.ts†L648-L766】【F:src/contracts/output_envelope.ts†L227-L235】
+- **Input shape:** `{ rawText, attempt }`. 【F:src/control-plane/orchestrator.ts†L648-L651】
+- **Output fields:** `{ ok: true, envelope }` or `{ ok: false, reason, issuesCount? }`. 【F:src/control-plane/orchestrator.ts†L648-L766】
+- **Warnings vs hard-fails:** Hard-fail on invalid JSON/schema or payload too large. 【F:src/control-plane/orchestrator.ts†L654-L731】
+- **Trace event:** `phase: "output_gates"`, `kind: "output_envelope"`, `rawLength`, `attempt`, `reason`, `issuesCount`. 【F:src/control-plane/orchestrator.ts†L656-L724】
 - **Caps / limits:** MAX_OUTPUT_ENVELOPE_BYTES = 64KB. 【F:src/control-plane/orchestrator.ts†L628-L669】
+
+### librarian_gate
+- **Purpose:** Prune invalid claim refs for ghost cards and score support without rewriting `assistant_text`. 【F:src/gates/librarian_gate.ts†L1-L157】
+- **Function(s):** `applyLibrarianGate` + `runLibrarianGate`. 【F:src/gates/librarian_gate.ts†L1-L157】【F:src/control-plane/orchestrator.ts†L831-L871】
+- **Input shape:** `OutputEnvelope` (ghost_card) + `EvidencePack`. 【F:src/contracts/output_envelope.ts†L96-L147】【F:src/evidence/evidence_provider.ts†L1-L24】
+- **Output fields:** `meta.librarian_gate` (`version`, `pruned_refs`, `unsupported_claims`, `support_score`, `verdict`). 【F:src/contracts/output_envelope.ts†L65-L116】【F:src/gates/librarian_gate.ts†L120-L142】
+- **Warnings vs hard-fails:** No hard-fails; annotations only. 【F:src/gates/librarian_gate.ts†L120-L142】
+- **Trace event:** `phase: "output_gates"`, `kind: "librarian_gate"` with counts + verdict. 【F:src/control-plane/orchestrator.ts†L847-L868】
 
 ### evidence_binding
 - **Purpose:** Validate that claim evidence refs exist and spans are valid. 【F:src/gates/evidence_output_gates.ts†L70-L106】
@@ -154,29 +163,25 @@ Ordered with exact call sites:
 - Update `runNormalizeModality` to use URL count derived from `urlHintCount` + `captureUrlCount` (so normalize no longer depends on validated inline URLs computed earlier).
 - Keep the gate_url_extraction gate responsible for inline URL detection + warnings metadata. 【F:src/gates/gates_pipeline.ts†L44-L162】【F:src/gates/normalize_modality.ts†L17-L74】
 
-## Librarian gate insertion (recommended)
+## Librarian gate insertion (implemented)
 
-**Primary insertion point:** After `parseOutputEnvelope` succeeds and before `runEvidenceOutputGates`, so it can prune or score claim refs without rewriting `assistant_text`. 【F:src/control-plane/orchestrator.ts†L644-L727】【F:src/control-plane/orchestrator.ts†L765-L821】
+**Primary insertion point:** After `parseOutputEnvelope` succeeds and before `runEvidenceOutputGates`, so it can prune or score claim refs without rewriting `assistant_text`. 【F:src/control-plane/orchestrator.ts†L648-L766】【F:src/control-plane/orchestrator.ts†L769-L829】
 
 **Best structure to prune citations without rewriting text:** Operate on `OutputEnvelope.meta.claims` (evidence refs are scoped there). 【F:src/contracts/output_envelope.ts†L10-L15】【F:src/contracts/output_envelope.ts†L88-L106】
 
-**Exact orchestrator insertion location + available variables (attempt 0):** Insert between `envelope0` parse and `runEvidenceOutputGates` call. Variables in scope include `envelope0.envelope` (parsed output), `evidencePack`, and `gatesOutput` (intent/sentinel/etc). 【F:src/control-plane/orchestrator.ts†L1850-L1917】【F:src/control-plane/orchestrator.ts†L1046-L1050】【F:src/control-plane/orchestrator.ts†L1188-L1196】
+**Exact orchestrator insertion location + available variables (attempt 0):** Insert between `envelope0` parse and `runEvidenceOutputGates` call. Variables in scope include `envelope0.envelope` (parsed output), `evidencePack`, and `gatesOutput` (intent/sentinel/etc). 【F:src/control-plane/orchestrator.ts†L1918-L1976】【F:src/control-plane/orchestrator.ts†L1092-L1096】【F:src/control-plane/orchestrator.ts†L1225-L1234】
 
-**Minimal schema additions (proposed):**
-- `meta.support_score?: number`
-- `meta.unsupported_claim_ids?: string[]`
-- `meta.librarian_gate?: { version: string; pruned_refs: number; unsupported_claims: number }`
+**Schema addition (implemented):**
+- `meta.librarian_gate?: { version: "v0"; pruned_refs: number; unsupported_claims: number; support_score: number; verdict: "pass" | "prune" | "flag" }`
 
 **Trace event:** `phase: "output_gates"`, `kind: "librarian_gate"` with counts and reason codes.
 
 ## Test plan (for librarian gate)
 
 Suggested tests/locations:
-1. `test/librarian_gate.test.ts` — prunes invalid refs without mutating `assistant_text`.
-2. `test/output_envelope_meta.test.ts` — schema accepts new librarian meta fields.
-3. `test/evidence_output_gates.test.ts` — librarian-pruned refs pass binding/budget.
-4. `test/trace.test.ts` — trace contains `output_gates` event with `kind: "librarian_gate"`.
-5. `test/orchestrator.gates_order.test.ts` (new) — ensure librarian gate is between parse and evidence gates.
+1. `test/librarian_gate.test.ts` — prunes invalid refs without mutating `assistant_text`; trace includes `librarian_gate`.
+2. `test/output_envelope_schema.test.ts` — schema accepts `meta.librarian_gate`.
+3. `test/output_envelope.test.ts` — meta allowlist still strips unknown keys.
 
 ## Appendix: types referenced
 

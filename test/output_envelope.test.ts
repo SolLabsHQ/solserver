@@ -110,7 +110,17 @@ describe("OutputEnvelope v0-min", () => {
       headers: {
         "x-sol-test-output-envelope": JSON.stringify({
           assistant_text: SHAPE_ASSISTANT_TEXT,
-          meta: { meta_version: "v1", unexpected_key: "nope" },
+          meta: {
+            meta_version: "v1",
+            librarian_gate: {
+              version: "v0",
+              pruned_refs: 0,
+              unsupported_claims: 0,
+              support_score: 1,
+              verdict: "pass",
+            },
+            unexpected_key: "nope",
+          },
         }),
       },
       payload: {
@@ -123,6 +133,7 @@ describe("OutputEnvelope v0-min", () => {
     expect(response.statusCode).toBe(200);
     const body = response.json();
     expect(body.outputEnvelope.meta.meta_version).toBe("v1");
+    expect(body.outputEnvelope.meta.librarian_gate).toBeDefined();
     expect(body.outputEnvelope.meta.unexpected_key).toBeUndefined();
   });
 
