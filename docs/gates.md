@@ -160,6 +160,8 @@ Ordered with exact call sites:
 
 **Best structure to prune citations without rewriting text:** Operate on `OutputEnvelope.meta.claims` (evidence refs are scoped there). 【F:src/contracts/output_envelope.ts†L10-L15】【F:src/contracts/output_envelope.ts†L88-L106】
 
+**Exact orchestrator insertion location + available variables (attempt 0):** Insert between `envelope0` parse and `runEvidenceOutputGates` call. Variables in scope include `envelope0.envelope` (parsed output), `evidencePack`, and `gatesOutput` (intent/sentinel/etc). 【F:src/control-plane/orchestrator.ts†L1850-L1917】【F:src/control-plane/orchestrator.ts†L1046-L1050】【F:src/control-plane/orchestrator.ts†L1188-L1196】
+
 **Minimal schema additions (proposed):**
 - `meta.support_score?: number`
 - `meta.unsupported_claim_ids?: string[]`
@@ -182,3 +184,19 @@ Suggested tests/locations:
 - **OutputEnvelope / meta / claims**: `src/contracts/output_envelope.ts`. 【F:src/contracts/output_envelope.ts†L5-L230】
 - **EvidencePack**: `src/evidence/evidence_provider.ts`. 【F:src/evidence/evidence_provider.ts†L1-L24】
 - **EvidenceWarning**: `src/contracts/evidence_warning.ts`. 【F:src/contracts/evidence_warning.ts†L1-L13】
+
+## Clarifications (for librarian gate + schema)
+
+### Where do claims live in OutputEnvelope today?
+- **Claims live at `OutputEnvelope.meta.claims`** (not top-level). This is enforced by the meta schema and consumed by evidence output gates. 【F:src/contracts/output_envelope.ts†L65-L92】【F:src/gates/evidence_output_gates.ts†L56-L75】
+
+### Canonical ghost card indicator
+- The **canonical indicator** is `meta.display_hint === "ghost_card"`; ghost metadata is required only when this is set, and ghost_kind is required for ghost cards. 【F:src/contracts/output_envelope.ts†L96-L147】
+- **Where it is set:** memory distillation builds ghost envelopes with `display_hint: "ghost_card"` and `ghost_kind`. 【F:src/memory/ghost_envelope.ts†L16-L30】
+
+### Evidence intake caps (MAX_CLAIMS) meaning
+- **`MAX_CLAIMS` limits evidence-side claim map entries** in `PacketInput.evidence.claims` (not model OutputEnvelope claims). 【F:src/gates/evidence_intake.ts†L7-L189】【F:src/contracts/chat.ts†L86-L101】
+
+### Trace naming uniformity (gate_* vs url_extraction)
+- **Today:** phases are `gate_normalize_modality`, `gate_intent`, `gate_sentinel`, `gate_lattice`, but URL extraction uses `url_extraction`. 【F:src/control-plane/orchestrator.ts†L1040-L1117】
+- **Smallest uniform rename:** rename trace phase from `url_extraction` → `gate_url_extraction` (and update the ordering contract + tests) to match the gate_* convention. 【F:src/control-plane/orchestrator.ts†L1040-L1048】【F:src/control-plane/orchestrator.ts†L1086-L1117】
