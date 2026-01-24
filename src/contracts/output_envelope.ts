@@ -49,6 +49,18 @@ const CaptureSuggestionSchema = z.object({
 });
 const GhostKindSchema = z.enum(["memory_artifact", "journal_moment", "action_proposal"]);
 const GhostRigorSchema = z.enum(["normal", "high"]);
+const JournalOfferSchema = z.object({
+  momentId: z.string().min(1),
+  momentType: z.enum(["overwhelm", "vent", "insight", "gratitude", "decision", "fun"]),
+  phase: z.enum(["rising", "peak", "downshift", "settled"]),
+  confidence: z.enum(["low", "med", "high"]),
+  evidenceSpan: z.object({
+    startMessageId: z.string().min(1),
+    endMessageId: z.string().min(1),
+  }).strict(),
+  why: z.array(z.string()).max(6).optional(),
+  offerEligible: z.boolean(),
+}).strict();
 
 const OutputEnvelopeMetaKeys = [
   "meta_version",
@@ -67,6 +79,8 @@ const OutputEnvelopeMetaKeys = [
   "snippet",
   "fact_null",
   "mood_anchor",
+  "journal_offer",
+  "journalOffer",
 ] as const;
 
 export const OUTPUT_ENVELOPE_META_ALLOWED_KEYS = new Set<string>(OutputEnvelopeMetaKeys);
@@ -88,6 +102,8 @@ const OutputEnvelopeMetaSchema = z.object({
   snippet: z.string().nullable().optional(),
   fact_null: z.boolean().optional(),
   mood_anchor: z.string().nullable().optional(),
+  journalOffer: JournalOfferSchema.optional(),
+  journal_offer: JournalOfferSchema.optional(),
 })
   .strip()
   .superRefine((value, ctx) => {

@@ -4,6 +4,7 @@ import { runGatesPipeline } from "../gates/gates_pipeline";
 import {
   getLatestThreadMemento,
   putThreadMemento,
+  updateThreadMementoAffect,
   retrieveContext,
   retrievalLogShape,
 } from "./retrieval";
@@ -34,6 +35,7 @@ import {
   type OutputEnvelope,
 } from "../contracts/output_envelope";
 import type { PacketInput, ModeDecision, NotificationPolicy } from "../contracts/chat";
+import { classifyJournalOffer, type MoodSignal } from "../memory/journal_offer_classifier";
 
 export type OrchestrationSource = "api" | "worker";
 export type SystemPersona = NonNullable<ModeDecision["personaLabel"]>;
@@ -126,6 +128,31 @@ export function resolveSafetyIsUrgent(args: {
   }
 
   return isUrgent;
+}
+
+function resolvePacketMessageId(packet: PacketInput, transmission: Transmission): string {
+  const meta = (packet.meta ?? {}) as Record<string, any>;
+  const candidate =
+    meta.message_id
+    ?? meta.messageId
+    ?? packet.clientRequestId
+    ?? transmission.id;
+  return String(candidate);
+}
+
+function resolveAvoidPeakOverwhelm(packet: PacketInput): boolean | undefined {
+  const meta = (packet.meta ?? {}) as Record<string, any>;
+  const journalStyle =
+    meta.cpb_journal_style
+    ?? meta.cpbJournalStyle
+    ?? meta.journalStyle
+    ?? null;
+
+  if (!journalStyle || typeof journalStyle !== "object") return undefined;
+  const settings = (journalStyle as any).settings;
+  const offerTiming = settings?.offer_timing ?? settings?.offerTiming;
+  const value = offerTiming?.avoid_peak_overwhelm ?? offerTiming?.avoidPeakOverwhelm;
+  return typeof value === "boolean" ? value : undefined;
 }
 
 type EnforcementFailureMetadata = {
@@ -421,6 +448,43 @@ function applyEvidenceMeta(
   return { ...envelope, meta };
 }
 
+function normalizeOutputEnvelopeForValidation(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object") return payload;
+
+  const envelope = { ...(payload as Record<string, any>) };
+  const meta = envelope.meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+    return envelope;
+  }
+
+  const normalizedMeta: Record<string, any> = { ...meta };
+  const ghostType = normalizedMeta.ghost_type ?? normalizedMeta.ghostType;
+  const ghostKind = normalizedMeta.ghost_kind ?? normalizedMeta.ghostKind;
+
+  if (!ghostKind && typeof ghostType === "string") {
+    const mapping: Record<string, string> = {
+      memory: "memory_artifact",
+      journal: "journal_moment",
+      action: "action_proposal",
+    };
+    const mapped = mapping[ghostType];
+    if (mapped) {
+      normalizedMeta.ghost_kind = mapped;
+    }
+  }
+
+  if (normalizedMeta.ghost_kind === undefined && normalizedMeta.ghostKind !== undefined) {
+    normalizedMeta.ghost_kind = normalizedMeta.ghostKind;
+  }
+
+  delete normalizedMeta.ghost_type;
+  delete normalizedMeta.ghostType;
+  delete normalizedMeta.ghostKind;
+
+  envelope.meta = normalizedMeta;
+  return envelope;
+}
+
 function normalizeOutputEnvelopeForResponse(envelope: OutputEnvelope): OutputEnvelope {
   if (!envelope.meta) return envelope;
 
@@ -439,6 +503,11 @@ function normalizeOutputEnvelopeForResponse(envelope: OutputEnvelope): OutputEnv
   }
   if (envelope.meta.capture_suggestion !== undefined) {
     meta.capture_suggestion = envelope.meta.capture_suggestion;
+  }
+  if (envelope.meta.journalOffer !== undefined) {
+    meta.journalOffer = envelope.meta.journalOffer;
+  } else if (envelope.meta.journal_offer !== undefined) {
+    meta.journalOffer = envelope.meta.journal_offer;
   }
 
   return Object.keys(meta).length > 0
@@ -603,6 +672,7 @@ export async function runOrchestrationPipeline(args: {
     let strippedMetaKeys: string[] = [];
     try {
       parsed = JSON.parse(args.rawText);
+      parsed = normalizeOutputEnvelopeForValidation(parsed);
     } catch (error) {
       const meta = buildOutputEnvelopeMetadata({
         attempt: args.attempt,
@@ -976,6 +1046,17 @@ export async function runOrchestrationPipeline(args: {
   // Run gates pipeline
   const gatesOutput = runGatesPipeline(packet);
   const safetyIsUrgent = resolveSafetyIsUrgent({ results: gatesOutput.results, log });
+  const moodSignal: MoodSignal | null = gatesOutput.sentinel.mood ?? null;
+  const messageIdForAffect = resolvePacketMessageId(packet, transmission);
+  const affectPoint = moodSignal
+    ? {
+        endMessageId: messageIdForAffect,
+        label: moodSignal.label,
+        intensity: moodSignal.intensity,
+        confidence: moodSignal.confidence,
+        source: "server" as const,
+      }
+    : null;
 
   const resolvedAfterGates = resolveNotificationPolicy({
     source: request.source,
@@ -1433,7 +1514,7 @@ export async function runOrchestrationPipeline(args: {
                 {
                   plane: "memento",
                   threadId: packet.threadId,
-                  mementoId: m.id,
+                  mementoId: m.mementoId,
                   source: "model",
                 },
                 "control_plane.memento_auto_put"
@@ -1640,7 +1721,7 @@ export async function runOrchestrationPipeline(args: {
                 {
                   plane: "memento",
                   threadId: packet.threadId,
-                  mementoId: m.id,
+                  mementoId: m.mementoId,
                   source: "model",
                 },
                 "control_plane.memento_auto_put"
@@ -1937,7 +2018,7 @@ export async function runOrchestrationPipeline(args: {
           next: attempt0.mementoDraft.next ?? [],
         });
         threadMemento = m;
-        log.info({ plane: "memento", threadId: packet.threadId, mementoId: m.id, source: "model" }, "control_plane.memento_auto_put");
+        log.info({ plane: "memento", threadId: packet.threadId, mementoId: m.mementoId, source: "model" }, "control_plane.memento_auto_put");
       }
     } else {
       const correctionText = buildCorrectionText(lint0.violations, promptPack.driverBlocks);
@@ -2113,7 +2194,7 @@ export async function runOrchestrationPipeline(args: {
             next: attempt1.mementoDraft.next ?? [],
           });
           threadMemento = m;
-          log.info({ plane: "memento", threadId: packet.threadId, mementoId: m.id, source: "model" }, "control_plane.memento_auto_put");
+          log.info({ plane: "memento", threadId: packet.threadId, mementoId: m.mementoId, source: "model" }, "control_plane.memento_auto_put");
         }
       } else {
         const stubAssistant = buildEnforcementStub();
@@ -2199,6 +2280,40 @@ export async function runOrchestrationPipeline(args: {
       traceRunId: traceRun.id,
       retryable: true,
     });
+  }
+
+  let offerMemento = getLatestThreadMemento(packet.threadId, { includeDraft: true });
+  if (affectPoint) {
+    const updated = updateThreadMementoAffect({
+      threadId: packet.threadId,
+      point: affectPoint,
+    });
+    if (updated) {
+      offerMemento = updated;
+      if (threadMemento && updated.mementoId === threadMemento.mementoId) {
+        threadMemento = updated;
+      }
+    }
+  }
+
+  const avoidPeakOverwhelm = resolveAvoidPeakOverwhelm(packet);
+  const offerSpanStart = offerMemento?.affect.points[0]?.endMessageId ?? messageIdForAffect;
+  const offerSpanEnd = offerMemento?.affect.points.at(-1)?.endMessageId ?? messageIdForAffect;
+  const journalOffer = offerMemento && moodSignal
+    ? classifyJournalOffer({
+        mood: moodSignal,
+        risk: gatesOutput.sentinel.risk,
+        phase: offerMemento.affect.rollup.phase,
+        avoidPeakOverwhelm,
+        evidenceSpan: { startMessageId: offerSpanStart, endMessageId: offerSpanEnd },
+      })
+    : null;
+
+  if (journalOffer) {
+    outputEnvelope = {
+      ...outputEnvelope,
+      meta: { ...(outputEnvelope.meta ?? {}), journalOffer: journalOffer },
+    };
   }
 
   await store.appendDeliveryAttempt({

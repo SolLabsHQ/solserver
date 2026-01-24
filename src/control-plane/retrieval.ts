@@ -43,16 +43,30 @@ const mementoDraftByThreadId = new Map<string, ThreadMementoSnapshot>();
 const mementoAcceptedByThreadId = new Map<string, ThreadMementoSnapshot>();
 
 export type ThreadMementoSnapshot = {
-  id: string;
+  mementoId: string;
   threadId: string;
-  createdAt: string;
-  version: "memento-v0";
+  createdTs: string;
+  version: "memento-v0.1";
 
   arc: string;
   active: string[];
   parked: string[];
   decisions: string[];
   next: string[];
+  affect: {
+    points: Array<{
+      endMessageId: string;
+      label: string;
+      intensity: number;
+      confidence: "low" | "med" | "high";
+      source: "server" | "device_hint";
+    }>;
+    rollup: {
+      phase: "rising" | "peak" | "downshift" | "settled";
+      intensityBucket: "low" | "med" | "high";
+      updatedAt: string;
+    };
+  };
 };
 
 function formatMementoSummary(m: ThreadMementoSnapshot): string {
@@ -67,6 +81,52 @@ function formatMementoSummary(m: ThreadMementoSnapshot): string {
   lines.push(`Next: ${m.next.length ? m.next.join(" | ") : "(none)"}`);
 
   return lines.join("\n");
+}
+
+const intensityBucketFor = (intensity: number): "low" | "med" | "high" => {
+  if (intensity >= 0.7) return "high";
+  if (intensity >= 0.34) return "med";
+  return "low";
+};
+
+const phaseFor = (points: ThreadMementoSnapshot["affect"]["points"]): "rising" | "peak" | "downshift" | "settled" => {
+  if (points.length === 0) return "settled";
+  if (points.length === 1) {
+    const intensity = points[0].intensity;
+    return intensity >= 0.7 ? "peak" : "settled";
+  }
+  const prev = points[points.length - 2].intensity;
+  const last = points[points.length - 1].intensity;
+  const delta = last - prev;
+  if (last >= 0.8 && Math.abs(delta) <= 0.05) return "peak";
+  if (delta >= 0.1) return "rising";
+  if (delta <= -0.1) return "downshift";
+  return "settled";
+};
+
+const defaultAffect = (): ThreadMementoSnapshot["affect"] => ({
+  points: [],
+  rollup: {
+    phase: "settled",
+    intensityBucket: "low",
+    updatedAt: new Date().toISOString(),
+  },
+});
+
+function updateAffectWithPoint(
+  existing: ThreadMementoSnapshot["affect"],
+  point: ThreadMementoSnapshot["affect"]["points"][number]
+): ThreadMementoSnapshot["affect"] {
+  const points = [...existing.points, point].slice(-5);
+  const latestIntensity = points.at(-1)?.intensity ?? 0;
+  return {
+    points,
+    rollup: {
+      phase: phaseFor(points),
+      intensityBucket: intensityBucketFor(latestIntensity),
+      updatedAt: new Date().toISOString(),
+    },
+  };
 }
 
 /**
@@ -84,17 +144,19 @@ export function putThreadMemento(args: {
   parked: string[];
   decisions: string[];
   next: string[];
+  affect?: ThreadMementoSnapshot["affect"];
 }): ThreadMementoSnapshot {
   const record: ThreadMementoSnapshot = {
-    id: crypto.randomUUID(),
+    mementoId: crypto.randomUUID(),
     threadId: args.threadId,
-    createdAt: new Date().toISOString(),
-    version: "memento-v0",
+    createdTs: new Date().toISOString(),
+    version: "memento-v0.1",
     arc: args.arc,
     active: args.active,
     parked: args.parked,
     decisions: args.decisions,
     next: args.next,
+    affect: args.affect ?? defaultAffect(),
   };
 
   mementoDraftByThreadId.set(args.threadId, record);
@@ -113,7 +175,7 @@ export function acceptThreadMemento(args: {
 }): ThreadMementoSnapshot | null {
   const draft = mementoDraftByThreadId.get(args.threadId);
   if (!draft) return null;
-  if (draft.id !== args.mementoId) return null;
+  if (draft.mementoId !== args.mementoId) return null;
 
   mementoAcceptedByThreadId.set(args.threadId, draft);
   mementoDraftByThreadId.delete(args.threadId);
@@ -131,7 +193,7 @@ export function declineThreadMemento(args: {
 }): ThreadMementoSnapshot | null {
   const draft = mementoDraftByThreadId.get(args.threadId);
   if (!draft) return null;
-  if (draft.id !== args.mementoId) return null;
+  if (draft.mementoId !== args.mementoId) return null;
 
   mementoDraftByThreadId.delete(args.threadId);
   // Return the declined draft so callers can treat this as applied=true.
@@ -151,7 +213,7 @@ export function revokeThreadMemento(args: {
 }): ThreadMementoSnapshot | null {
   const accepted = mementoAcceptedByThreadId.get(args.threadId);
   if (!accepted) return null;
-  if (accepted.id !== args.mementoId) return null;
+  if (accepted.mementoId !== args.mementoId) return null;
 
   mementoAcceptedByThreadId.delete(args.threadId);
   return accepted;
@@ -176,6 +238,25 @@ export function getLatestThreadMemento(
   }
 
   return accepted;
+}
+
+export function updateThreadMementoAffect(args: {
+  threadId: string;
+  point: ThreadMementoSnapshot["affect"]["points"][number];
+}): ThreadMementoSnapshot | null {
+  const draft = mementoDraftByThreadId.get(args.threadId);
+  if (draft) {
+    draft.affect = updateAffectWithPoint(draft.affect, args.point);
+    return draft;
+  }
+
+  const accepted = mementoAcceptedByThreadId.get(args.threadId);
+  if (accepted) {
+    accepted.affect = updateAffectWithPoint(accepted.affect, args.point);
+    return accepted;
+  }
+
+  return null;
 }
 
 /**
@@ -215,7 +296,7 @@ export async function retrieveContext(args: {
 
   return [
     {
-      id: m.id,
+      id: m.mementoId,
       kind: "memento",
       summary: formatMementoSummary(m),
     },
