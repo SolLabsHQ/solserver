@@ -80,7 +80,7 @@ describe("OutputEnvelope v0-min", () => {
     expect(response.headers["x-sol-trace-run-id"]).toBeTruthy();
   });
 
-  it("fails when claims are present but empty", async () => {
+  it("logs schema issues when full schema fails but v0-min passes", async () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/chat",
@@ -93,6 +93,37 @@ describe("OutputEnvelope v0-min", () => {
       payload: {
         packetType: "chat",
         threadId: "thread-output-envelope-004",
+        message: "Test message",
+        traceConfig: { level: "debug" },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.outputEnvelope).toBeDefined();
+
+    const traceRunId = response.headers["x-sol-trace-run-id"] as string;
+    expect(traceRunId).toBeTruthy();
+    const events = await store.getTraceEvents(traceRunId, { limit: 50 });
+    const warning = events.find((event) =>
+      event.metadata?.kind === "output_envelope_schema_warning"
+    );
+    expect(warning).toBeTruthy();
+  });
+
+  it("fails when ghost_card output is missing required fields", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": JSON.stringify({
+          assistant_text: "Ghost draft",
+          meta: { display_hint: "ghost_card" },
+        }),
+      },
+      payload: {
+        packetType: "chat",
+        threadId: "thread-output-envelope-ghost-001",
         message: "Test message",
       },
     });

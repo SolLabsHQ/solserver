@@ -48,6 +48,28 @@ describe("OutputEnvelopeSchema strictness", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts shape and affect_signal meta", () => {
+    const result = OutputEnvelopeSchema.safeParse({
+      assistant_text: "ok",
+      meta: {
+        shape: {
+          arc: "Arc",
+          active: ["Active"],
+          parked: [],
+          decisions: [],
+          next: ["Next step"],
+        },
+        affect_signal: {
+          label: "insight",
+          intensity: 0.8,
+          confidence: 0.7,
+        },
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
+
   it("accepts journal suggestion with suggested_date", () => {
     const result = OutputEnvelopeSchema.safeParse({
       assistant_text: "shape:\n- Arc: ok\n- Active: ok\n- Parked: ok\n- Decisions: ok\n- Next: ok",

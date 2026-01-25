@@ -120,19 +120,25 @@ describe("/v1/memento/decision", () => {
 
   it("accepts a draft memento and is idempotent on repeat accept", async () => {
     const threadId = "t-memento-accept";
-    const clientRequestId = "memento-accept-1";
 
-    // Create a draft memento via chat.
+    // Create a draft memento via explicit endpoint.
     const chat = await app.inject({
       method: "POST",
-      url: "/v1/chat",
-      payload: { threadId, clientRequestId, message: "hello memento" },
+      url: "/v1/memento",
+      payload: {
+        threadId,
+        arc: "Draft arc",
+        active: ["Step 1"],
+        parked: [],
+        decisions: [],
+        next: ["Next step"],
+      },
     });
 
     expect(chat.statusCode).toBe(200);
     const chatJson = chat.json();
-    expect(chatJson.threadMemento).toBeTruthy();
-    const mementoId = chatJson.threadMemento.mementoId as string;
+    expect(chatJson.memento).toBeTruthy();
+    const mementoId = chatJson.memento.mementoId as string;
     expect(typeof mementoId).toBe("string");
 
     const accept1 = await app.inject({
@@ -168,19 +174,25 @@ describe("/v1/memento/decision", () => {
 
   it("declines a draft memento and repeat decline is not_found", async () => {
     const threadId = "t-memento-decline";
-    const clientRequestId = "memento-decline-1";
 
-    // Create a draft memento via chat.
+    // Create a draft memento via explicit endpoint.
     const chat = await app.inject({
       method: "POST",
-      url: "/v1/chat",
-      payload: { threadId, clientRequestId, message: "hello decline" },
+      url: "/v1/memento",
+      payload: {
+        threadId,
+        arc: "Draft arc",
+        active: ["Step 1"],
+        parked: [],
+        decisions: [],
+        next: ["Next step"],
+      },
     });
 
     expect(chat.statusCode).toBe(200);
     const chatJson = chat.json();
-    expect(chatJson.threadMemento).toBeTruthy();
-    const mementoId = chatJson.threadMemento.mementoId as string;
+    expect(chatJson.memento).toBeTruthy();
+    const mementoId = chatJson.memento.mementoId as string;
 
     const decline1 = await app.inject({
       method: "POST",

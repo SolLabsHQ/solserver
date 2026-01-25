@@ -106,7 +106,7 @@ describe("Step 6 - retrieval seam", () => {
     expect(items).toEqual([]);
   });
 
-  it("retrieveContext uses accepted-only memento (draft is ignored)", async () => {
+  it("retrieveContext includes pinned memento (draft is ignored)", async () => {
     const draft = putThreadMemento({
       threadId: "t1",
       arc: "SolServer v0 build",
@@ -138,7 +138,7 @@ describe("Step 6 - retrieval seam", () => {
     });
 
     expect(items).toHaveLength(1);
-    expect(items[0].kind).toBe("memento");
+    expect(items[0].kind).toBe("bookmark");
 
     // Summary format should stay stable and human-readable.
     expect(items[0].summary).toContain("Arc:");
@@ -221,7 +221,7 @@ describe("Step 6 - retrieval seam", () => {
       message: "hello",
     });
     expect(before).toHaveLength(1);
-    expect(before[0].kind).toBe("memento");
+    expect(before[0].kind).toBe("bookmark");
 
     // Revoke removes the accepted memento.
     const revoked = revokeThreadMemento({ threadId: "t1", mementoId: draft.mementoId });
