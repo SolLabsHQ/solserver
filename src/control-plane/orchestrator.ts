@@ -784,6 +784,8 @@ export async function runOrchestrationPipeline(args: {
   const llmProvider = (process.env.LLM_PROVIDER ?? "fake").toLowerCase() === "openai"
     ? "openai"
     : "fake";
+  const providerSource = process.env.LLM_PROVIDER ? "env" : "default";
+  const apiKeyPresent = Boolean(process.env.OPENAI_API_KEY);
 
   const modelSelection = selectModel({
     solEnv: process.env.SOL_ENV,
@@ -1123,8 +1125,25 @@ export async function runOrchestrationPipeline(args: {
       phase: "model_call",
       status: "started",
       summary: `Calling model provider (Attempt ${args.attempt})`,
-      metadata: { attempt: args.attempt },
+      metadata: {
+        attempt: args.attempt,
+        provider: llmProvider,
+        model: modelSelection.model,
+        source: providerSource,
+      },
     });
+
+    if (args.logger) {
+      args.logger.info(
+        {
+          evt: "llm.provider.used",
+          provider: llmProvider,
+          model: modelSelection.model,
+          source: providerSource,
+        },
+        "llm.provider.used"
+      );
+    }
 
     const providerInputText = toSinglePromptText(args.promptPack);
     const meta = llmProvider === "openai"
@@ -1180,6 +1199,31 @@ export async function runOrchestrationPipeline(args: {
     modeLabel: modeDecision?.modeLabel ?? undefined,
     traceRunId: traceRun.id,
   });
+
+  if (llmProvider === "openai" && !apiKeyPresent) {
+    await store.appendDeliveryAttempt({
+      transmissionId: transmission.id,
+      provider: llmProvider,
+      status: "failed",
+      error: "openai_api_key_missing",
+    });
+
+    await store.updateTransmissionStatus({
+      transmissionId: transmission.id,
+      status: "failed",
+      statusCode: 500,
+      retryable: false,
+      errorCode: "openai_api_key_missing",
+    });
+
+    log.info({ evt: "chat.responded", statusCode: 500, attemptsUsed: 0 }, "chat.responded");
+    return respond(500, {
+      error: "openai_api_key_missing",
+      transmissionId: transmission.id,
+      traceRunId: traceRun.id,
+      retryable: false,
+    });
+  }
 
   if (llmProvider === "openai" && !process.env.OPENAI_MODEL) {
     await store.updateTransmissionStatus({
@@ -1305,7 +1349,9 @@ export async function runOrchestrationPipeline(args: {
     evt: "llm.provider.selected",
     provider: llmProvider,
     model: modelSelection.model,
-    source: modelSelection.source,
+    source: providerSource,
+    modelSource: modelSelection.source,
+    apiKeyPresent: llmProvider === "openai" ? Boolean(process.env.OPENAI_API_KEY) : undefined,
     personaLabel: resolvePersonaLabel(modeDecision),
     ...(modelSelection.tier ? { tier: modelSelection.tier } : {}),
   }, "llm.provider.selected");
