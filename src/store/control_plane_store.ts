@@ -111,6 +111,34 @@ export type TraceIngestEvent = {
   createdAt: string;
 };
 
+export type ThreadMementoLatestRecord = {
+  mementoId: string;
+  threadId: string;
+  createdTs: string;
+  updatedAt: string;
+  version: "memento-v0.1";
+  arc: string;
+  active: string[];
+  parked: string[];
+  decisions: string[];
+  next: string[];
+  affect: {
+    points: Array<{
+      endMessageId: string;
+      label: string;
+      intensity: number;
+      confidence: "low" | "med" | "high";
+      source: "server" | "device_hint" | "model";
+      ts?: string;
+    }>;
+    rollup: {
+      phase: "rising" | "peak" | "downshift" | "settled";
+      intensityBucket: "low" | "med" | "high";
+      updatedAt: string;
+    };
+  };
+};
+
 export type MemoryDistillStatus = "pending" | "completed" | "failed";
 
 export type MemoryDistillRequest = {
@@ -452,6 +480,10 @@ export interface ControlPlaneStore {
       payload: Record<string, any>;
     }>;
   }): Promise<TraceIngestEvent[]>;
+
+  // ThreadMementoLatest (v0.1)
+  getThreadMementoLatest(args: { threadId: string }): Promise<ThreadMementoLatestRecord | null>;
+  upsertThreadMementoLatest(args: { memento: ThreadMementoLatestRecord }): Promise<void>;
 }
 
 export class MemoryControlPlaneStore implements ControlPlaneStore {
@@ -474,6 +506,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
   private memoryArtifacts = new Map<string, MemoryArtifact>(); // memoryId -> artifact
   private journalEntries = new Map<string, JournalEntry>(); // entryId -> entry
   private traceIngestEvents = new Map<string, TraceIngestEvent>(); // id -> event
+  private threadMementoLatest = new Map<string, ThreadMementoLatestRecord>(); // threadId -> latest
   private memoryAudit = new Map<string, {
     id: string;
     userId: string;
@@ -1234,5 +1267,13 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       return record;
     });
     return records;
+  }
+
+  async getThreadMementoLatest(args: { threadId: string }): Promise<ThreadMementoLatestRecord | null> {
+    return this.threadMementoLatest.get(args.threadId) ?? null;
+  }
+
+  async upsertThreadMementoLatest(args: { memento: ThreadMementoLatestRecord }): Promise<void> {
+    this.threadMementoLatest.set(args.memento.threadId, args.memento);
   }
 }

@@ -18,6 +18,7 @@ import {
   acceptThreadMemento,
   declineThreadMemento,
   revokeThreadMemento,
+  sanitizeThreadMementoLatest,
 } from "../control-plane/retrieval";
 import type { ControlPlaneStore } from "../store/control_plane_store";
 import { MemoryControlPlaneStore } from "../store/control_plane_store";
@@ -27,6 +28,10 @@ export async function chatRoutes(
   opts: { store?: ControlPlaneStore } = {}
 ) {
   const store = opts.store ?? new MemoryControlPlaneStore();
+  const loadThreadMementoLatest = async (threadId: string) => {
+    const record = await store.getThreadMementoLatest({ threadId });
+    return record ? sanitizeThreadMementoLatest(record as any) : null;
+  };
 
   // Dev-only async completion guard for simulated 202 (prevents duplicate background timers per transmission).
   const pendingCompletions = new Set<string>();
@@ -103,7 +108,10 @@ export async function chatRoutes(
       reply.header("x-sol-trace-run-id", traceRun.id);
     }
 
-    const threadMemento = getLatestThreadMemento(transmission.threadId, { includeDraft: true });
+    const threadMementoRecord = await store.getThreadMementoLatest({ threadId: transmission.threadId });
+    const threadMemento = threadMementoRecord
+      ? sanitizeThreadMementoLatest(threadMementoRecord as any)
+      : null;
 
     return {
       ok: true,
@@ -169,7 +177,7 @@ export async function chatRoutes(
       label: z.string().min(1),
       intensity: z.number().min(0).max(1),
       confidence: z.enum(["low", "med", "high"]),
-      source: z.enum(["server", "device_hint"]),
+      source: z.enum(["server", "device_hint", "model"]),
     }).strict()).max(5),
     rollup: z.object({
       phase: z.enum(["rising", "peak", "downshift", "settled"]),
@@ -539,7 +547,7 @@ export async function chatRoutes(
               assistant: cached.assistant,
               outputEnvelope: replayEnvelope,
               idempotentReplay: true,
-              threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
+              threadMemento: await loadThreadMementoLatest(existing.threadId),
               evidenceSummary: emptyEvidenceSummary,
               notification_policy: policy,
               ...(existing.forcedPersona ? { forced_persona: existing.forcedPersona } : {}),
@@ -555,7 +563,7 @@ export async function chatRoutes(
             status: existing.status,
             pending: true,
             idempotentReplay: true,
-            threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
+            threadMemento: await loadThreadMementoLatest(existing.threadId),
             evidenceSummary: emptyEvidenceSummary,
             notification_policy: policy,
             ...(existing.forcedPersona ? { forced_persona: existing.forcedPersona } : {}),
@@ -572,7 +580,7 @@ export async function chatRoutes(
             status: existing.status,
             pending: true,
             idempotentReplay: true,
-            threadMemento: getLatestThreadMemento(existing.threadId, { includeDraft: true }),
+            threadMemento: await loadThreadMementoLatest(existing.threadId),
             evidenceSummary: emptyEvidenceSummary,
             notification_policy: policy,
             ...(existing.forcedPersona ? { forced_persona: existing.forcedPersona } : {}),
@@ -659,7 +667,7 @@ export async function chatRoutes(
         status: transmission.status,
         pending: true,
         evidenceSummary,
-        threadMemento: getLatestThreadMemento(packet.threadId, { includeDraft: true }),
+        threadMemento: await loadThreadMementoLatest(packet.threadId),
         notification_policy: policy,
         ...(transmission.forcedPersona ? { forced_persona: transmission.forcedPersona } : {}),
       });

@@ -32,10 +32,9 @@ Validators:
     version: "1.0",
     title: "ShapeFirst",
     scope: "global",
-    definition: `- For non-trivial responses (multi-step/multi-domain/>~8 lines): lead with 3–6 bullet topology.
+    definition: `- For non-trivial responses (multi-step/multi-domain/>~8 lines): consider a brief outline before details.
 - Then expand only as needed; avoid walls of text.
 Validators:
-- Must-have: 3–6 bullet "shape" section before details when complex.
 - Must-not: long prose first for multi-part answers.`,
     source: "system_shipped",
     approvedAt: "2026-01-11T00:00:00Z",

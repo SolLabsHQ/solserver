@@ -2,11 +2,17 @@ import { routeMode, resolvePersonaLabel } from "./router";
 import { buildPromptPack, toSinglePromptText, promptPackLogShape, withCorrectionSection, type PromptPack } from "./prompt_pack";
 import { runGatesPipeline } from "../gates/gates_pipeline";
 import {
-  getLatestThreadMemento,
-  putThreadMemento,
-  updateThreadMementoAffect,
   retrieveContext,
   retrievalLogShape,
+  getThreadMementoLatestCached,
+  setThreadMementoLatestCached,
+  updateLatestAffectWithPoint,
+  sanitizeThreadMementoLatest,
+  shouldPersistThreadMementoLatest,
+  noteThreadMementoLatestTurn,
+  markThreadMementoLatestPersisted,
+  type ThreadMementoLatestInternal,
+  type ThreadMementoLatest,
 } from "./retrieval";
 import { postOutputLinter, type PostLinterViolation, type PostLinterBlockResult, type DriverBlockEnforcementMode } from "../gates/post_linter";
 import { runEvidenceIntake } from "../gates/evidence_intake";
@@ -31,11 +37,13 @@ import { selectModel } from "../providers/provider_config";
 import { GATE_SENTINEL, type GateOutput } from "../gates/gate_interfaces";
 import type { ControlPlaneStore, TraceRun, Transmission } from "../store/control_plane_store";
 import {
-  OutputEnvelopeSchema,
   OUTPUT_ENVELOPE_META_ALLOWED_KEYS,
+  OutputEnvelopeShapeSchema,
+  OutputEnvelopeSchema,
+  OutputEnvelopeV0MinSchema,
   type OutputEnvelope,
 } from "../contracts/output_envelope";
-import type { PacketInput, ModeDecision, NotificationPolicy } from "../contracts/chat";
+import type { PacketInput, ModeDecision, NotificationPolicy, ThreadContextMode } from "../contracts/chat";
 import { classifyJournalOffer, type MoodSignal } from "../memory/journal_offer_classifier";
 
 export type OrchestrationSource = "api" | "worker";
@@ -136,8 +144,8 @@ function resolvePacketMessageId(packet: PacketInput, transmission: Transmission)
   const candidate =
     meta.message_id
     ?? meta.messageId
-    ?? packet.clientRequestId
-    ?? transmission.id;
+    ?? transmission.id
+    ?? packet.clientRequestId;
   return String(candidate);
 }
 
@@ -154,6 +162,142 @@ function resolveAvoidPeakOverwhelm(packet: PacketInput): boolean | undefined {
   const offerTiming = settings?.offer_timing ?? settings?.offerTiming;
   const value = offerTiming?.avoid_peak_overwhelm ?? offerTiming?.avoidPeakOverwhelm;
   return typeof value === "boolean" ? value : undefined;
+}
+
+function resolveThreadContextMode(packet: PacketInput): ThreadContextMode {
+  return packet.thread_context_mode === "off" ? "off" : "auto";
+}
+
+const AFFECT_LABELS = new Set(["overwhelm", "insight", "gratitude", "resolve", "curiosity", "neutral"]);
+
+type NormalizedAffectSignal = {
+  label: "overwhelm" | "insight" | "gratitude" | "resolve" | "curiosity" | "neutral";
+  intensity: number;
+  confidence: number;
+};
+
+const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
+
+function normalizeAffectSignal(raw: unknown): NormalizedAffectSignal | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const input = raw as Record<string, any>;
+  if (Object.keys(input).length === 0) return null;
+
+  const labelRaw = typeof input.label === "string" ? input.label : "neutral";
+  const label = AFFECT_LABELS.has(labelRaw) ? (labelRaw as NormalizedAffectSignal["label"]) : "neutral";
+  const intensity = Number.isFinite(Number(input.intensity)) ? clamp01(Number(input.intensity)) : 0;
+  const confidence = Number.isFinite(Number(input.confidence)) ? clamp01(Number(input.confidence)) : 0;
+
+  return { label, intensity, confidence };
+}
+
+function confidenceBucket(value: number): "low" | "med" | "high" {
+  if (value >= 0.7) return "high";
+  if (value >= 0.34) return "med";
+  return "low";
+}
+
+function toMoodSignal(signal: NormalizedAffectSignal | null): MoodSignal | null {
+  if (!signal) return null;
+  if (signal.label === "neutral") return null;
+  return {
+    label: signal.label,
+    intensity: signal.intensity,
+    confidence: confidenceBucket(signal.confidence),
+  };
+}
+
+function parseShape(raw: unknown): OutputEnvelopeShapeSchema["_type"] | null {
+  const parsed = OutputEnvelopeShapeSchema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
+}
+
+async function updateThreadMementoLatestFromEnvelope(args: {
+  packet: PacketInput;
+  envelope: OutputEnvelope;
+  transmission: Transmission;
+  store: ControlPlaneStore;
+  threadContextMode: ThreadContextMode;
+}): Promise<{
+  latest: ThreadMementoLatestInternal | null;
+  affectSignal: NormalizedAffectSignal | null;
+  moodSignal: MoodSignal | null;
+}> {
+  const affectSignal = normalizeAffectSignal(args.envelope.meta?.affect_signal);
+  const moodSignal = toMoodSignal(affectSignal);
+
+  if (args.threadContextMode === "off") {
+    return { latest: null, affectSignal, moodSignal };
+  }
+
+  const nowIso = new Date().toISOString();
+  const shape = parseShape(args.envelope.meta?.shape);
+  const previous = getThreadMementoLatestCached(args.packet.threadId);
+  const baseAffect = previous?.affect ?? {
+    points: [],
+    rollup: {
+      phase: "settled",
+      intensityBucket: "low",
+      updatedAt: nowIso,
+    },
+  };
+
+  const nextShape = shape
+    ? {
+        arc: shape.arc,
+        active: [...shape.active],
+        parked: [...shape.parked],
+        decisions: [...shape.decisions],
+        next: [...shape.next],
+      }
+    : {
+        arc: previous?.arc ?? "Untitled",
+        active: previous?.active ? [...previous.active] : [],
+        parked: previous?.parked ? [...previous.parked] : [],
+        decisions: previous?.decisions ? [...previous.decisions] : [],
+        next: previous?.next ? [...previous.next] : [],
+      };
+
+  let nextAffect = baseAffect;
+  if (affectSignal) {
+    const point = {
+      endMessageId: resolvePacketMessageId(args.packet, args.transmission),
+      label: affectSignal.label,
+      intensity: affectSignal.intensity,
+      confidence: confidenceBucket(affectSignal.confidence),
+      source: "model" as const,
+      ts: nowIso,
+    };
+    nextAffect = updateLatestAffectWithPoint({
+      existing: baseAffect,
+      point,
+      nowIso,
+    });
+  }
+
+  const next: ThreadMementoLatestInternal = {
+    mementoId: previous?.mementoId ?? `memento_latest_${args.packet.threadId}`,
+    threadId: args.packet.threadId,
+    createdTs: previous?.createdTs ?? nowIso,
+    updatedAt: nowIso,
+    version: "memento-v0.1",
+    arc: nextShape.arc,
+    active: nextShape.active,
+    parked: nextShape.parked,
+    decisions: nextShape.decisions,
+    next: nextShape.next,
+    affect: nextAffect,
+  };
+
+  setThreadMementoLatestCached(next);
+  noteThreadMementoLatestTurn(args.packet.threadId);
+
+  if (shouldPersistThreadMementoLatest({ next, threadId: args.packet.threadId })) {
+    await args.store.upsertThreadMementoLatest({ memento: next });
+    markThreadMementoLatestPersisted(next);
+  }
+
+  return { latest: next, affectSignal, moodSignal };
 }
 
 type EnforcementFailureMetadata = {
@@ -340,6 +484,7 @@ type OutputEnvelopeMetadata = {
   reason?: "invalid_json" | "schema_invalid" | "payload_too_large";
   errorSummary?: string;
   issuesCount?: number;
+  issues?: Array<{ path: string; code: string; message: string }>;
 };
 
 function buildOutputEnvelopeMetadata(args: {
@@ -348,6 +493,7 @@ function buildOutputEnvelopeMetadata(args: {
   rawLength: number;
   reason?: "invalid_json" | "schema_invalid" | "payload_too_large";
   issuesCount?: number;
+  issues?: Array<{ path: string; code: string; message: string }>;
   error?: unknown;
 }): OutputEnvelopeMetadata {
   const errorSummary = args.error ? String(args.error).slice(0, 200) : undefined;
@@ -359,7 +505,18 @@ function buildOutputEnvelopeMetadata(args: {
     ...(args.reason ? { reason: args.reason } : {}),
     ...(errorSummary ? { errorSummary } : {}),
     ...(typeof args.issuesCount === "number" ? { issuesCount: args.issuesCount } : {}),
+    ...(args.issues ? { issues: args.issues } : {}),
   };
+}
+
+function summarizeZodIssues(issues: Array<{ path: (string | number)[]; code: string; message: string }>) {
+  return issues.slice(0, 10).map((issue) => ({
+    path: issue.path
+      .map((segment) => (typeof segment === "number" ? `[${segment}]` : String(segment)))
+      .join("."),
+    code: issue.code,
+    message: issue.message,
+  }));
 }
 
 function buildCorrectionText(violations: PostLinterViolation[], driverBlocks: Array<{ id: string; title?: string }>): string {
@@ -504,6 +661,12 @@ function normalizeOutputEnvelopeForResponse(envelope: OutputEnvelope): OutputEnv
   }
   if (envelope.meta.capture_suggestion !== undefined) {
     meta.capture_suggestion = envelope.meta.capture_suggestion;
+  }
+  if (envelope.meta.shape !== undefined) {
+    meta.shape = envelope.meta.shape;
+  }
+  if (envelope.meta.affect_signal !== undefined) {
+    meta.affect_signal = envelope.meta.affect_signal;
   }
   if (envelope.meta.librarian_gate !== undefined) {
     meta.librarian_gate = envelope.meta.librarian_gate;
@@ -706,15 +869,32 @@ export async function runOrchestrationPipeline(args: {
       );
     }
 
-    const result = OutputEnvelopeSchema.safeParse(parsed);
-    if (!result.success) {
+    const hasGhostMeta = (() => {
+      if (!rawMeta || typeof rawMeta !== "object" || Array.isArray(rawMeta)) return false;
+      if (rawMeta.display_hint === "ghost_card") return true;
+      const ghostKeys = [
+        "ghost_kind",
+        "ghost_type",
+        "memory_id",
+        "rigor_level",
+        "snippet",
+        "fact_null",
+        "mood_anchor",
+      ];
+      return ghostKeys.some((key) => rawMeta[key] !== undefined);
+    })();
+
+    const v0MinResult = OutputEnvelopeV0MinSchema.safeParse(parsed);
+    if (!v0MinResult.success) {
+      const issues = summarizeZodIssues(v0MinResult.error.issues);
       const meta = buildOutputEnvelopeMetadata({
         attempt: args.attempt,
         ok: false,
         rawLength,
         reason: "schema_invalid",
-        issuesCount: result.error.issues.length,
-        error: result.error,
+        issuesCount: v0MinResult.error.issues.length,
+        issues,
+        error: v0MinResult.error,
       });
 
       await appendTrace({
@@ -723,11 +903,54 @@ export async function runOrchestrationPipeline(args: {
         actor: "solserver",
         phase: "output_gates",
         status: "failed",
-        summary: "Output envelope schema invalid",
+        summary: "Output envelope schema invalid (v0-min)",
         metadata: meta,
       });
 
-      return { ok: false, reason: "schema_invalid", issuesCount: result.error.issues.length };
+      return { ok: false, reason: "schema_invalid", issuesCount: v0MinResult.error.issues.length };
+    }
+
+    const fullResult = OutputEnvelopeSchema.safeParse(parsed);
+    if (hasGhostMeta && !fullResult.success) {
+      const issues = summarizeZodIssues(fullResult.error.issues);
+      const meta = buildOutputEnvelopeMetadata({
+        attempt: args.attempt,
+        ok: false,
+        rawLength,
+        reason: "schema_invalid",
+        issuesCount: fullResult.error.issues.length,
+        issues,
+        error: fullResult.error,
+      });
+
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: "failed",
+        summary: "Output envelope schema invalid (full)",
+        metadata: meta,
+      });
+
+      return { ok: false, reason: "schema_invalid", issuesCount: fullResult.error.issues.length };
+    }
+
+    if (!hasGhostMeta && !fullResult.success) {
+      const issues = summarizeZodIssues(fullResult.error.issues);
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: "warning",
+        summary: "Output envelope schema issues (full)",
+        metadata: {
+          kind: "output_envelope_schema_warning",
+          issuesCount: fullResult.error.issues.length,
+          issues,
+        },
+      });
     }
 
     if (traceLevel === "debug" && strippedMetaKeys.length > 0) {
@@ -763,7 +986,11 @@ export async function runOrchestrationPipeline(args: {
       metadata: meta,
     });
 
-    return { ok: true, envelope: result.data };
+    if (hasGhostMeta && fullResult.success) {
+      return { ok: true, envelope: fullResult.data };
+    }
+
+    return { ok: true, envelope: v0MinResult.data as OutputEnvelope };
   };
 
   const runEvidenceOutputGates = async (args: {
@@ -1092,17 +1319,6 @@ export async function runOrchestrationPipeline(args: {
   // Run gates pipeline
   const gatesOutput = runGatesPipeline(packet);
   const safetyIsUrgent = resolveSafetyIsUrgent({ results: gatesOutput.results, log });
-  const moodSignal: MoodSignal | null = gatesOutput.sentinel.mood ?? null;
-  const messageIdForAffect = resolvePacketMessageId(packet, transmission);
-  const affectPoint = moodSignal
-    ? {
-        endMessageId: messageIdForAffect,
-        label: moodSignal.label,
-        intensity: moodSignal.intensity,
-        confidence: moodSignal.confidence,
-        source: "server" as const,
-      }
-    : null;
 
   const resolvedAfterGates = resolveNotificationPolicy({
     source: request.source,
@@ -1204,10 +1420,23 @@ export async function runOrchestrationPipeline(args: {
     summary: "Retrieving context",
   });
 
+  const threadContextMode = resolveThreadContextMode(packet);
+  if (threadContextMode === "auto") {
+    const cachedLatest = getThreadMementoLatestCached(packet.threadId);
+    if (!cachedLatest) {
+      const persisted = await store.getThreadMementoLatest({ threadId: packet.threadId });
+      if (persisted) {
+        setThreadMementoLatestCached(persisted as ThreadMementoLatestInternal);
+        markThreadMementoLatestPersisted(persisted as ThreadMementoLatestInternal);
+      }
+    }
+  }
+
   const retrievalItems = await retrieveContext({
     threadId: packet.threadId,
     packetType: packet.packetType,
     message: packet.message,
+    threadContextMode,
   });
 
   log.debug(retrievalLogShape(retrievalItems), "control_plane.retrieval");
@@ -1493,6 +1722,7 @@ export async function runOrchestrationPipeline(args: {
           }
 
           const assistant0 = evidenceGate0.envelope.assistant_text;
+          const envelope0Normalized = normalizeOutputEnvelopeForResponse(evidenceGate0.envelope);
 
           await appendTrace({
             traceRunId: traceRun.id,
@@ -1552,26 +1782,13 @@ export async function runOrchestrationPipeline(args: {
           }
 
           if (lint0.ok) {
-            if (attempt0.mementoDraft) {
-              const m = putThreadMemento({
-                threadId: packet.threadId,
-                arc: attempt0.mementoDraft.arc || "Untitled",
-                active: attempt0.mementoDraft.active ?? [],
-                parked: attempt0.mementoDraft.parked ?? [],
-                decisions: attempt0.mementoDraft.decisions ?? [],
-                next: attempt0.mementoDraft.next ?? [],
-              });
-
-              bgLog.info(
-                {
-                  plane: "memento",
-                  threadId: packet.threadId,
-                  mementoId: m.mementoId,
-                  source: "model",
-                },
-                "control_plane.memento_auto_put"
-              );
-            }
+            await updateThreadMementoLatestFromEnvelope({
+              packet,
+              envelope: envelope0Normalized,
+              transmission,
+              store,
+              threadContextMode,
+            });
 
             await store.appendDeliveryAttempt({
               transmissionId,
@@ -1706,6 +1923,7 @@ export async function runOrchestrationPipeline(args: {
           }
 
           const assistant1 = evidenceGate1.envelope.assistant_text;
+          const envelope1Normalized = normalizeOutputEnvelopeForResponse(evidenceGate1.envelope);
 
           await appendTrace({
             traceRunId: traceRun.id,
@@ -1765,26 +1983,13 @@ export async function runOrchestrationPipeline(args: {
           }
 
           if (lint1.ok) {
-            if (attempt1.mementoDraft) {
-              const m = putThreadMemento({
-                threadId: packet.threadId,
-                arc: attempt1.mementoDraft.arc || "Untitled",
-                active: attempt1.mementoDraft.active ?? [],
-                parked: attempt1.mementoDraft.parked ?? [],
-                decisions: attempt1.mementoDraft.decisions ?? [],
-                next: attempt1.mementoDraft.next ?? [],
-              });
-
-              bgLog.info(
-                {
-                  plane: "memento",
-                  threadId: packet.threadId,
-                  mementoId: m.mementoId,
-                  source: "model",
-                },
-                "control_plane.memento_auto_put"
-              );
-            }
+            await updateThreadMementoLatestFromEnvelope({
+              packet,
+              envelope: envelope1Normalized,
+              transmission,
+              store,
+              threadContextMode,
+            });
 
             await store.appendDeliveryAttempt({
               transmissionId,
@@ -1893,7 +2098,12 @@ export async function runOrchestrationPipeline(args: {
       ...(hasEvidence ? { evidence: effectiveEvidence } : {}),
       evidenceSummary,
       ...(effectiveWarnings.length > 0 ? { evidenceWarnings: effectiveWarnings } : {}),
-      threadMemento: getLatestThreadMemento(packet.threadId, { includeDraft: true }),
+      threadMemento: threadContextMode === "auto"
+        ? (() => {
+            const latest = getThreadMementoLatestCached(packet.threadId);
+            return latest ? sanitizeThreadMementoLatest(latest) : null;
+          })()
+        : null,
     });
   }
 
@@ -1902,7 +2112,7 @@ export async function runOrchestrationPipeline(args: {
 
   let assistant: string;
   let outputEnvelope: OutputEnvelope | null = null;
-  let threadMemento: any = null;
+  let threadMemento: ThreadMementoLatest | null = null;
   let attemptsUsed = 0;
 
   try {
@@ -2072,18 +2282,6 @@ export async function runOrchestrationPipeline(args: {
       assistant = assistant0;
       outputEnvelope = envelope0Normalized;
       attemptsUsed = 1;
-      if (attempt0.mementoDraft) {
-        const m = putThreadMemento({
-          threadId: packet.threadId,
-          arc: attempt0.mementoDraft.arc || "Untitled",
-          active: attempt0.mementoDraft.active ?? [],
-          parked: attempt0.mementoDraft.parked ?? [],
-          decisions: attempt0.mementoDraft.decisions ?? [],
-          next: attempt0.mementoDraft.next ?? [],
-        });
-        threadMemento = m;
-        log.info({ plane: "memento", threadId: packet.threadId, mementoId: m.mementoId, source: "model" }, "control_plane.memento_auto_put");
-      }
     } else {
       const correctionText = buildCorrectionText(lint0.violations, promptPack.driverBlocks);
       const promptPack1 = withCorrectionSection(promptPack, correctionText);
@@ -2254,18 +2452,6 @@ export async function runOrchestrationPipeline(args: {
         assistant = assistant1;
         outputEnvelope = envelope1Normalized;
         attemptsUsed = 2;
-        if (attempt1.mementoDraft) {
-          const m = putThreadMemento({
-            threadId: packet.threadId,
-            arc: attempt1.mementoDraft.arc || "Untitled",
-            active: attempt1.mementoDraft.active ?? [],
-            parked: attempt1.mementoDraft.parked ?? [],
-            decisions: attempt1.mementoDraft.decisions ?? [],
-            next: attempt1.mementoDraft.next ?? [],
-          });
-          threadMemento = m;
-          log.info({ plane: "memento", threadId: packet.threadId, mementoId: m.mementoId, source: "model" }, "control_plane.memento_auto_put");
-        }
       } else {
         const stubAssistant = buildEnforcementStub();
 
@@ -2352,28 +2538,26 @@ export async function runOrchestrationPipeline(args: {
     });
   }
 
-  let offerMemento = getLatestThreadMemento(packet.threadId, { includeDraft: true });
-  if (affectPoint) {
-    const updated = updateThreadMementoAffect({
-      threadId: packet.threadId,
-      point: affectPoint,
-    });
-    if (updated) {
-      offerMemento = updated;
-      if (threadMemento && updated.mementoId === threadMemento.mementoId) {
-        threadMemento = updated;
-      }
-    }
-  }
+  const mementoUpdate = await updateThreadMementoLatestFromEnvelope({
+    packet,
+    envelope: outputEnvelope,
+    transmission,
+    store,
+    threadContextMode,
+  });
+  threadMemento = mementoUpdate.latest ? sanitizeThreadMementoLatest(mementoUpdate.latest) : null;
 
   const avoidPeakOverwhelm = resolveAvoidPeakOverwhelm(packet);
-  const offerSpanStart = offerMemento?.affect.points[0]?.endMessageId ?? messageIdForAffect;
-  const offerSpanEnd = offerMemento?.affect.points.at(-1)?.endMessageId ?? messageIdForAffect;
-  const journalOffer = offerMemento && moodSignal
+  const messageIdForAffect = resolvePacketMessageId(packet, transmission);
+  const offerSpanStart = mementoUpdate.latest?.affect.points[0]?.endMessageId ?? messageIdForAffect;
+  const offerSpanEnd = mementoUpdate.latest?.affect.points.at(-1)?.endMessageId ?? messageIdForAffect;
+  const journalOffer = threadContextMode === "auto"
+    && mementoUpdate.latest
+    && mementoUpdate.moodSignal
     ? classifyJournalOffer({
-        mood: moodSignal,
+        mood: mementoUpdate.moodSignal,
         risk: gatesOutput.sentinel.risk,
-        phase: offerMemento.affect.rollup.phase,
+        phase: mementoUpdate.latest.affect.rollup.phase,
         avoidPeakOverwhelm,
         evidenceSpan: { startMessageId: offerSpanStart, endMessageId: offerSpanEnd },
       })

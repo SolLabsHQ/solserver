@@ -2,6 +2,10 @@ import { z } from "zod";
 
 import { NotificationPolicy } from "./chat";
 
+const SHAPE_MAX_ARC_CHARS = 200;
+const SHAPE_MAX_ITEMS = 6;
+const SHAPE_MAX_ITEM_CHARS = 160;
+
 const EvidenceRefSchema = z.object({
   evidence_id: z.string().min(1),
   span_id: z.string().min(1).optional(),
@@ -49,6 +53,22 @@ const CaptureSuggestionSchema = z.object({
 });
 const GhostKindSchema = z.enum(["memory_artifact", "journal_moment", "action_proposal"]);
 const GhostRigorSchema = z.enum(["normal", "high"]);
+const AffectLabelSchema = z.enum(["overwhelm", "insight", "gratitude", "resolve", "curiosity", "neutral"]);
+
+export const OutputEnvelopeShapeSchema = z.object({
+  arc: z.string().min(1).max(SHAPE_MAX_ARC_CHARS),
+  active: z.array(z.string().min(1).max(SHAPE_MAX_ITEM_CHARS)).max(SHAPE_MAX_ITEMS),
+  parked: z.array(z.string().min(1).max(SHAPE_MAX_ITEM_CHARS)).max(SHAPE_MAX_ITEMS),
+  decisions: z.array(z.string().min(1).max(SHAPE_MAX_ITEM_CHARS)).max(SHAPE_MAX_ITEMS),
+  next: z.array(z.string().min(1).max(SHAPE_MAX_ITEM_CHARS)).max(SHAPE_MAX_ITEMS),
+}).strict();
+
+export const OutputEnvelopeAffectSignalSchema = z.object({
+  label: AffectLabelSchema,
+  intensity: z.number().min(0).max(1),
+  confidence: z.number().min(0).max(1),
+}).strict();
+
 const JournalOfferSchema = z.object({
   momentId: z.string().min(1),
   momentType: z.enum(["overwhelm", "vent", "insight", "gratitude", "decision", "fun"]),
@@ -87,6 +107,8 @@ const OutputEnvelopeMetaKeys = [
   "snippet",
   "fact_null",
   "mood_anchor",
+  "shape",
+  "affect_signal",
   "journal_offer",
   "journalOffer",
   "librarian_gate",
@@ -111,6 +133,8 @@ const OutputEnvelopeMetaSchema = z.object({
   snippet: z.string().nullable().optional(),
   fact_null: z.boolean().optional(),
   mood_anchor: z.string().nullable().optional(),
+  shape: OutputEnvelopeShapeSchema.optional(),
+  affect_signal: OutputEnvelopeAffectSignalSchema.optional(),
   journalOffer: JournalOfferSchema.optional(),
   journal_offer: JournalOfferSchema.optional(),
   librarian_gate: LibrarianGateSchema.optional(),
@@ -232,6 +256,19 @@ export const OutputEnvelopeSchema = z.object({
   notification_policy: NotificationPolicy.optional(),
   // Future structured outputs (e.g., capture_suggestion) live under meta.
   meta: OutputEnvelopeMetaSchema.optional(),
+}).strict();
+
+const OutputEnvelopeV0MinMetaSchema = z.object({
+  meta_version: z.literal("v1").optional(),
+}).passthrough();
+
+export const OutputEnvelopeV0MinSchema = z.object({
+  assistant_text: z.string().min(1),
+  assumptions: z.array(z.string()).optional(),
+  unknowns: z.array(z.string()).optional(),
+  used_context_ids: z.array(z.string()).optional(),
+  notification_policy: NotificationPolicy.optional(),
+  meta: OutputEnvelopeV0MinMetaSchema.optional(),
 }).strict();
 
 export type OutputEnvelope = z.infer<typeof OutputEnvelopeSchema>;

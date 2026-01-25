@@ -44,7 +44,7 @@ const SYSTEM_DEFAULT_BLOCKS: Record<string, { id: string; version: string; title
     id: "DB-002",
     version: "1.0",
     title: "ShapeFirst",
-    definition: "When starting a new task, propose a structure or outline before diving into details. Wait for user approval.",
+    definition: "When starting a new task, consider a short outline before diving into details (optional).",
   },
   "DB-003": {
     id: "DB-003",

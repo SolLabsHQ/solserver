@@ -33,15 +33,6 @@ import type { RetrievalItem } from "./prompt_pack";
  * - Later we will persist this (store / DB) and add governance (auth, writes, audits).
  * - Later we will chain mementos (prevMementoId) for deterministic replay and debugging.
  */
-// v0.1: in-process ThreadMemento registry.
-// - Keyed by threadId.
-// - Draft is what the model proposes (returned to the client for review).
-// - Accepted is what the user canonizes (safe to use in retrieval).
-// - Revoke clears the accepted snapshot so retrieval stops using it.
-// Later: move into ControlPlaneStore + persistence + chaining.
-const mementoDraftByThreadId = new Map<string, ThreadMementoSnapshot>();
-const mementoAcceptedByThreadId = new Map<string, ThreadMementoSnapshot>();
-
 export type ThreadMementoSnapshot = {
   mementoId: string;
   threadId: string;
@@ -59,7 +50,7 @@ export type ThreadMementoSnapshot = {
       label: string;
       intensity: number;
       confidence: "low" | "med" | "high";
-      source: "server" | "device_hint";
+      source: "server" | "device_hint" | "model";
     }>;
     rollup: {
       phase: "rising" | "peak" | "downshift" | "settled";
@@ -69,7 +60,63 @@ export type ThreadMementoSnapshot = {
   };
 };
 
-function formatMementoSummary(m: ThreadMementoSnapshot): string {
+export type ThreadMementoAffectPoint = {
+  endMessageId: string;
+  label: string;
+  intensity: number;
+  confidence: "low" | "med" | "high";
+  source: "server" | "device_hint" | "model";
+};
+
+export type ThreadMementoAffectPointInternal = ThreadMementoAffectPoint & {
+  ts: string;
+};
+
+export type ThreadMementoLatestInternal = {
+  mementoId: string;
+  threadId: string;
+  createdTs: string;
+  updatedAt: string;
+  version: "memento-v0.1";
+  arc: string;
+  active: string[];
+  parked: string[];
+  decisions: string[];
+  next: string[];
+  affect: {
+    points: ThreadMementoAffectPointInternal[];
+    rollup: {
+      phase: "rising" | "peak" | "downshift" | "settled";
+      intensityBucket: "low" | "med" | "high";
+      updatedAt: string;
+    };
+  };
+};
+
+export type ThreadMementoLatest = Omit<ThreadMementoLatestInternal, "affect"> & {
+  affect: {
+    points: ThreadMementoAffectPoint[];
+    rollup: ThreadMementoLatestInternal["affect"]["rollup"];
+  };
+};
+
+// v0.1: in-process ThreadMemento registry.
+// - Keyed by threadId.
+// - Draft is what the model proposes (returned to the client for review).
+// - Accepted is what the user canonizes (safe to use in retrieval).
+// - Revoke clears the accepted snapshot so retrieval stops using it.
+// Later: move into ControlPlaneStore + persistence + chaining.
+const mementoDraftByThreadId = new Map<string, ThreadMementoSnapshot>();
+const mementoAcceptedByThreadId = new Map<string, ThreadMementoSnapshot>();
+const mementoLatestByThreadId = new Map<string, ThreadMementoLatestInternal>();
+const mementoLatestPersistedByThreadId = new Map<string, ThreadMementoLatestInternal>();
+const mementoLatestTurnsSincePersist = new Map<string, number>();
+type ThreadMementoSummaryInput = Pick<
+  ThreadMementoSnapshot,
+  "arc" | "active" | "parked" | "decisions" | "next" | "affect"
+>;
+
+function formatMementoSummary(m: ThreadMementoSummaryInput): string {
   // Keep this stable and human-readable.
   // The PromptPack uses the summary as plain text; we avoid JSON here on purpose.
   const lines: string[] = [];
@@ -79,6 +126,9 @@ function formatMementoSummary(m: ThreadMementoSnapshot): string {
   lines.push(`Parked: ${m.parked.length ? m.parked.join(" | ") : "(none)"}`);
   lines.push(`Decisions: ${m.decisions.length ? m.decisions.join(" | ") : "(none)"}`);
   lines.push(`Next: ${m.next.length ? m.next.join(" | ") : "(none)"}`);
+  if (m.affect?.rollup) {
+    lines.push(`Affect: ${m.affect.rollup.phase} (${m.affect.rollup.intensityBucket})`);
+  }
 
   return lines.join("\n");
 }
@@ -89,7 +139,7 @@ const intensityBucketFor = (intensity: number): "low" | "med" | "high" => {
   return "low";
 };
 
-const phaseFor = (points: ThreadMementoSnapshot["affect"]["points"]): "rising" | "peak" | "downshift" | "settled" => {
+const phaseFor = (points: Array<{ intensity: number }>): "rising" | "peak" | "downshift" | "settled" => {
   if (points.length === 0) return "settled";
   if (points.length === 1) {
     const intensity = points[0].intensity;
@@ -127,6 +177,109 @@ function updateAffectWithPoint(
       updatedAt: new Date().toISOString(),
     },
   };
+}
+
+const THREAD_MEMENTO_MAX_POINTS = 5;
+const THREAD_MEMENTO_MAX_WINDOW_MS = 30 * 60 * 1000;
+const THREAD_MEMENTO_PERSIST_EVERY_TURNS = 5;
+
+function normalizeAffectPoints(
+  points: ThreadMementoAffectPointInternal[],
+  nowIso: string
+): ThreadMementoAffectPointInternal[] {
+  return points.map((point) => ({
+    ...point,
+    ts: point.ts ?? nowIso,
+  }));
+}
+
+function capAffectPoints(
+  points: ThreadMementoAffectPointInternal[],
+  nowIso: string
+): ThreadMementoAffectPointInternal[] {
+  const nowMs = Date.parse(nowIso);
+  const bounded = points.filter((point) => {
+    const ts = Date.parse(point.ts ?? nowIso);
+    return Number.isNaN(ts) ? true : nowMs - ts <= THREAD_MEMENTO_MAX_WINDOW_MS;
+  });
+
+  return bounded.slice(-THREAD_MEMENTO_MAX_POINTS);
+}
+
+export function updateLatestAffectWithPoint(args: {
+  existing: ThreadMementoLatestInternal["affect"];
+  point: ThreadMementoAffectPointInternal;
+  nowIso: string;
+}): ThreadMementoLatestInternal["affect"] {
+  const normalized = normalizeAffectPoints(args.existing.points, args.nowIso);
+  const nextPoints = capAffectPoints([...normalized, args.point], args.nowIso);
+  const latestIntensity = nextPoints.at(-1)?.intensity ?? 0;
+
+  return {
+    points: nextPoints,
+    rollup: {
+      phase: phaseFor(nextPoints),
+      intensityBucket: intensityBucketFor(latestIntensity),
+      updatedAt: args.nowIso,
+    },
+  };
+}
+
+export function sanitizeThreadMementoLatest(
+  memento: ThreadMementoLatestInternal
+): ThreadMementoLatest {
+  const points = memento.affect.points
+    .slice(-THREAD_MEMENTO_MAX_POINTS)
+    .map(({ ts, ...rest }) => rest);
+  return {
+    ...memento,
+    affect: {
+      ...memento.affect,
+      points,
+    },
+  };
+}
+
+function shapeEquals(a: ThreadMementoLatestInternal, b: ThreadMementoLatestInternal): boolean {
+  const eq = (left: string[], right: string[]) =>
+    left.length === right.length && left.every((value, idx) => value === right[idx]);
+
+  return a.arc === b.arc
+    && eq(a.active, b.active)
+    && eq(a.parked, b.parked)
+    && eq(a.decisions, b.decisions)
+    && eq(a.next, b.next);
+}
+
+export function shouldPersistThreadMementoLatest(args: {
+  next: ThreadMementoLatestInternal;
+  threadId: string;
+}): boolean {
+  const persisted = mementoLatestPersistedByThreadId.get(args.threadId);
+  const turnsSince = mementoLatestTurnsSincePersist.get(args.threadId) ?? 0;
+  if (!persisted) return true;
+  if (persisted.affect.rollup.phase !== args.next.affect.rollup.phase) return true;
+  if (!shapeEquals(persisted, args.next)) return true;
+  return turnsSince >= THREAD_MEMENTO_PERSIST_EVERY_TURNS;
+}
+
+export function noteThreadMementoLatestTurn(threadId: string): number {
+  const next = (mementoLatestTurnsSincePersist.get(threadId) ?? 0) + 1;
+  mementoLatestTurnsSincePersist.set(threadId, next);
+  return next;
+}
+
+export function markThreadMementoLatestPersisted(memento: ThreadMementoLatestInternal): void {
+  mementoLatestPersistedByThreadId.set(memento.threadId, memento);
+  mementoLatestTurnsSincePersist.set(memento.threadId, 0);
+}
+
+export function getThreadMementoLatestCached(threadId: string): ThreadMementoLatestInternal | null {
+  return mementoLatestByThreadId.get(threadId) ?? null;
+}
+
+export function setThreadMementoLatestCached(memento: ThreadMementoLatestInternal): void {
+  mementoLatestByThreadId.set(memento.threadId, memento);
 }
 
 /**
@@ -267,13 +420,17 @@ export function updateThreadMementoAffect(args: {
 export function __dangerous_clearThreadMementosForTestOnly(): void {
   mementoDraftByThreadId.clear();
   mementoAcceptedByThreadId.clear();
+  mementoLatestByThreadId.clear();
+  mementoLatestPersistedByThreadId.clear();
+  mementoLatestTurnsSincePersist.clear();
 }
 
 /**
  * Retrieve allowed context items for the current packet.
  *
  * v0.1 behavior:
- * - If a ThreadMemento exists for the thread, return exactly one RetrievalItem of kind "memento".
+ * - If a pinned ThreadMemento exists, include it as kind "bookmark".
+ * - If thread_context_mode=auto and a latest ThreadMemento exists, include it as kind "memento".
  * - Otherwise return an empty list.
  *
  * Constraints:
@@ -285,22 +442,35 @@ export async function retrieveContext(args: {
   threadId: string;
   packetType: string;
   message: string;
+  threadContextMode?: "off" | "auto";
 }): Promise<RetrievalItem[]> {
   // v0.1: packetType/message are not used, but we keep them in the signature
   // so retrieval can evolve without touching callers.
   void args.packetType;
   void args.message;
 
-  const m = getLatestThreadMemento(args.threadId);
-  if (!m) return [];
+  const items: RetrievalItem[] = [];
+  const pinned = getLatestThreadMemento(args.threadId);
+  if (pinned) {
+    items.push({
+      id: pinned.mementoId,
+      kind: "bookmark",
+      summary: formatMementoSummary(pinned),
+    });
+  }
 
-  return [
-    {
-      id: m.mementoId,
-      kind: "memento",
-      summary: formatMementoSummary(m),
-    },
-  ];
+  if (args.threadContextMode !== "off") {
+    const latest = getThreadMementoLatestCached(args.threadId);
+    if (latest) {
+      items.push({
+        id: latest.mementoId,
+        kind: "memento",
+        summary: formatMementoSummary(latest),
+      });
+    }
+  }
+
+  return items;
 }
 
 /**

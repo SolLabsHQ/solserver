@@ -24,6 +24,7 @@ import type {
   TraceSummary,
   JournalEntry,
   TraceIngestEvent,
+  ThreadMementoLatestRecord,
 } from "./control_plane_store";
 import type { PacketInput, ModeDecision, Evidence, NotificationPolicy } from "../contracts/chat";
 import type { OutputEnvelope } from "../contracts/output_envelope";
@@ -387,6 +388,13 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         ON journal_entries(user_id, created_ts DESC);
       CREATE INDEX IF NOT EXISTS idx_journal_entries_thread
         ON journal_entries(thread_id);
+
+      -- ThreadMementoLatest (v0.1)
+      CREATE TABLE IF NOT EXISTS thread_memento_latest (
+        thread_id TEXT PRIMARY KEY,
+        memento_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
 
       -- Trace ingestion events (PR #10)
       CREATE TABLE IF NOT EXISTS trace_ingest_events (
@@ -1938,6 +1946,35 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     }
 
     return records;
+  }
+
+  async getThreadMementoLatest(args: { threadId: string }): Promise<ThreadMementoLatestRecord | null> {
+    const row = this.db.prepare(`
+      SELECT memento_json FROM thread_memento_latest WHERE thread_id = ?
+    `).get(args.threadId) as { memento_json?: string } | undefined;
+
+    if (!row?.memento_json) return null;
+    try {
+      return JSON.parse(row.memento_json) as ThreadMementoLatestRecord;
+    } catch {
+      return null;
+    }
+  }
+
+  async upsertThreadMementoLatest(args: { memento: ThreadMementoLatestRecord }): Promise<void> {
+    const stmt = this.db.prepare(`
+      INSERT INTO thread_memento_latest (thread_id, memento_json, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET
+        memento_json = excluded.memento_json,
+        updated_at = excluded.updated_at
+    `);
+
+    stmt.run(
+      args.memento.threadId,
+      JSON.stringify(args.memento),
+      args.memento.updatedAt
+    );
   }
 
   private rowToTransmission(row: any): Transmission {
