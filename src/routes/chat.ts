@@ -28,9 +28,21 @@ export async function chatRoutes(
   opts: { store?: ControlPlaneStore } = {}
 ) {
   const store = opts.store ?? new MemoryControlPlaneStore();
+  const formatThreadMementoResponse = (memento: any | null) => {
+    if (!memento || typeof memento !== "object") return memento ?? null;
+    const mementoId = memento.mementoId ?? memento.id ?? null;
+    const createdAt = memento.createdAt ?? memento.createdTs ?? null;
+    return {
+      ...memento,
+      ...(mementoId ? { id: mementoId } : {}),
+      ...(createdAt ? { createdAt } : {}),
+    };
+  };
+
   const loadThreadMementoLatest = async (threadId: string) => {
     const record = await store.getThreadMementoLatest({ threadId });
-    return record ? sanitizeThreadMementoLatest(record as any) : null;
+    const latest = record ? sanitizeThreadMementoLatest(record as any) : null;
+    return formatThreadMementoResponse(latest);
   };
 
   // Dev-only async completion guard for simulated 202 (prevents duplicate background timers per transmission).
@@ -108,10 +120,7 @@ export async function chatRoutes(
       reply.header("x-sol-trace-run-id", traceRun.id);
     }
 
-    const threadMementoRecord = await store.getThreadMementoLatest({ threadId: transmission.threadId });
-    const threadMemento = threadMementoRecord
-      ? sanitizeThreadMementoLatest(threadMementoRecord as any)
-      : null;
+    const threadMemento = await loadThreadMementoLatest(transmission.threadId);
 
     return {
       ok: true,
@@ -361,7 +370,7 @@ export async function chatRoutes(
       "control_plane.memento_decision"
     );
 
-    return { ok: true, decision, applied, reason, memento };
+    return { ok: true, decision, applied, reason, memento: formatThreadMementoResponse(memento) };
   }
 
   async function handlePutMemento(req: any, reply: any) {
@@ -397,7 +406,7 @@ export async function chatRoutes(
       "control_plane.memento_put"
     );
 
-    return { ok: true, memento };
+    return { ok: true, memento: formatThreadMementoResponse(memento) };
   }
 
   // Read the latest memento for a thread.
@@ -423,7 +432,7 @@ export async function chatRoutes(
       "control_plane.memento_get"
     );
 
-    return { ok: true, memento };
+    return { ok: true, memento: formatThreadMementoResponse(memento) };
   });
 
   // Preferred endpoint name.
