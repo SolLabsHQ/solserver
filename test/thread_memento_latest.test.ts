@@ -59,7 +59,7 @@ describe("ThreadMementoLatest", () => {
       },
       payload: {
         threadId: "t-affect",
-        message: "hello",
+        message: "I just realized I avoid asking for help because I expect rejection.",
         thread_context_mode: "auto",
       },
     });

@@ -173,10 +173,11 @@ const AFFECT_LABELS = new Set(["overwhelm", "insight", "gratitude", "resolve", "
 type NormalizedAffectSignal = {
   label: "overwhelm" | "insight" | "gratitude" | "resolve" | "curiosity" | "neutral";
   intensity: number;
-  confidence: number;
+  confidence: "low" | "med" | "high";
 };
 
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
+const CONFIDENCE_BUCKETS = new Set(["low", "med", "high"]);
 
 function normalizeAffectSignal(raw: unknown): NormalizedAffectSignal | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
@@ -186,7 +187,13 @@ function normalizeAffectSignal(raw: unknown): NormalizedAffectSignal | null {
   const labelRaw = typeof input.label === "string" ? input.label : "neutral";
   const label = AFFECT_LABELS.has(labelRaw) ? (labelRaw as NormalizedAffectSignal["label"]) : "neutral";
   const intensity = Number.isFinite(Number(input.intensity)) ? clamp01(Number(input.intensity)) : 0;
-  const confidence = Number.isFinite(Number(input.confidence)) ? clamp01(Number(input.confidence)) : 0;
+
+  let confidence: NormalizedAffectSignal["confidence"] = "low";
+  if (typeof input.confidence === "string" && CONFIDENCE_BUCKETS.has(input.confidence)) {
+    confidence = input.confidence as NormalizedAffectSignal["confidence"];
+  } else if (Number.isFinite(Number(input.confidence))) {
+    confidence = confidenceBucket(clamp01(Number(input.confidence)));
+  }
 
   return { label, intensity, confidence };
 }
@@ -203,7 +210,7 @@ function toMoodSignal(signal: NormalizedAffectSignal | null): MoodSignal | null 
   return {
     label: signal.label,
     intensity: signal.intensity,
-    confidence: confidenceBucket(signal.confidence),
+    confidence: signal.confidence,
   };
 }
 
@@ -264,7 +271,7 @@ async function updateThreadMementoLatestFromEnvelope(args: {
       endMessageId: resolvePacketMessageId(args.packet, args.transmission),
       label: affectSignal.label,
       intensity: affectSignal.intensity,
-      confidence: confidenceBucket(affectSignal.confidence),
+      confidence: affectSignal.confidence,
       source: "model" as const,
       ts: nowIso,
     };
@@ -2597,17 +2604,94 @@ export async function runOrchestrationPipeline(args: {
   const messageIdForAffect = resolvePacketMessageId(packet, transmission);
   const offerSpanStart = mementoUpdate.latest?.affect.points[0]?.endMessageId ?? messageIdForAffect;
   const offerSpanEnd = mementoUpdate.latest?.affect.points.at(-1)?.endMessageId ?? messageIdForAffect;
-  const journalOffer = threadContextMode === "auto"
-    && mementoUpdate.latest
-    && mementoUpdate.moodSignal
-    ? classifyJournalOffer({
-        mood: mementoUpdate.moodSignal,
-        risk: gatesOutput.sentinel.risk,
-        phase: mementoUpdate.latest.affect.rollup.phase,
-        avoidPeakOverwhelm,
-        evidenceSpan: { startMessageId: offerSpanStart, endMessageId: offerSpanEnd },
-      })
-    : null;
+  const offerPhase = mementoUpdate.latest?.affect.rollup.phase;
+  const offerRisk = gatesOutput.sentinel.risk;
+  const offerLabel = mementoUpdate.moodSignal?.label ?? mementoUpdate.affectSignal?.label;
+
+  const offerSkipReasons: Array<
+    "no_affect_signal" | "label_neutral" | "risk_not_low" | "phase_blocked" | "cooldown" | "other"
+  > = [];
+
+  let journalOffer = null as ReturnType<typeof classifyJournalOffer>;
+  if (threadContextMode !== "auto" || !mementoUpdate.latest) {
+    offerSkipReasons.push("other");
+  } else if (!mementoUpdate.affectSignal) {
+    offerSkipReasons.push("no_affect_signal");
+  } else if (mementoUpdate.affectSignal.label === "neutral") {
+    offerSkipReasons.push("label_neutral");
+  } else if (offerRisk !== "low") {
+    offerSkipReasons.push("risk_not_low");
+  } else if (mementoUpdate.moodSignal && offerPhase) {
+    journalOffer = classifyJournalOffer({
+      mood: mementoUpdate.moodSignal,
+      risk: offerRisk,
+      phase: offerPhase,
+      avoidPeakOverwhelm,
+      evidenceSpan: { startMessageId: offerSpanStart, endMessageId: offerSpanEnd },
+    });
+
+    if (!journalOffer) {
+      const label = mementoUpdate.affectSignal.label;
+      if (label === "overwhelm") {
+        if (offerPhase !== "settled") {
+          offerSkipReasons.push("phase_blocked");
+        } else if (avoidPeakOverwhelm) {
+          offerSkipReasons.push("cooldown");
+        } else {
+          offerSkipReasons.push("other");
+        }
+      } else if (label === "gratitude") {
+        if (offerPhase === "rising" || offerPhase === "peak") {
+          offerSkipReasons.push("phase_blocked");
+        } else {
+          offerSkipReasons.push("other");
+        }
+      } else if (label === "resolve") {
+        if (offerPhase !== "settled") {
+          offerSkipReasons.push("phase_blocked");
+        } else {
+          offerSkipReasons.push("other");
+        }
+      } else {
+        offerSkipReasons.push("other");
+      }
+    }
+  }
+
+  if (journalOffer) {
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "output_gates",
+      status: "completed",
+      summary: "Journal offer attached",
+      metadata: {
+        kind: "journal_offer",
+        action: "attached",
+        label: offerLabel ?? null,
+        phase: offerPhase ?? null,
+        risk: offerRisk,
+      },
+    });
+  } else {
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "output_gates",
+      status: "completed",
+      summary: "Journal offer skipped",
+      metadata: {
+        kind: "journal_offer",
+        action: "skipped",
+        reason_codes: offerSkipReasons.length > 0 ? offerSkipReasons : ["other"],
+        label: offerLabel ?? null,
+        phase: offerPhase ?? null,
+        risk: offerRisk,
+      },
+    });
+  }
 
   if (journalOffer) {
     outputEnvelope = {

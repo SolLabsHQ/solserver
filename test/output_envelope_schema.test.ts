@@ -68,6 +68,7 @@ describe("OutputEnvelopeSchema strictness", () => {
     });
 
     expect(result.success).toBe(true);
+    expect(result.success && result.data.meta?.affect_signal?.confidence).toBe("high");
   });
 
   it("accepts journal suggestion with suggested_date", () => {

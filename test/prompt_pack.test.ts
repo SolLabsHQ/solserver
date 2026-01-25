@@ -54,6 +54,8 @@ describe("PromptPack evidence guidance", () => {
     expect(law).toContain("Return ONLY a JSON object matching OutputEnvelope.");
     expect(law).toContain("meta.shape (optional): provide arc/active/parked/decisions/next when possible.");
     expect(law).toContain("meta.affect_signal (optional): single-message affect for the CURRENT user message only.");
+    expect(law).toContain("affect_signal.confidence is a bucket: low | med | high.");
+    expect(law).toContain("If the user expresses insight");
     expect(law).toContain("If an EvidencePack is provided, include meta.claims[]");
     expect(law).toContain("If no EvidencePack is provided, omit meta.claims.");
     expect(law).toContain("Budgets: max claims=8, max refs/claim=4, max total refs=20.");

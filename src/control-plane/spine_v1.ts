@@ -6,6 +6,8 @@ export function buildSpineV1OutputContract(): string {
   lines.push("- Required field: assistant_text (string).");
   lines.push("- meta.shape (optional): provide arc/active/parked/decisions/next when possible.");
   lines.push("- meta.affect_signal (optional): single-message affect for the CURRENT user message only.");
+  lines.push("- affect_signal.confidence is a bucket: low | med | high.");
+  lines.push("- If the user expresses insight (e.g., \"I just realized...\"), label should be insight (not neutral).");
   lines.push("- Do NOT invent message IDs, spans, or cross-thread state.");
   lines.push("- If you include a shape section in assistant_text, keep it brief; structured meta is the contract.");
   lines.push("- If an EvidencePack is provided, include meta.claims[] with evidence_refs.");
@@ -22,11 +24,11 @@ export function buildSpineV1OutputContract(): string {
   lines.push("- Future: additional structured outputs will live under meta (e.g., capture_suggestion).");
   lines.push("Example OutputEnvelope (with evidence):");
   lines.push(
-    '{"assistant_text":"Receipt: ...\\nRelease: ...\\nNext: ...\\nAssumption: ...","meta":{"shape":{"arc":"...","active":["..."],"parked":["..."],"decisions":["..."],"next":["..."]},"affect_signal":{"label":"insight","intensity":0.82,"confidence":0.76},"claims":[{"claim_id":"cl-1","claim_text":"...","evidence_refs":[{"evidence_id":"ev-001","span_id":"sp-001"}]}]}}'
+    '{"assistant_text":"Receipt: ...\\nRelease: ...\\nNext: ...\\nAssumption: ...","meta":{"shape":{"arc":"...","active":["..."],"parked":["..."],"decisions":["..."],"next":["..."]},"affect_signal":{"label":"insight","intensity":0.82,"confidence":"high"},"claims":[{"claim_id":"cl-1","claim_text":"...","evidence_refs":[{"evidence_id":"ev-001","span_id":"sp-001"}]}]}}'
   );
   lines.push("Example OutputEnvelope (no evidence):");
   lines.push(
-    '{"assistant_text":"Receipt: ...\\nRelease: ...\\nNext: ...\\nAssumption: ...","meta":{"shape":{"arc":"...","active":["..."],"parked":["..."],"decisions":["..."],"next":["..."]},"affect_signal":{"label":"neutral","intensity":0.2,"confidence":0.4}}}'
+    '{"assistant_text":"Receipt: ...\\nRelease: ...\\nNext: ...\\nAssumption: ...","meta":{"shape":{"arc":"...","active":["..."],"parked":["..."],"decisions":["..."],"next":["..."]},"affect_signal":{"label":"neutral","intensity":0.2,"confidence":"low"}}}'
   );
 
   return lines.join("\n");

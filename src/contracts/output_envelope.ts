@@ -54,6 +54,12 @@ const CaptureSuggestionSchema = z.object({
 const GhostKindSchema = z.enum(["memory_artifact", "journal_moment", "action_proposal"]);
 const GhostRigorSchema = z.enum(["normal", "high"]);
 const AffectLabelSchema = z.enum(["overwhelm", "insight", "gratitude", "resolve", "curiosity", "neutral"]);
+const AffectConfidenceSchema = z.enum(["low", "med", "high"]);
+const confidenceBucket = (value: number): z.infer<typeof AffectConfidenceSchema> => {
+  if (value >= 0.7) return "high";
+  if (value >= 0.34) return "med";
+  return "low";
+};
 
 export const OutputEnvelopeShapeSchema = z.object({
   arc: z.string().min(1).max(SHAPE_MAX_ARC_CHARS),
@@ -66,7 +72,13 @@ export const OutputEnvelopeShapeSchema = z.object({
 export const OutputEnvelopeAffectSignalSchema = z.object({
   label: AffectLabelSchema,
   intensity: z.number().min(0).max(1),
-  confidence: z.number().min(0).max(1),
+  confidence: z.preprocess((value) => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const clamped = Math.min(1, Math.max(0, value));
+      return confidenceBucket(clamped);
+    }
+    return value;
+  }, AffectConfidenceSchema),
 }).strict();
 
 const JournalOfferSchema = z.object({
