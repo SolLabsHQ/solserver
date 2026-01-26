@@ -121,6 +121,8 @@ export async function chatRoutes(
     }
 
     const threadMemento = await loadThreadMementoLatest(transmission.threadId);
+    const journalOffer =
+      attempts.slice().reverse().find((attempt) => attempt.journalOffer)?.journalOffer ?? null;
 
     return {
       ok: true,
@@ -139,6 +141,7 @@ export async function chatRoutes(
           }
         : null,
       threadMemento,
+      journalOffer,
     };
   });
 

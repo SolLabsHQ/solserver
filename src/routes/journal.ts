@@ -257,7 +257,16 @@ export async function journalRoutes(
       });
     }
 
-    const spanMessages = spanTransmissions.map((transmission) => transmission.message);
+    const spanMessages = spanTransmissions
+      .map((transmission) => transmission.message)
+      .filter((message) => typeof message === "string" && message.trim().length > 0);
+    if (spanMessages.length === 0) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: "Evidence span resolved to empty messages",
+      });
+    }
+    const spanResolved = spanMessages.length === spanTransmissions.length;
     const sourceSpan = {
       threadId: data.threadId,
       startMessageId: data.evidenceSpan.startMessageId,
@@ -284,10 +293,12 @@ export async function journalRoutes(
       meta: {
         usedCpbIds,
         assumptions: [],
-        unknowns: [],
+        unknowns: spanResolved
+          ? []
+          : [{ id: "evidence_span_incomplete", text: "evidence_span_incomplete" }],
         evidenceBinding: {
           sourceSpan,
-          nonInvention: data.mode === "verbatim",
+          nonInvention: spanResolved,
         },
       },
     };

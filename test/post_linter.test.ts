@@ -67,6 +67,33 @@ describe("postOutputLinter", () => {
     }
   });
 
+  it("enforces must-have-any when none of the patterns are present", () => {
+    const block = makeBlock(`Rules\nValidators:\n- Must-have-any: "Receipt:" / "Summary:" / "Noted:"`);
+    const result = postOutputLinter({
+      modeDecision: baseModeDecision,
+      content: "No closure here",
+      driverBlocks: [block],
+      enforcementMode: "strict",
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violations[0].rule).toBe("must-have-any");
+    }
+  });
+
+  it("accepts must-have-any when any pattern is present", () => {
+    const block = makeBlock(`Rules\nValidators:\n- Must-have-any: "Receipt:" / "Summary:" / "Noted:"`);
+    const result = postOutputLinter({
+      modeDecision: baseModeDecision,
+      content: "Summary: OK",
+      driverBlocks: [block],
+      enforcementMode: "strict",
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
   it("treats quoted Must lines as enforceable", () => {
     const block = makeBlock(`Rules\nValidators:\n- Must: "Next:"`);
     const result = postOutputLinter({

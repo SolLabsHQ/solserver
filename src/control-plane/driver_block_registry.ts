@@ -44,9 +44,12 @@ Validators:
     version: "1.0",
     title: "DecisionClosure",
     scope: "global",
-    definition: `- When user wants closure or is ruminating: include Receipt → Release → Next.
+    definition: `- When user wants closure or is ruminating: end with a Closure block of 3-6 labeled lines.
+- Closure must include: acknowledgment line, framing/release line, next-step line.
 Validators:
-- Must-have: "Receipt:" + "Release:" + "Next:" (or clearly equivalent semantics).`,
+- Must-have-any: "Receipt:" / "Summary:" / "Noted:" / "What I hear:" / "What I heard:"
+- Must-have-any: "Release:" / "Frame:" / "Why it matters:" / "So what:" / "Reframe:"
+- Must-have-any: "Next:" / "Try:" / "Action:" / "Plan:" / "Step:"`,
     source: "system_shipped",
     approvedAt: "2026-01-11T00:00:00Z",
   },
@@ -64,16 +67,27 @@ Validators:
     approvedAt: "2026-01-11T00:00:00Z",
   },
   {
-    id: "DB-005",
-    version: "1.0",
-    title: "MissingFactsStopAsk",
-    scope: "global",
-    definition: `- Don't answer confidently when required facts are missing.
-- If missing: (1) state missing, (2) low-risk default with "Assumption:", (3) ask smallest question set.
+  id: "DB-005",
+  version: "1.1",
+  title: "MissingFactsStopAsk",
+  scope: "global",
+  definition: `When required facts are missing, do not answer confidently.
+
+Required behavior (in order):
+1) Explicitly state what critical info is missing (brief).
+2) Provide a low-risk provisional approach that is clearly marked as provisional.
+3) Ask the smallest set of questions needed to proceed.
+4) Do not fabricate missing facts.
+
 Validators:
-- Must-have: "Assumption:" when defaulting.
-- Must: ask for missing critical inputs; no fabrication.`,
-    source: "system_shipped",
-    approvedAt: "2026-01-11T00:00:00Z",
-  },
+- Must-have: a "provisional marker" line that clearly signals uncertainty, using ANY of these patterns:
+  - contains one of: "assume" | "assuming" | "provisional" | "tentative" | "working" | "defaulting" | "if that's not true"
+  - OR a bracket tag: "[assumption]" | "[provisional]" | "[default]"
+- Must-have: an explicit missing-info statement (detectable by phrases like):
+  - "I don't have" | "missing" | "need to know" | "to answer, I need" | "depends on"
+- Must-have: at least one question mark "?" OR an interrogative starter ("Which/What/When/Where/Who/How") asking for the missing critical input(s).
+- Must-not: introduce specific facts/numbers/decisions as if known when they were not provided.`,
+  source: "system_shipped",
+  approvedAt: "2026-01-25T00:00:00Z",
+},
 ];

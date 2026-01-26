@@ -178,6 +178,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         created_at TEXT NOT NULL,
         output_chars INTEGER,
         error TEXT,
+        journal_offer_json TEXT,
         FOREIGN KEY (transmission_id) REFERENCES transmissions(id)
       );
 
@@ -452,6 +453,9 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     } catch {}
     try {
       this.db.exec("ALTER TABLE memory_artifacts ADD COLUMN rigor_reason TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE delivery_attempts ADD COLUMN journal_offer_json TEXT");
     } catch {}
   }
 
@@ -890,6 +894,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     status: DeliveryStatus;
     outputChars?: number;
     error?: string;
+    journalOffer?: DeliveryAttempt["journalOffer"] | null;
   }): Promise<DeliveryAttempt> {
     const a: DeliveryAttempt = {
       id: randomUUID(),
@@ -899,11 +904,14 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       createdAt: new Date().toISOString(),
       outputChars: args.outputChars,
       error: args.error,
+      journalOffer: args.journalOffer ?? null,
     };
 
     const stmt = this.db.prepare(`
-      INSERT INTO delivery_attempts (id, transmission_id, provider, status, created_at, output_chars, error)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO delivery_attempts (
+        id, transmission_id, provider, status, created_at, output_chars, error, journal_offer_json
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -913,7 +921,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       a.status,
       a.createdAt,
       a.outputChars ?? null,
-      a.error ?? null
+      a.error ?? null,
+      a.journalOffer ? JSON.stringify(a.journalOffer) : null
     );
 
     return a;
@@ -968,6 +977,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       createdAt: row.created_at,
       outputChars: row.output_chars ?? undefined,
       error: row.error ?? undefined,
+      journalOffer: row.journal_offer_json ? JSON.parse(row.journal_offer_json) : null,
     }));
   }
 

@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 import { routeMode, resolvePersonaLabel } from "./router";
 import { buildPromptPack, toSinglePromptText, promptPackLogShape, withCorrectionSection, type PromptPack } from "./prompt_pack";
 import { runGatesPipeline } from "../gates/gates_pipeline";
@@ -35,7 +37,7 @@ import { fakeModelReplyWithMeta } from "../providers/fake_model";
 import { openAIModelReplyWithMeta, OpenAIProviderError } from "../providers/openai_model";
 import { selectModel } from "../providers/provider_config";
 import { GATE_SENTINEL, type GateOutput } from "../gates/gate_interfaces";
-import type { ControlPlaneStore, TraceRun, Transmission } from "../store/control_plane_store";
+import type { ControlPlaneStore, JournalOfferRecord, TraceRun, Transmission } from "../store/control_plane_store";
 import {
   OUTPUT_ENVELOPE_META_ALLOWED_KEYS,
   OutputEnvelopeShapeSchema,
@@ -113,6 +115,17 @@ export function buildOutputEnvelopeMeta(args: {
   return { ...args.envelope, meta, notification_policy: args.notificationPolicy };
 }
 
+function formatThreadMementoResponse(memento: any | null) {
+  if (!memento || typeof memento !== "object") return memento ?? null;
+  const mementoId = memento.mementoId ?? memento.id ?? null;
+  const createdAt = memento.createdAt ?? memento.createdTs ?? null;
+  return {
+    ...memento,
+    ...(mementoId ? { id: mementoId } : {}),
+    ...(createdAt ? { createdAt } : {}),
+  };
+}
+
 export function resolveSafetyIsUrgent(args: {
   results: GateOutput[];
   log?: { warn: (obj: Record<string, any>, msg?: string) => void };
@@ -168,6 +181,64 @@ function resolveThreadContextMode(packet: PacketInput): ThreadContextMode {
   return packet.thread_context_mode === "off" ? "off" : "auto";
 }
 
+function resolveJournalOfferMode(packet: PacketInput): JournalOfferRecord["mode"] | undefined {
+  const meta = (packet.meta ?? {}) as Record<string, any>;
+  const journalStyle =
+    meta.cpb_journal_style
+    ?? meta.cpbJournalStyle
+    ?? meta.journalStyle
+    ?? null;
+  const settings = journalStyle && typeof journalStyle === "object"
+    ? ((journalStyle as any).settings ?? journalStyle)
+    : null;
+  const raw =
+    settings?.default_mode
+    ?? settings?.defaultMode
+    ?? meta.journal_mode
+    ?? meta.journalMode;
+  return raw === "assist" || raw === "verbatim" ? raw : undefined;
+}
+
+function buildJournalOfferRecord(args: {
+  journalOffer: ReturnType<typeof classifyJournalOffer> | null;
+  offerSpanStart: string;
+  offerSpanEnd: string;
+  offerSkipReasons: Array<
+    "no_affect_signal" | "label_neutral" | "risk_not_low" | "phase_blocked" | "cooldown" | "other"
+  >;
+  offerPhase?: "rising" | "peak" | "downshift" | "settled";
+  offerRisk: "low" | "med" | "high";
+  offerLabel?: JournalOfferRecord["label"];
+  offerIntensityBucket?: JournalOfferRecord["intensityBucket"];
+  offerMode?: JournalOfferRecord["mode"];
+}): JournalOfferRecord {
+  const base: JournalOfferRecord = {
+    kind: "journal_offer",
+    offerEligible: Boolean(args.journalOffer),
+    phase: args.offerPhase,
+    risk: args.offerRisk,
+    label: args.offerLabel,
+    intensityBucket: args.offerIntensityBucket,
+  };
+
+  if (args.offerMode) {
+    base.mode = args.offerMode;
+  }
+
+  if (args.journalOffer) {
+    base.evidenceSpan = {
+      startMessageId: args.journalOffer.evidenceSpan.startMessageId || args.offerSpanStart,
+      endMessageId: args.journalOffer.evidenceSpan.endMessageId || args.offerSpanEnd,
+    };
+    return base;
+  }
+
+  base.reasonCodes = args.offerSkipReasons.length > 0
+    ? args.offerSkipReasons
+    : ["other"];
+  return base;
+}
+
 const AFFECT_LABELS = new Set(["overwhelm", "insight", "gratitude", "resolve", "curiosity", "neutral"]);
 
 type NormalizedAffectSignal = {
@@ -214,9 +285,32 @@ function toMoodSignal(signal: NormalizedAffectSignal | null): MoodSignal | null 
   };
 }
 
-function parseShape(raw: unknown): OutputEnvelopeShapeSchema["_type"] | null {
+type OutputEnvelopeShape = z.infer<typeof OutputEnvelopeShapeSchema>;
+
+function parseShape(raw: unknown): OutputEnvelopeShape | null {
   const parsed = OutputEnvelopeShapeSchema.safeParse(raw);
   return parsed.success ? parsed.data : null;
+}
+
+const DEFAULT_THREAD_MEMENTO_SHAPE: OutputEnvelopeShape = {
+  arc: "support",
+  active: [],
+  parked: [],
+  decisions: [],
+  next: [],
+};
+
+function bootstrapThreadMementoShape(previous: ThreadMementoLatestInternal | null): OutputEnvelopeShape {
+  if (previous) {
+    return {
+      arc: previous.arc,
+      active: [...previous.active],
+      parked: [...previous.parked],
+      decisions: [...previous.decisions],
+      next: [...previous.next],
+    };
+  }
+  return { ...DEFAULT_THREAD_MEMENTO_SHAPE };
 }
 
 async function updateThreadMementoLatestFromEnvelope(args: {
@@ -257,13 +351,7 @@ async function updateThreadMementoLatestFromEnvelope(args: {
         decisions: [...shape.decisions],
         next: [...shape.next],
       }
-    : {
-        arc: previous?.arc ?? "Untitled",
-        active: previous?.active ? [...previous.active] : [],
-        parked: previous?.parked ? [...previous.parked] : [],
-        decisions: previous?.decisions ? [...previous.decisions] : [],
-        next: previous?.next ? [...previous.next] : [],
-      };
+    : bootstrapThreadMementoShape(previous);
 
   let nextAffect = baseAffect;
   if (affectSignal) {
@@ -516,7 +604,7 @@ function buildOutputEnvelopeMetadata(args: {
   };
 }
 
-function summarizeZodIssues(issues: Array<{ path: (string | number)[]; code: string; message: string }>) {
+function summarizeZodIssues(issues: Array<{ path: PropertyKey[]; code: string; message: string }>) {
   return issues.slice(0, 10).map((issue) => ({
     path: issue.path
       .map((segment) => (typeof segment === "number" ? `[${segment}]` : String(segment)))
@@ -546,6 +634,9 @@ function buildCorrectionText(violations: PostLinterViolation[], driverBlocks: Ar
   const ruleLines = violations.slice(0, 6).map((v) => {
     if (v.rule === "must-not") {
       return `- Avoid: "${v.pattern}"`;
+    }
+    if (v.rule === "must-have-any") {
+      return `- Include one of: "${v.pattern}"`;
     }
     return `- Include: "${v.pattern}"`;
   });
@@ -682,6 +773,10 @@ function normalizeOutputEnvelopeForResponse(envelope: OutputEnvelope): OutputEnv
     meta.journalOffer = envelope.meta.journalOffer;
   } else if (envelope.meta.journal_offer !== undefined) {
     meta.journalOffer = envelope.meta.journal_offer;
+  }
+
+  if (Object.keys(meta).length > 0 && meta.meta_version === undefined) {
+    meta.meta_version = "v1";
   }
 
   return Object.keys(meta).length > 0
@@ -1140,7 +1235,7 @@ export async function runOrchestrationPipeline(args: {
       },
     });
 
-    if (args.logger) {
+    if (args.logger?.info) {
       args.logger.info(
         {
           evt: "llm.provider.used",
@@ -2605,8 +2700,10 @@ export async function runOrchestrationPipeline(args: {
   const offerSpanStart = mementoUpdate.latest?.affect.points[0]?.endMessageId ?? messageIdForAffect;
   const offerSpanEnd = mementoUpdate.latest?.affect.points.at(-1)?.endMessageId ?? messageIdForAffect;
   const offerPhase = mementoUpdate.latest?.affect.rollup.phase;
+  const offerIntensityBucket = mementoUpdate.latest?.affect.rollup.intensityBucket;
   const offerRisk = gatesOutput.sentinel.risk;
   const offerLabel = mementoUpdate.moodSignal?.label ?? mementoUpdate.affectSignal?.label;
+  const offerMode = resolveJournalOfferMode(packet);
 
   const offerSkipReasons: Array<
     "no_affect_signal" | "label_neutral" | "risk_not_low" | "phase_blocked" | "cooldown" | "other"
@@ -2658,6 +2755,17 @@ export async function runOrchestrationPipeline(args: {
     }
   }
 
+  log.info({
+    evt: "journal_offer.decision",
+    offerEligible: Boolean(journalOffer),
+    showOffer: Boolean(journalOffer),
+    label: offerLabel ?? null,
+    phase: offerPhase ?? null,
+    risk: offerRisk,
+    intensityBucket: offerIntensityBucket ?? null,
+    skipReasons: offerSkipReasons.length > 0 ? offerSkipReasons : null,
+  }, "journal_offer.decision");
+
   if (journalOffer) {
     await appendTrace({
       traceRunId: traceRun.id,
@@ -2669,9 +2777,12 @@ export async function runOrchestrationPipeline(args: {
       metadata: {
         kind: "journal_offer",
         action: "attached",
+        offerEligible: true,
+        showOffer: true,
         label: offerLabel ?? null,
         phase: offerPhase ?? null,
         risk: offerRisk,
+        intensityBucket: offerIntensityBucket ?? null,
       },
     });
   } else {
@@ -2685,13 +2796,28 @@ export async function runOrchestrationPipeline(args: {
       metadata: {
         kind: "journal_offer",
         action: "skipped",
+        offerEligible: false,
+        showOffer: false,
         reason_codes: offerSkipReasons.length > 0 ? offerSkipReasons : ["other"],
         label: offerLabel ?? null,
         phase: offerPhase ?? null,
         risk: offerRisk,
+        intensityBucket: offerIntensityBucket ?? null,
       },
     });
   }
+
+  const journalOfferRecord = buildJournalOfferRecord({
+    journalOffer,
+    offerSpanStart,
+    offerSpanEnd,
+    offerSkipReasons,
+    offerPhase,
+    offerRisk,
+    offerLabel: offerLabel as JournalOfferRecord["label"] | undefined,
+    offerIntensityBucket: offerIntensityBucket as JournalOfferRecord["intensityBucket"] | undefined,
+    offerMode,
+  });
 
   if (journalOffer) {
     outputEnvelope = {
@@ -2705,6 +2831,7 @@ export async function runOrchestrationPipeline(args: {
     provider: llmProvider,
     status: "succeeded",
     outputChars: assistant.length,
+    journalOffer: journalOfferRecord,
   });
 
   await store.recordUsage({
@@ -2746,6 +2873,8 @@ export async function runOrchestrationPipeline(args: {
     notificationPolicy: resolvedNotificationPolicy,
   });
 
+  const responseThreadMemento = formatThreadMementoResponse(threadMemento);
+
   log.info({ evt: "chat.responded", statusCode: 200, attemptsUsed }, "chat.responded");
   return respond(200, {
     ok: true,
@@ -2753,7 +2882,7 @@ export async function runOrchestrationPipeline(args: {
     modeDecision,
     assistant,
     outputEnvelope: responseEnvelope,
-    threadMemento,
+    threadMemento: responseThreadMemento,
     driverBlocks: driverBlockSummary,
     // Evidence fields (PR #7.1): include evidence only when present
     ...(hasEvidence ? { evidence: effectiveEvidence } : {}),

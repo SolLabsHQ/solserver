@@ -35,6 +35,22 @@ export type DeliveryAttempt = {
   createdAt: string;
   outputChars?: number;
   error?: string;
+  journalOffer?: JournalOfferRecord | null;
+};
+
+export type JournalOfferRecord = {
+  kind: "journal_offer";
+  offerEligible: boolean;
+  evidenceSpan?: {
+    startMessageId: string;
+    endMessageId: string;
+  };
+  reasonCodes?: string[];
+  mode?: "verbatim" | "assist";
+  phase?: "rising" | "peak" | "downshift" | "settled";
+  risk?: "low" | "med" | "high";
+  label?: "overwhelm" | "insight" | "gratitude" | "resolve" | "curiosity" | "neutral";
+  intensityBucket?: "low" | "med" | "high";
 };
 
 export type UsageRecord = {
@@ -241,6 +257,7 @@ export interface ControlPlaneStore {
     status: DeliveryStatus;
     outputChars?: number;
     error?: string;
+    journalOffer?: JournalOfferRecord | null;
   }): Promise<DeliveryAttempt>;
 
   recordUsage(args: {
@@ -992,6 +1009,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     status: DeliveryStatus;
     outputChars?: number;
     error?: string;
+    journalOffer?: JournalOfferRecord | null;
   }): Promise<DeliveryAttempt> {
     const a: DeliveryAttempt = {
       id: randomUUID(),
@@ -1001,6 +1019,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       createdAt: new Date().toISOString(),
       outputChars: args.outputChars,
       error: args.error,
+      journalOffer: args.journalOffer ?? null,
     };
 
     const list = this.attempts.get(args.transmissionId) ?? [];
@@ -1201,8 +1220,9 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       .filter((entry) => (args.threadId ? entry.sourceSpan.threadId === args.threadId : true))
       .sort((a, b) => (a.createdTs > b.createdTs ? -1 : a.createdTs < b.createdTs ? 1 : 0));
 
-    const filtered = args.before
-      ? ordered.filter((entry) => entry.createdTs < args.before)
+    const before = args.before ?? null;
+    const filtered = before
+      ? ordered.filter((entry) => entry.createdTs < before)
       : ordered;
 
     const limit = args.limit ?? 50;

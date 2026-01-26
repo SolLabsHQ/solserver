@@ -168,6 +168,41 @@ describe("OutputEnvelope v0-min", () => {
     expect(body.outputEnvelope.meta.unexpected_key).toBeUndefined();
   });
 
+  it("adds meta_version when journalOffer is present", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": JSON.stringify({
+          assistant_text: SHAPE_ASSISTANT_TEXT,
+          meta: {
+            journalOffer: {
+              momentId: "moment-1",
+              momentType: "insight",
+              phase: "settled",
+              confidence: "med",
+              evidenceSpan: {
+                startMessageId: "msg-1",
+                endMessageId: "msg-1",
+              },
+              offerEligible: true,
+            },
+          },
+        }),
+      },
+      payload: {
+        packetType: "chat",
+        threadId: "thread-output-envelope-006",
+        message: "Test message",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.outputEnvelope.meta.meta_version).toBe("v1");
+    expect(body.outputEnvelope.meta.journalOffer).toBeTruthy();
+  });
+
   it("emits a debug trace when meta keys are stripped", async () => {
     const response = await app.inject({
       method: "POST",

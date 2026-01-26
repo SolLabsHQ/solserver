@@ -76,7 +76,7 @@ describe("/v1/journal routes", () => {
     expect(body.sourceSpan.startMessageId).toBe(payload.evidenceSpan.startMessageId);
     expect(body.sourceSpan.endMessageId).toBe(payload.evidenceSpan.endMessageId);
     expect(body.meta.evidenceBinding.sourceSpan.startMessageId).toBe(payload.evidenceSpan.startMessageId);
-    expect(body.meta.evidenceBinding.nonInvention).toBe(false);
+    expect(body.meta.evidenceBinding.nonInvention).toBe(true);
   });
 
   it("creates, lists, updates, and deletes journal entries", async () => {

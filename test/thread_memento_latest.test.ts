@@ -67,6 +67,8 @@ describe("ThreadMementoLatest", () => {
     expect(response.statusCode).toBe(200);
     const body = response.json();
     expect(body.threadMemento).toBeTruthy();
+    expect(body.threadMemento.id).toBeTruthy();
+    expect(body.threadMemento.createdAt).toBeTruthy();
     expect(body.threadMemento.affect.points.length).toBe(1);
     expect(body.threadMemento.affect.points[0].label).toBe("insight");
     expect(body.threadMemento.affect.points[0].confidence).toBe("high");

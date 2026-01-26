@@ -4,7 +4,7 @@ import type { AssembledDriverBlock } from "../control-plane/driver_blocks";
 
 export type PostLinterViolation = {
   blockId: string;
-  rule: "must-not" | "must-have";
+  rule: "must-not" | "must-have" | "must-have-any";
   pattern: string;
 };
 
@@ -12,7 +12,7 @@ export type PostLinterBlockResult = {
   blockId: string;
   ok: boolean;
   reason?: {
-    rule: "must-not" | "must-have";
+    rule: "must-not" | "must-have" | "must-have-any";
     pattern: string;
   };
   durationMs: number;
@@ -23,8 +23,8 @@ export type PostLinterResult =
   | { ok: false; violations: PostLinterViolation[]; blockResults: PostLinterBlockResult[] };
 
 type ParsedRule = {
-  rule: "must-not" | "must-have";
-  pattern: string;
+  rule: "must-not" | "must-have" | "must-have-any";
+  patterns: string[];
 };
 
 export type DriverBlockEnforcementMode = "strict" | "warn" | "off";
@@ -95,7 +95,7 @@ export function parseValidatorsFromDefinition(definition: string): ParsedRule[] 
       continue;
     }
 
-    const match = trimmed.match(/^\-\s*(Must-not|Must-have|Must):\s*(.*)$/i);
+    const match = trimmed.match(/^\-\s*(Must-not|Must-have-any(?:-of)?|Must-have|Must):\s*(.*)$/i);
     if (!match) continue;
 
     const kindRaw = match[1].toLowerCase();
@@ -105,12 +105,20 @@ export function parseValidatorsFromDefinition(definition: string): ParsedRule[] 
       continue;
     }
 
-    const ruleKind: "must-not" | "must-have" =
-      kindRaw === "must-not" ? "must-not" : "must-have";
+    const ruleKind: ParsedRule["rule"] =
+      kindRaw === "must-not"
+        ? "must-not"
+        : kindRaw.startsWith("must-have-any")
+          ? "must-have-any"
+          : "must-have";
 
-    for (const pattern of quoted) {
-      for (const expanded of expandSlashPattern(pattern)) {
-        rules.push({ rule: ruleKind, pattern: expanded });
+    const expandedPatterns = quoted.flatMap((pattern) => expandSlashPattern(pattern));
+
+    if (ruleKind === "must-have-any") {
+      rules.push({ rule: ruleKind, patterns: expandedPatterns });
+    } else {
+      for (const expanded of expandedPatterns) {
+        rules.push({ rule: ruleKind, patterns: [expanded] });
       }
     }
   }
@@ -150,13 +158,32 @@ export function postOutputLinter(args: {
     const blockWarnings: PostLinterViolation[] = [];
     const rules = parseValidatorsFromDefinition(block.definition);
     for (const rule of rules) {
-      const patternLower = rule.pattern.toLowerCase();
+      const patternLower = rule.patterns.map((pattern) => pattern.toLowerCase());
       if (rule.rule === "must-not") {
-        if (contentLower.includes(patternLower)) {
+        if (contentLower.includes(patternLower[0])) {
           const violation: PostLinterViolation = {
             blockId: block.id,
             rule: "must-not",
-            pattern: rule.pattern,
+            pattern: rule.patterns[0],
+          };
+          const treatAsWarning =
+            enforcementMode === "warn"
+            || (block.id === "DB-003" && shouldBypassDb003);
+          if (treatAsWarning) {
+            warnings.push(violation);
+            blockWarnings.push(violation);
+          } else {
+            violations.push(violation);
+            blockViolations.push(violation);
+          }
+        }
+      } else if (rule.rule === "must-have-any") {
+        const found = patternLower.some((pattern) => contentLower.includes(pattern));
+        if (!found) {
+          const violation: PostLinterViolation = {
+            blockId: block.id,
+            rule: "must-have-any",
+            pattern: rule.patterns.join(" | "),
           };
           const treatAsWarning =
             enforcementMode === "warn"
@@ -170,11 +197,11 @@ export function postOutputLinter(args: {
           }
         }
       } else {
-        if (!contentLower.includes(patternLower)) {
+        if (!contentLower.includes(patternLower[0])) {
           const violation: PostLinterViolation = {
             blockId: block.id,
             rule: "must-have",
-            pattern: rule.pattern,
+            pattern: rule.patterns[0],
           };
           const treatAsWarning =
             enforcementMode === "warn"
