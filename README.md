@@ -135,6 +135,14 @@ Configuration is environment-based and not committed to source control.
 - Optional tracing with low sampling
 - Token usage recorded per request
 - Cost visibility treated as a product feature, not an afterthought
+- Worker log controls:
+  - `WORKER_HEARTBEAT_LOG=off|smart|info|debug` (default: smart)
+  - `WORKER_NONE_LOG=off|debug` (default: off)
+- Output contract retry (staging/dev):
+  - `OUTPUT_CONTRACT_RETRY_ENABLED=0|1`
+  - `OUTPUT_CONTRACT_RETRY_MODEL_PROVIDER=openai`
+  - `OUTPUT_CONTRACT_RETRY_MODEL=gpt-5-mini`
+  - `OUTPUT_CONTRACT_RETRY_ON=schema_invalid,json_parse_failed`
 
 ---
 

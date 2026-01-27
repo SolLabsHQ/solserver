@@ -20,6 +20,10 @@ export const NotificationPolicy = z.enum(["silent", "muted", "alert", "urgent"])
 
 export type NotificationPolicy = z.infer<typeof NotificationPolicy>;
 
+export const ThreadContextMode = z.enum(["off", "auto"]);
+
+export type ThreadContextMode = z.infer<typeof ThreadContextMode>;
+
 // Driver Block reference (for system defaults)
 export const DriverBlockRef = z.object({
   id: z.string().min(1),
@@ -117,6 +121,7 @@ export const PacketInput = z.object({
   driverBlockInline: z.array(DriverBlockInline).optional(), // Bounded by enforcement logic
   // Evidence (v0) - typed validation
   evidence: Evidence.optional(),
+  thread_context_mode: ThreadContextMode.optional(),
   meta: z.record(z.string(), z.any()).optional(),
 }).strict();
 

@@ -5,8 +5,11 @@ import cors from "@fastify/cors";
 import { chatRoutes } from "../src/routes/chat";
 import { MemoryControlPlaneStore } from "../src/store/control_plane_store";
 
-const OUTPUT_CONTRACT_STUB =
-  "I can't do that directly from here. Tell me what you're trying to accomplish and I'll give you a safe draft or step-by-step instructions.";
+const OUTPUT_CONTRACT_STUB = [
+  "Missing info: I couldn't validate the model response against the output contract.",
+  "Provisional: I can retry with a stricter output format if you'd like.",
+  "Question: Want me to retry, or can you rephrase your request?",
+].join("\n");
 const SHAPE_ASSISTANT_TEXT = [
   "shape:",
   "- Arc: ok",
@@ -80,7 +83,7 @@ describe("OutputEnvelope v0-min", () => {
     expect(response.headers["x-sol-trace-run-id"]).toBeTruthy();
   });
 
-  it("fails when claims are present but empty", async () => {
+  it("logs schema issues when full schema fails but v0-min passes", async () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/chat",
@@ -93,6 +96,37 @@ describe("OutputEnvelope v0-min", () => {
       payload: {
         packetType: "chat",
         threadId: "thread-output-envelope-004",
+        message: "Test message",
+        traceConfig: { level: "debug" },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.outputEnvelope).toBeDefined();
+
+    const traceRunId = response.headers["x-sol-trace-run-id"] as string;
+    expect(traceRunId).toBeTruthy();
+    const events = await store.getTraceEvents(traceRunId, { limit: 50 });
+    const warning = events.find((event) =>
+      event.metadata?.kind === "output_envelope_schema_warning"
+    );
+    expect(warning).toBeTruthy();
+  });
+
+  it("fails when ghost_card output is missing required fields", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": JSON.stringify({
+          assistant_text: "Ghost draft",
+          meta: { display_hint: "ghost_card" },
+        }),
+      },
+      payload: {
+        packetType: "chat",
+        threadId: "thread-output-envelope-ghost-001",
         message: "Test message",
       },
     });
@@ -110,7 +144,17 @@ describe("OutputEnvelope v0-min", () => {
       headers: {
         "x-sol-test-output-envelope": JSON.stringify({
           assistant_text: SHAPE_ASSISTANT_TEXT,
-          meta: { meta_version: "v1", unexpected_key: "nope" },
+          meta: {
+            meta_version: "v1",
+            librarian_gate: {
+              version: "v0",
+              pruned_refs: 0,
+              unsupported_claims: 0,
+              support_score: 1,
+              verdict: "pass",
+            },
+            unexpected_key: "nope",
+          },
         }),
       },
       payload: {
@@ -123,7 +167,43 @@ describe("OutputEnvelope v0-min", () => {
     expect(response.statusCode).toBe(200);
     const body = response.json();
     expect(body.outputEnvelope.meta.meta_version).toBe("v1");
+    expect(body.outputEnvelope.meta.librarian_gate).toBeDefined();
     expect(body.outputEnvelope.meta.unexpected_key).toBeUndefined();
+  });
+
+  it("adds meta_version when journalOffer is present", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": JSON.stringify({
+          assistant_text: SHAPE_ASSISTANT_TEXT,
+          meta: {
+            journalOffer: {
+              momentId: "moment-1",
+              momentType: "insight",
+              phase: "settled",
+              confidence: "med",
+              evidenceSpan: {
+                startMessageId: "msg-1",
+                endMessageId: "msg-1",
+              },
+              offerEligible: true,
+            },
+          },
+        }),
+      },
+      payload: {
+        packetType: "chat",
+        threadId: "thread-output-envelope-006",
+        message: "Test message",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.outputEnvelope.meta.meta_version).toBe("v1");
+    expect(body.outputEnvelope.meta.journalOffer).toBeTruthy();
   });
 
   it("emits a debug trace when meta keys are stripped", async () => {

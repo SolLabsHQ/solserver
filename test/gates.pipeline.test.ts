@@ -64,7 +64,7 @@ describe("Gates Pipeline", () => {
     } catch {}
   });
 
-  it("should run gates in correct order: evidence_intake → normalize_modality → url_extraction → intent → sentinel → lattice", async () => {
+  it("should run gates in correct order: evidence_intake → normalize_modality → gate_url_extraction → intent → sentinel → lattice", async () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/chat",
@@ -85,7 +85,7 @@ describe("Gates Pipeline", () => {
     // Find gate-related events
     const evidenceIntake = traceEvents.find(e => e.phase === "evidence_intake");
     const normalizeModality = traceEvents.find(e => e.phase === "gate_normalize_modality");
-    const urlExtraction = traceEvents.find(e => e.phase === "url_extraction");
+    const urlExtraction = traceEvents.find(e => e.phase === "gate_url_extraction");
     const intentGate = traceEvents.find(e => e.phase === "gate_intent");
     const sentinelGate = traceEvents.find(e => e.phase === "gate_sentinel");
     const lattice = traceEvents.find(e => e.phase === "gate_lattice");
@@ -101,7 +101,7 @@ describe("Gates Pipeline", () => {
     const gatePhases = [
       "evidence_intake",
       "gate_normalize_modality",
-      "url_extraction",
+      "gate_url_extraction",
       "gate_intent",
       "gate_sentinel",
       "gate_lattice",
@@ -223,9 +223,11 @@ describe("Gates Pipeline", () => {
   it("should ignore forceEvidence in production", async () => {
     const prevNodeEnv = process.env.NODE_ENV;
     const prevForce = process.env.EVIDENCE_PROVIDER_FORCE;
+    const prevEnforcement = process.env.SOL_ENFORCEMENT_MODE;
     try {
       process.env.NODE_ENV = "production";
       process.env.EVIDENCE_PROVIDER_FORCE = "1";
+      process.env.SOL_ENFORCEMENT_MODE = "warn";
 
       const response = await app.inject({
         method: "POST",
@@ -256,6 +258,11 @@ describe("Gates Pipeline", () => {
         delete process.env.EVIDENCE_PROVIDER_FORCE;
       } else {
         process.env.EVIDENCE_PROVIDER_FORCE = prevForce;
+      }
+      if (prevEnforcement === undefined) {
+        delete process.env.SOL_ENFORCEMENT_MODE;
+      } else {
+        process.env.SOL_ENFORCEMENT_MODE = prevEnforcement;
       }
     }
   });
@@ -521,7 +528,7 @@ describe("Gates Pipeline", () => {
     const phases = traceEvents.map(e => e.phase);
     expect(phases).toContain("evidence_intake");
     expect(phases).toContain("gate_normalize_modality");
-    expect(phases).toContain("url_extraction");
+    expect(phases).toContain("gate_url_extraction");
     expect(phases).toContain("gate_intent");
     expect(phases).toContain("gate_sentinel");
     expect(phases).toContain("gate_lattice");

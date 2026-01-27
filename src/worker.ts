@@ -53,6 +53,8 @@ const heartbeatEvery = Number(process.env.WORKER_HEARTBEAT_EVERY ?? 20) || 20;
 const suppressIdleLogs = ["1", "true", "yes"].includes(
   String(process.env.WORKER_SUPPRESS_IDLE_LOGS ?? "").toLowerCase()
 );
+const heartbeatLogMode = String(process.env.WORKER_HEARTBEAT_LOG ?? "smart").toLowerCase();
+const noneLogMode = String(process.env.WORKER_NONE_LOG ?? "off").toLowerCase();
 const workerId = process.env.WORKER_ID ?? randomUUID();
 const leaseAttemptLimit = Number(process.env.WORKER_LEASE_ATTEMPTS ?? 5) || 5;
 const emptyScanLimit = Number(process.env.WORKER_EMPTY_SCANS ?? 2) || 2;
@@ -279,7 +281,7 @@ async function processMemoryDistillTransmission(transmission: Transmission) {
 }
 
 async function logHeartbeat(reason: "startup" | "poll") {
-  if (suppressIdleLogs) {
+  if (suppressIdleLogs || heartbeatLogMode === "off") {
     return;
   }
   const activeStore = requireStore();
@@ -299,31 +301,51 @@ async function logHeartbeat(reason: "startup" | "poll") {
     ? Date.now() - Date.parse(memoryStats.oldestCreatedAt)
     : null;
 
-  log.info(
-    {
-      evt: "worker.heartbeat",
-      reason,
-      dbPath,
-      dbStat: getDbStat(dbPath),
-      chat: {
-        leaseableCount: chatStats.leaseableCount,
-        oldestCreatedAgeMs: oldestChatAgeMs,
-        filter: chatFilter,
-      },
-      memoryDistill: {
-        leaseableCount: memoryStats.leaseableCount,
-        oldestCreatedAgeMs: oldestMemoryAgeMs,
-        filter: memoryFilter,
-      },
-      leaseStats: {
-        attempts: leaseAttempts,
-        wins: leaseWins,
-        contention: leaseContention,
-        empty: leaseEmpty,
-      },
+  const dbStat = getDbStat(dbPath);
+  const payload = {
+    evt: "worker.heartbeat",
+    reason,
+    dbPath,
+    dbStat,
+    chat: {
+      leaseableCount: chatStats.leaseableCount,
+      oldestCreatedAgeMs: oldestChatAgeMs,
+      filter: chatFilter,
     },
-    "worker.heartbeat"
-  );
+    memoryDistill: {
+      leaseableCount: memoryStats.leaseableCount,
+      oldestCreatedAgeMs: oldestMemoryAgeMs,
+      filter: memoryFilter,
+    },
+    leaseStats: {
+      attempts: leaseAttempts,
+      wins: leaseWins,
+      contention: leaseContention,
+      empty: leaseEmpty,
+    },
+  };
+
+  const meaningful =
+    dbStat.exists === false ||
+    chatStats.leaseableCount > 0 ||
+    memoryStats.leaseableCount > 0 ||
+    leaseWins > 0 ||
+    leaseContention > 0;
+
+  if (heartbeatLogMode === "debug") {
+    log.debug(payload, "worker.heartbeat");
+    return;
+  }
+
+  if (heartbeatLogMode === "info") {
+    log.info(payload, "worker.heartbeat");
+    return;
+  }
+
+  // smart: log info only when meaningful, otherwise stay quiet
+  if (meaningful) {
+    log.info(payload, "worker.heartbeat");
+  }
 }
 
 async function processChat(opts: { logIdle: boolean }) {
@@ -367,12 +389,9 @@ async function processChat(opts: { logIdle: boolean }) {
   }
 
   if (!leased || leased.outcome !== "leased") {
-    if (!suppressIdleLogs) {
+    if (!suppressIdleLogs && noneLogMode === "debug") {
       const payload = { evt: "worker.transmission.none", filter: chatFilter, reason: lastOutcome };
       log.debug(payload, "worker.transmission.none");
-      if (opts.logIdle) {
-        log.info(payload, "worker.transmission.none");
-      }
     }
     return;
   }
@@ -487,12 +506,9 @@ async function processMemory(opts: { logIdle: boolean }) {
   }
 
   if (!leased || leased.outcome !== "leased") {
-    if (!suppressIdleLogs) {
+    if (!suppressIdleLogs && noneLogMode === "debug") {
       const payload = { evt: "worker.transmission.none", filter: memoryFilter, reason: lastOutcome };
       log.debug(payload, "worker.transmission.none");
-      if (opts.logIdle) {
-        log.info(payload, "worker.transmission.none");
-      }
     }
     return;
   }

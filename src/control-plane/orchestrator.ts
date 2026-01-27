@@ -1,15 +1,25 @@
+import { z } from "zod";
+
 import { routeMode, resolvePersonaLabel } from "./router";
 import { buildPromptPack, toSinglePromptText, promptPackLogShape, withCorrectionSection, type PromptPack } from "./prompt_pack";
 import { runGatesPipeline } from "../gates/gates_pipeline";
 import {
-  getLatestThreadMemento,
-  putThreadMemento,
   retrieveContext,
   retrievalLogShape,
+  getThreadMementoLatestCached,
+  setThreadMementoLatestCached,
+  updateLatestAffectWithPoint,
+  sanitizeThreadMementoLatest,
+  shouldPersistThreadMementoLatest,
+  noteThreadMementoLatestTurn,
+  markThreadMementoLatestPersisted,
+  type ThreadMementoLatestInternal,
+  type ThreadMementoLatest,
 } from "./retrieval";
 import { postOutputLinter, type PostLinterViolation, type PostLinterBlockResult, type DriverBlockEnforcementMode } from "../gates/post_linter";
 import { runEvidenceIntake } from "../gates/evidence_intake";
 import { EvidenceValidationError } from "../gates/evidence_validation_error";
+import { applyLibrarianGate } from "../gates/librarian_gate";
 import {
   deriveUsedEvidenceIds,
   extractClaims,
@@ -27,13 +37,16 @@ import { fakeModelReplyWithMeta } from "../providers/fake_model";
 import { openAIModelReplyWithMeta, OpenAIProviderError } from "../providers/openai_model";
 import { selectModel } from "../providers/provider_config";
 import { GATE_SENTINEL, type GateOutput } from "../gates/gate_interfaces";
-import type { ControlPlaneStore, TraceRun, Transmission } from "../store/control_plane_store";
+import type { ControlPlaneStore, JournalOfferRecord, TraceRun, Transmission } from "../store/control_plane_store";
 import {
-  OutputEnvelopeSchema,
   OUTPUT_ENVELOPE_META_ALLOWED_KEYS,
+  OutputEnvelopeShapeSchema,
+  OutputEnvelopeSchema,
+  OutputEnvelopeV0MinSchema,
   type OutputEnvelope,
 } from "../contracts/output_envelope";
-import type { PacketInput, ModeDecision, NotificationPolicy } from "../contracts/chat";
+import type { PacketInput, ModeDecision, NotificationPolicy, ThreadContextMode } from "../contracts/chat";
+import { classifyJournalOffer, type MoodSignal } from "../memory/journal_offer_classifier";
 
 export type OrchestrationSource = "api" | "worker";
 export type SystemPersona = NonNullable<ModeDecision["personaLabel"]>;
@@ -102,6 +115,17 @@ export function buildOutputEnvelopeMeta(args: {
   return { ...args.envelope, meta, notification_policy: args.notificationPolicy };
 }
 
+function formatThreadMementoResponse(memento: any | null) {
+  if (!memento || typeof memento !== "object") return memento ?? null;
+  const mementoId = memento.mementoId ?? memento.id ?? null;
+  const createdAt = memento.createdAt ?? memento.createdTs ?? null;
+  return {
+    ...memento,
+    ...(mementoId ? { id: mementoId } : {}),
+    ...(createdAt ? { createdAt } : {}),
+  };
+}
+
 export function resolveSafetyIsUrgent(args: {
   results: GateOutput[];
   log?: { warn: (obj: Record<string, any>, msg?: string) => void };
@@ -126,6 +150,249 @@ export function resolveSafetyIsUrgent(args: {
   }
 
   return isUrgent;
+}
+
+function resolvePacketMessageId(packet: PacketInput, transmission: Transmission): string {
+  const meta = (packet.meta ?? {}) as Record<string, any>;
+  const candidate =
+    meta.message_id
+    ?? meta.messageId
+    ?? transmission.id
+    ?? packet.clientRequestId;
+  return String(candidate);
+}
+
+function resolveAvoidPeakOverwhelm(packet: PacketInput): boolean | undefined {
+  const meta = (packet.meta ?? {}) as Record<string, any>;
+  const journalStyle =
+    meta.cpb_journal_style
+    ?? meta.cpbJournalStyle
+    ?? meta.journalStyle
+    ?? null;
+
+  if (!journalStyle || typeof journalStyle !== "object") return undefined;
+  const settings = (journalStyle as any).settings;
+  const offerTiming = settings?.offer_timing ?? settings?.offerTiming;
+  const value = offerTiming?.avoid_peak_overwhelm ?? offerTiming?.avoidPeakOverwhelm;
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function resolveThreadContextMode(packet: PacketInput): ThreadContextMode {
+  return packet.thread_context_mode === "off" ? "off" : "auto";
+}
+
+function resolveJournalOfferMode(packet: PacketInput): JournalOfferRecord["mode"] | undefined {
+  const meta = (packet.meta ?? {}) as Record<string, any>;
+  const journalStyle =
+    meta.cpb_journal_style
+    ?? meta.cpbJournalStyle
+    ?? meta.journalStyle
+    ?? null;
+  const settings = journalStyle && typeof journalStyle === "object"
+    ? ((journalStyle as any).settings ?? journalStyle)
+    : null;
+  const raw =
+    settings?.default_mode
+    ?? settings?.defaultMode
+    ?? meta.journal_mode
+    ?? meta.journalMode;
+  return raw === "assist" || raw === "verbatim" ? raw : undefined;
+}
+
+function buildJournalOfferRecord(args: {
+  journalOffer: ReturnType<typeof classifyJournalOffer> | null;
+  offerSpanStart: string;
+  offerSpanEnd: string;
+  offerSkipReasons: Array<
+    "no_affect_signal" | "label_neutral" | "risk_not_low" | "phase_blocked" | "cooldown" | "other"
+  >;
+  offerPhase?: "rising" | "peak" | "downshift" | "settled";
+  offerRisk: "low" | "med" | "high";
+  offerLabel?: JournalOfferRecord["label"];
+  offerIntensityBucket?: JournalOfferRecord["intensityBucket"];
+  offerMode?: JournalOfferRecord["mode"];
+}): JournalOfferRecord {
+  const base: JournalOfferRecord = {
+    kind: "journal_offer",
+    offerEligible: Boolean(args.journalOffer),
+    phase: args.offerPhase,
+    risk: args.offerRisk,
+    label: args.offerLabel,
+    intensityBucket: args.offerIntensityBucket,
+  };
+
+  if (args.offerMode) {
+    base.mode = args.offerMode;
+  }
+
+  if (args.journalOffer) {
+    base.evidenceSpan = {
+      startMessageId: args.journalOffer.evidenceSpan.startMessageId || args.offerSpanStart,
+      endMessageId: args.journalOffer.evidenceSpan.endMessageId || args.offerSpanEnd,
+    };
+    return base;
+  }
+
+  base.reasonCodes = args.offerSkipReasons.length > 0
+    ? args.offerSkipReasons
+    : ["other"];
+  return base;
+}
+
+const AFFECT_LABELS = new Set(["overwhelm", "insight", "gratitude", "resolve", "curiosity", "neutral"]);
+
+type NormalizedAffectSignal = {
+  label: "overwhelm" | "insight" | "gratitude" | "resolve" | "curiosity" | "neutral";
+  intensity: number;
+  confidence: "low" | "med" | "high";
+};
+
+const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
+const CONFIDENCE_BUCKETS = new Set(["low", "med", "high"]);
+
+function normalizeAffectSignal(raw: unknown): NormalizedAffectSignal | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const input = raw as Record<string, any>;
+  if (Object.keys(input).length === 0) return null;
+
+  const labelRaw = typeof input.label === "string" ? input.label : "neutral";
+  const label = AFFECT_LABELS.has(labelRaw) ? (labelRaw as NormalizedAffectSignal["label"]) : "neutral";
+  const intensity = Number.isFinite(Number(input.intensity)) ? clamp01(Number(input.intensity)) : 0;
+
+  let confidence: NormalizedAffectSignal["confidence"] = "low";
+  if (typeof input.confidence === "string" && CONFIDENCE_BUCKETS.has(input.confidence)) {
+    confidence = input.confidence as NormalizedAffectSignal["confidence"];
+  } else if (Number.isFinite(Number(input.confidence))) {
+    confidence = confidenceBucket(clamp01(Number(input.confidence)));
+  }
+
+  return { label, intensity, confidence };
+}
+
+function confidenceBucket(value: number): "low" | "med" | "high" {
+  if (value >= 0.7) return "high";
+  if (value >= 0.34) return "med";
+  return "low";
+}
+
+function toMoodSignal(signal: NormalizedAffectSignal | null): MoodSignal | null {
+  if (!signal) return null;
+  if (signal.label === "neutral") return null;
+  return {
+    label: signal.label,
+    intensity: signal.intensity,
+    confidence: signal.confidence,
+  };
+}
+
+type OutputEnvelopeShape = z.infer<typeof OutputEnvelopeShapeSchema>;
+
+function parseShape(raw: unknown): OutputEnvelopeShape | null {
+  const parsed = OutputEnvelopeShapeSchema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
+}
+
+const DEFAULT_THREAD_MEMENTO_SHAPE: OutputEnvelopeShape = {
+  arc: "support",
+  active: [],
+  parked: [],
+  decisions: [],
+  next: [],
+};
+
+function bootstrapThreadMementoShape(previous: ThreadMementoLatestInternal | null): OutputEnvelopeShape {
+  if (previous) {
+    return {
+      arc: previous.arc,
+      active: [...previous.active],
+      parked: [...previous.parked],
+      decisions: [...previous.decisions],
+      next: [...previous.next],
+    };
+  }
+  return { ...DEFAULT_THREAD_MEMENTO_SHAPE };
+}
+
+async function updateThreadMementoLatestFromEnvelope(args: {
+  packet: PacketInput;
+  envelope: OutputEnvelope;
+  transmission: Transmission;
+  store: ControlPlaneStore;
+  threadContextMode: ThreadContextMode;
+}): Promise<{
+  latest: ThreadMementoLatestInternal | null;
+  affectSignal: NormalizedAffectSignal | null;
+  moodSignal: MoodSignal | null;
+}> {
+  const affectSignal = normalizeAffectSignal(args.envelope.meta?.affect_signal);
+  const moodSignal = toMoodSignal(affectSignal);
+
+  if (args.threadContextMode === "off") {
+    return { latest: null, affectSignal, moodSignal };
+  }
+
+  const nowIso = new Date().toISOString();
+  const shape = parseShape(args.envelope.meta?.shape);
+  const previous = getThreadMementoLatestCached(args.packet.threadId);
+  const baseAffect = previous?.affect ?? {
+    points: [],
+    rollup: {
+      phase: "settled",
+      intensityBucket: "low",
+      updatedAt: nowIso,
+    },
+  };
+
+  const nextShape = shape
+    ? {
+        arc: shape.arc,
+        active: [...shape.active],
+        parked: [...shape.parked],
+        decisions: [...shape.decisions],
+        next: [...shape.next],
+      }
+    : bootstrapThreadMementoShape(previous);
+
+  let nextAffect = baseAffect;
+  if (affectSignal) {
+    const point = {
+      endMessageId: resolvePacketMessageId(args.packet, args.transmission),
+      label: affectSignal.label,
+      intensity: affectSignal.intensity,
+      confidence: affectSignal.confidence,
+      source: "model" as const,
+      ts: nowIso,
+    };
+    nextAffect = updateLatestAffectWithPoint({
+      existing: baseAffect,
+      point,
+      nowIso,
+    });
+  }
+
+  const next: ThreadMementoLatestInternal = {
+    mementoId: previous?.mementoId ?? `memento_latest_${args.packet.threadId}`,
+    threadId: args.packet.threadId,
+    createdTs: previous?.createdTs ?? nowIso,
+    updatedAt: nowIso,
+    version: "memento-v0.1",
+    arc: nextShape.arc,
+    active: nextShape.active,
+    parked: nextShape.parked,
+    decisions: nextShape.decisions,
+    next: nextShape.next,
+    affect: nextAffect,
+  };
+
+  setThreadMementoLatestCached(next);
+  noteThreadMementoLatestTurn(args.packet.threadId);
+
+  if (shouldPersistThreadMementoLatest({ next, threadId: args.packet.threadId })) {
+    await args.store.upsertThreadMementoLatest({ memento: next });
+    markThreadMementoLatestPersisted(next);
+  }
+
+  return { latest: next, affectSignal, moodSignal };
 }
 
 type EnforcementFailureMetadata = {
@@ -221,11 +488,12 @@ function buildDriverBlockFailureDetail(meta: PostLinterMetadata): Record<string,
 }
 
 function resolveDriverBlockEnforcementMode(): DriverBlockEnforcementMode {
+  const override = String(process.env.SOL_ENFORCEMENT_MODE ?? "").toLowerCase();
+  if (override === "strict" || override === "warn" || override === "off") return override;
   const raw = String(process.env.DRIVER_BLOCK_ENFORCEMENT ?? "").toLowerCase();
   if (raw === "strict" || raw === "warn" || raw === "off") return raw;
-  if (process.env.NODE_ENV === "test") return "strict";
-  if (process.env.SOL_ENV === "production" || process.env.NODE_ENV === "production") return "strict";
   if (process.env.SOL_ENV === "staging") return "warn";
+  if (process.env.SOL_ENV === "production" || process.env.NODE_ENV === "production") return "strict";
   return "warn";
 }
 
@@ -312,6 +580,7 @@ type OutputEnvelopeMetadata = {
   reason?: "invalid_json" | "schema_invalid" | "payload_too_large";
   errorSummary?: string;
   issuesCount?: number;
+  issues?: Array<{ path: string; code: string; message: string }>;
 };
 
 function buildOutputEnvelopeMetadata(args: {
@@ -320,6 +589,7 @@ function buildOutputEnvelopeMetadata(args: {
   rawLength: number;
   reason?: "invalid_json" | "schema_invalid" | "payload_too_large";
   issuesCount?: number;
+  issues?: Array<{ path: string; code: string; message: string }>;
   error?: unknown;
 }): OutputEnvelopeMetadata {
   const errorSummary = args.error ? String(args.error).slice(0, 200) : undefined;
@@ -331,7 +601,18 @@ function buildOutputEnvelopeMetadata(args: {
     ...(args.reason ? { reason: args.reason } : {}),
     ...(errorSummary ? { errorSummary } : {}),
     ...(typeof args.issuesCount === "number" ? { issuesCount: args.issuesCount } : {}),
+    ...(args.issues ? { issues: args.issues } : {}),
   };
+}
+
+function summarizeZodIssues(issues: Array<{ path: PropertyKey[]; code: string; message: string }>) {
+  return issues.slice(0, 10).map((issue) => ({
+    path: issue.path
+      .map((segment) => (typeof segment === "number" ? `[${segment}]` : String(segment)))
+      .join("."),
+    code: issue.code,
+    message: issue.message,
+  }));
 }
 
 function buildCorrectionText(violations: PostLinterViolation[], driverBlocks: Array<{ id: string; title?: string }>): string {
@@ -355,6 +636,9 @@ function buildCorrectionText(violations: PostLinterViolation[], driverBlocks: Ar
     if (v.rule === "must-not") {
       return `- Avoid: "${v.pattern}"`;
     }
+    if (v.rule === "must-have-any") {
+      return `- Include one of: "${v.pattern}"`;
+    }
     return `- Include: "${v.pattern}"`;
   });
 
@@ -377,8 +661,16 @@ function buildEnforcementStub(): string {
   ].join("\n");
 }
 
-function buildOutputContractStub(): string {
-  return "I can't do that directly from here. Tell me what you're trying to accomplish and I'll give you a safe draft or step-by-step instructions.";
+function buildOutputContractStub(reason: "output_contract" | "evidence_gate" = "output_contract"): string {
+  const missing =
+    reason === "evidence_gate"
+      ? "I couldn't validate the evidence references for this response."
+      : "I couldn't validate the model response against the output contract.";
+  return [
+    `Missing info: ${missing}`,
+    "Provisional: I can retry with a stricter output format if you'd like.",
+    "Question: Want me to retry, or can you rephrase your request?",
+  ].join("\n");
 }
 
 function formatOutputContractError(
@@ -421,6 +713,66 @@ function applyEvidenceMeta(
   return { ...envelope, meta };
 }
 
+function normalizeOutputEnvelopeForValidation(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object") return payload;
+
+  const envelope = { ...(payload as Record<string, any>) };
+  const meta = envelope.meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+    return envelope;
+  }
+
+  const normalizedMeta: Record<string, any> = { ...meta };
+  const ghostType = normalizedMeta.ghost_type ?? normalizedMeta.ghostType;
+  const ghostKind = normalizedMeta.ghost_kind ?? normalizedMeta.ghostKind;
+
+  if (!ghostKind && typeof ghostType === "string") {
+    const mapping: Record<string, string> = {
+      memory: "memory_artifact",
+      journal: "journal_moment",
+      action: "action_proposal",
+    };
+    const mapped = mapping[ghostType];
+    if (mapped) {
+      normalizedMeta.ghost_kind = mapped;
+    }
+  }
+
+  if (normalizedMeta.ghost_kind === undefined && normalizedMeta.ghostKind !== undefined) {
+    normalizedMeta.ghost_kind = normalizedMeta.ghostKind;
+  }
+
+  delete normalizedMeta.ghost_type;
+  delete normalizedMeta.ghostType;
+  delete normalizedMeta.ghostKind;
+
+  envelope.meta = normalizedMeta;
+  return envelope;
+}
+
+function repairOutputEnvelopeForValidation(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object") return payload;
+
+  const envelope = { ...(payload as Record<string, any>) };
+  const meta = envelope.meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+    return envelope;
+  }
+
+  const repaired: Record<string, any> = { ...meta };
+  if (repaired.meta_version === undefined && repaired.metaVersion !== undefined) {
+    repaired.meta_version = repaired.metaVersion;
+  }
+  if (repaired.meta_version === undefined) {
+    repaired.meta_version = "v1";
+  }
+
+  delete repaired.metaVersion;
+
+  envelope.meta = repaired;
+  return envelope;
+}
+
 function normalizeOutputEnvelopeForResponse(envelope: OutputEnvelope): OutputEnvelope {
   if (!envelope.meta) return envelope;
 
@@ -439,6 +791,24 @@ function normalizeOutputEnvelopeForResponse(envelope: OutputEnvelope): OutputEnv
   }
   if (envelope.meta.capture_suggestion !== undefined) {
     meta.capture_suggestion = envelope.meta.capture_suggestion;
+  }
+  if (envelope.meta.shape !== undefined) {
+    meta.shape = envelope.meta.shape;
+  }
+  if (envelope.meta.affect_signal !== undefined) {
+    meta.affect_signal = envelope.meta.affect_signal;
+  }
+  if (envelope.meta.librarian_gate !== undefined) {
+    meta.librarian_gate = envelope.meta.librarian_gate;
+  }
+  if (envelope.meta.journalOffer !== undefined) {
+    meta.journalOffer = envelope.meta.journalOffer;
+  } else if (envelope.meta.journal_offer !== undefined) {
+    meta.journalOffer = envelope.meta.journal_offer;
+  }
+
+  if (Object.keys(meta).length > 0 && meta.meta_version === undefined) {
+    meta.meta_version = "v1";
   }
 
   return Object.keys(meta).length > 0
@@ -461,7 +831,7 @@ function buildEvidenceGateFailureResponse(args: {
     transmissionId: args.transmissionId,
     ...(args.traceRunId ? { traceRunId: args.traceRunId } : {}),
     retryable: false,
-    assistant: buildOutputContractStub(),
+    assistant: buildOutputContractStub("evidence_gate"),
   };
 }
 
@@ -497,6 +867,19 @@ export async function runOrchestrationPipeline(args: {
   } = args;
   const packet = request.packet;
   const simulate = simulateStatus;
+  const requestStartNs = process.hrtime.bigint();
+  const elapsedMs = () => Number(process.hrtime.bigint() - requestStartNs) / 1e6;
+  const logResponded = (statusCode: number, attemptsUsed: number) => {
+    log.info(
+      {
+        evt: "chat.responded",
+        statusCode,
+        attemptsUsed,
+        totalMs: Math.round(elapsedMs()),
+      },
+      "chat.responded"
+    );
+  };
 
   const effectiveForcedPersona = request.forcedPersona ?? transmission.forcedPersona ?? null;
   const personaLabel = resolvePersonaLabel(modeDecision);
@@ -548,6 +931,8 @@ export async function runOrchestrationPipeline(args: {
   const llmProvider = (process.env.LLM_PROVIDER ?? "fake").toLowerCase() === "openai"
     ? "openai"
     : "fake";
+  const providerSource = process.env.LLM_PROVIDER ? "env" : "default";
+  const apiKeyPresent = Boolean(process.env.OPENAI_API_KEY);
 
   const modelSelection = selectModel({
     solEnv: process.env.SOL_ENV,
@@ -555,6 +940,26 @@ export async function runOrchestrationPipeline(args: {
     requestHints: packet.providerHints,
     defaultModel: process.env.OPENAI_MODEL ?? "gpt-5-nano",
   });
+  const outputContractRetryEnabled = process.env.OUTPUT_CONTRACT_RETRY_ENABLED === "1";
+  const outputContractRetryProvider =
+    String(process.env.OUTPUT_CONTRACT_RETRY_MODEL_PROVIDER ?? "openai").toLowerCase();
+  const outputContractRetryModel = process.env.OUTPUT_CONTRACT_RETRY_MODEL ?? "gpt-5-mini";
+  const outputContractRetryOn = new Set(
+    String(process.env.OUTPUT_CONTRACT_RETRY_ON ?? "schema_invalid")
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const shouldRetryOutputContract = (reason: "invalid_json" | "schema_invalid" | "payload_too_large") => {
+    if (!outputContractRetryEnabled) return false;
+    if (outputContractRetryProvider !== llmProvider) return false;
+    if (llmProvider !== "openai") return false;
+    if (reason === "payload_too_large") return false;
+    if (reason === "invalid_json") {
+      return outputContractRetryOn.has("invalid_json") || outputContractRetryOn.has("json_parse_failed");
+    }
+    return outputContractRetryOn.has("schema_invalid");
+  };
 
   const MAX_OUTPUT_ENVELOPE_BYTES = 64 * 1024;
 
@@ -575,7 +980,15 @@ export async function runOrchestrationPipeline(args: {
   const parseOutputEnvelope = async (args: {
     rawText: string;
     attempt: 0 | 1;
-  }): Promise<{ ok: true; envelope: OutputEnvelope } | { ok: false; reason: "invalid_json" | "schema_invalid" | "payload_too_large"; issuesCount?: number }> => {
+  }): Promise<
+    | { ok: true; envelope: OutputEnvelope }
+    | {
+        ok: false;
+        reason: "invalid_json" | "schema_invalid" | "payload_too_large";
+        issuesCount?: number;
+        issuesTop3?: Array<{ path: string; code: string; message: string }>;
+      }
+  > => {
     const rawLength = getRawByteLength(args.rawText);
 
     if (rawLength > MAX_OUTPUT_ENVELOPE_BYTES) {
@@ -603,6 +1016,8 @@ export async function runOrchestrationPipeline(args: {
     let strippedMetaKeys: string[] = [];
     try {
       parsed = JSON.parse(args.rawText);
+      parsed = normalizeOutputEnvelopeForValidation(parsed);
+      parsed = repairOutputEnvelopeForValidation(parsed);
     } catch (error) {
       const meta = buildOutputEnvelopeMetadata({
         attempt: args.attempt,
@@ -632,15 +1047,33 @@ export async function runOrchestrationPipeline(args: {
       );
     }
 
-    const result = OutputEnvelopeSchema.safeParse(parsed);
-    if (!result.success) {
+    const hasGhostMeta = (() => {
+      if (!rawMeta || typeof rawMeta !== "object" || Array.isArray(rawMeta)) return false;
+      if (rawMeta.display_hint === "ghost_card") return true;
+      const ghostKeys = [
+        "ghost_kind",
+        "ghost_type",
+        "memory_id",
+        "rigor_level",
+        "snippet",
+        "fact_null",
+        "mood_anchor",
+      ];
+      return ghostKeys.some((key) => rawMeta[key] !== undefined);
+    })();
+
+    const v0MinResult = OutputEnvelopeV0MinSchema.safeParse(parsed);
+    if (!v0MinResult.success) {
+      const issues = summarizeZodIssues(v0MinResult.error.issues);
+      const issuesTop3 = issues.slice(0, 3);
       const meta = buildOutputEnvelopeMetadata({
         attempt: args.attempt,
         ok: false,
         rawLength,
         reason: "schema_invalid",
-        issuesCount: result.error.issues.length,
-        error: result.error,
+        issuesCount: v0MinResult.error.issues.length,
+        issues,
+        error: v0MinResult.error,
       });
 
       await appendTrace({
@@ -649,11 +1082,65 @@ export async function runOrchestrationPipeline(args: {
         actor: "solserver",
         phase: "output_gates",
         status: "failed",
-        summary: "Output envelope schema invalid",
+        summary: "Output envelope schema invalid (v0-min)",
         metadata: meta,
       });
 
-      return { ok: false, reason: "schema_invalid", issuesCount: result.error.issues.length };
+      return {
+        ok: false,
+        reason: "schema_invalid",
+        issuesCount: v0MinResult.error.issues.length,
+        issuesTop3,
+      };
+    }
+
+    const fullResult = OutputEnvelopeSchema.safeParse(parsed);
+    if (hasGhostMeta && !fullResult.success) {
+      const issues = summarizeZodIssues(fullResult.error.issues);
+      const issuesTop3 = issues.slice(0, 3);
+      const meta = buildOutputEnvelopeMetadata({
+        attempt: args.attempt,
+        ok: false,
+        rawLength,
+        reason: "schema_invalid",
+        issuesCount: fullResult.error.issues.length,
+        issues,
+        error: fullResult.error,
+      });
+
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: "failed",
+        summary: "Output envelope schema invalid (full)",
+        metadata: meta,
+      });
+
+      return {
+        ok: false,
+        reason: "schema_invalid",
+        issuesCount: fullResult.error.issues.length,
+        issuesTop3,
+      };
+    }
+
+    if (!hasGhostMeta && !fullResult.success) {
+      const issues = summarizeZodIssues(fullResult.error.issues);
+      await appendTrace({
+        traceRunId: traceRun.id,
+        transmissionId: transmission.id,
+        actor: "solserver",
+        phase: "output_gates",
+        status: "warning",
+        summary: "Output envelope schema issues (full)",
+        metadata: {
+          kind: "output_envelope_schema_warning",
+          issuesCount: fullResult.error.issues.length,
+          issues,
+        },
+      });
     }
 
     if (traceLevel === "debug" && strippedMetaKeys.length > 0) {
@@ -689,7 +1176,11 @@ export async function runOrchestrationPipeline(args: {
       metadata: meta,
     });
 
-    return { ok: true, envelope: result.data };
+    if (hasGhostMeta && fullResult.success) {
+      return { ok: true, envelope: fullResult.data };
+    }
+
+    return { ok: true, envelope: v0MinResult.data as OutputEnvelope };
   };
 
   const runEvidenceOutputGates = async (args: {
@@ -754,6 +1245,48 @@ export async function runOrchestrationPipeline(args: {
     return { ok: true, envelope: normalized };
   };
 
+  const runLibrarianGate = async (args: {
+    envelope: OutputEnvelope;
+    attempt: 0 | 1;
+    evidencePack: EvidencePack | null;
+  }): Promise<OutputEnvelope> => {
+    const result = applyLibrarianGate({
+      envelope: args.envelope,
+      evidencePack: args.evidencePack,
+    });
+
+    if (!result) {
+      return args.envelope;
+    }
+
+    const status = result.stats.verdict === "flag" ? "warning" : "completed";
+
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "output_gates",
+      status,
+      summary: `Librarian gate ${result.stats.verdict}`,
+      metadata: {
+        kind: "librarian_gate",
+        attempt: args.attempt,
+        claimCount: result.stats.claimCount,
+        refsBefore: result.stats.refsBefore,
+        refsAfter: result.stats.refsAfter,
+        prunedRefs: result.stats.prunedRefs,
+        unsupportedClaims: result.stats.unsupportedClaims,
+        supportScore: result.stats.supportScore,
+        verdict: result.stats.verdict,
+        ...(result.stats.reasonCodes.length > 0
+          ? { reasonCodes: result.stats.reasonCodes }
+          : {}),
+      },
+    });
+
+    return result.envelope;
+  };
+
   const shouldCaptureModelIo =
     process.env.TRACE_CAPTURE_MODEL_IO === "1" && process.env.NODE_ENV !== "production";
 
@@ -766,6 +1299,9 @@ export async function runOrchestrationPipeline(args: {
     modeLabel: string;
     evidencePack?: EvidencePack | null;
     forcedRawText?: string;
+    modelOverride?: string;
+    providerOverride?: "openai" | "fake";
+    providerSourceOverride?: "env" | "default" | "retry";
     logger?: {
       debug: (obj: any, msg?: string) => void;
       info?: (obj: any, msg?: string) => void;
@@ -773,6 +1309,10 @@ export async function runOrchestrationPipeline(args: {
       error?: (obj: any, msg?: string) => void;
     };
   }) => {
+    const providerUsed = args.providerOverride ?? llmProvider;
+    const modelUsed = args.modelOverride ?? modelSelection.model;
+    const providerSourceUsed = args.providerSourceOverride ?? providerSource;
+
     await appendTrace({
       traceRunId: traceRun.id,
       transmissionId: transmission.id,
@@ -780,15 +1320,43 @@ export async function runOrchestrationPipeline(args: {
       phase: "model_call",
       status: "started",
       summary: `Calling model provider (Attempt ${args.attempt})`,
-      metadata: { attempt: args.attempt },
+      metadata: {
+        attempt: args.attempt,
+        provider: providerUsed,
+        model: modelUsed,
+        source: providerSourceUsed,
+      },
     });
 
+    if (args.logger?.info) {
+      args.logger.info(
+        {
+          evt: "llm.provider.used",
+          provider: providerUsed,
+          model: modelUsed,
+          source: providerSourceUsed,
+        },
+        "llm.provider.used"
+      );
+    }
+
+    const modelCallStartNs = process.hrtime.bigint();
+    args.logger?.info?.(
+      {
+        evt: "model_call.start",
+        attempt: args.attempt,
+        provider: providerUsed,
+        model: modelUsed,
+      },
+      "model_call.start"
+    );
+
     const providerInputText = toSinglePromptText(args.promptPack);
-    const meta = llmProvider === "openai"
+    const meta = providerUsed === "openai"
       ? await openAIModelReplyWithMeta({
           promptText: providerInputText,
           modeLabel: args.modeLabel,
-          model: modelSelection.model,
+          model: modelUsed,
           logger: args.logger,
         })
       : await fakeModelReplyWithMeta({
@@ -800,6 +1368,7 @@ export async function runOrchestrationPipeline(args: {
     const rawText = args.forcedRawText ?? meta.rawText;
     const promptPreview = shouldCaptureModelIo ? truncatePreview(providerInputText) : undefined;
     const responsePreview = shouldCaptureModelIo ? truncatePreview(rawText) : undefined;
+    const modelCallDurationMs = Number(process.hrtime.bigint() - modelCallStartNs) / 1e6;
 
     await appendTrace({
       traceRunId: traceRun.id,
@@ -811,6 +1380,7 @@ export async function runOrchestrationPipeline(args: {
       metadata: {
         attempt: args.attempt,
         outputLength: rawText.length,
+        durationMs: Math.round(modelCallDurationMs),
         ...(shouldCaptureModelIo
           ? { prompt_preview: promptPreview, response_preview: responsePreview }
           : {}),
@@ -822,7 +1392,18 @@ export async function runOrchestrationPipeline(args: {
         evt: "model_call.completed",
         attempt: args.attempt,
         outputLength: rawText.length,
+        durationMs: Math.round(modelCallDurationMs),
       }, "model_call.completed");
+      if (args.logger.info) {
+        args.logger.info({
+          evt: "model_call.end",
+          attempt: args.attempt,
+          provider: providerUsed,
+          model: modelUsed,
+          durationMs: Math.round(modelCallDurationMs),
+          outputLength: rawText.length,
+        }, "model_call.end");
+      }
     }
 
     return { rawText, mementoDraft: meta.mementoDraft };
@@ -838,6 +1419,31 @@ export async function runOrchestrationPipeline(args: {
     traceRunId: traceRun.id,
   });
 
+  if (llmProvider === "openai" && !apiKeyPresent) {
+    await store.appendDeliveryAttempt({
+      transmissionId: transmission.id,
+      provider: llmProvider,
+      status: "failed",
+      error: "openai_api_key_missing",
+    });
+
+    await store.updateTransmissionStatus({
+      transmissionId: transmission.id,
+      status: "failed",
+      statusCode: 500,
+      retryable: false,
+      errorCode: "openai_api_key_missing",
+    });
+
+    logResponded(500, 0);
+    return respond(500, {
+      error: "openai_api_key_missing",
+      transmissionId: transmission.id,
+      traceRunId: traceRun.id,
+      retryable: false,
+    });
+  }
+
   if (llmProvider === "openai" && !process.env.OPENAI_MODEL) {
     await store.updateTransmissionStatus({
       transmissionId: transmission.id,
@@ -847,7 +1453,7 @@ export async function runOrchestrationPipeline(args: {
       errorCode: "openai_model_missing",
     });
 
-    log.info({ evt: "chat.responded", statusCode: 500, attemptsUsed: 0 }, "chat.responded");
+    logResponded(500, 0);
     return respond(500, {
       error: "openai_model_missing",
       transmissionId: transmission.id,
@@ -934,7 +1540,7 @@ export async function runOrchestrationPipeline(args: {
         errorDetail: error.details,
       });
 
-      log.info({ evt: "chat.responded", statusCode: 400, attemptsUsed: 0 }, "chat.responded");
+      logResponded(400, 0);
       return respond(400, error.toJSON());
     }
     throw error;
@@ -962,14 +1568,16 @@ export async function runOrchestrationPipeline(args: {
     evt: "llm.provider.selected",
     provider: llmProvider,
     model: modelSelection.model,
-    source: modelSelection.source,
+    source: providerSource,
+    modelSource: modelSelection.source,
+    apiKeyPresent: llmProvider === "openai" ? Boolean(process.env.OPENAI_API_KEY) : undefined,
     personaLabel: resolvePersonaLabel(modeDecision),
     ...(modelSelection.tier ? { tier: modelSelection.tier } : {}),
   }, "llm.provider.selected");
 
   // Ordering Contract (v0): route-level phase sequence is authoritative.
   // Phases must appear in this order in trace (not necessarily contiguous):
-  // evidence_intake → gate_normalize_modality → url_extraction → gate_intent → gate_sentinel → gate_lattice
+  // evidence_intake → gate_normalize_modality → gate_url_extraction → gate_intent → gate_sentinel → gate_lattice
   // → model_call → output_gates (post_linter + driver_block per-block events).
   // Tests assert this sequence from persisted trace events.
   // Note: metadata.seq is global and monotonic; it is not reset per gate.
@@ -1004,10 +1612,10 @@ export async function runOrchestrationPipeline(args: {
 
   const phaseByGateName: Record<
     string,
-    "gate_normalize_modality" | "url_extraction" | "gate_intent" | "gate_sentinel" | "gate_lattice"
+    "gate_normalize_modality" | "gate_url_extraction" | "gate_intent" | "gate_sentinel" | "gate_lattice"
   > = {
     normalize_modality: "gate_normalize_modality",
-    url_extraction: "url_extraction",
+    url_extraction: "gate_url_extraction",
     intent: "gate_intent",
     [GATE_SENTINEL]: "gate_sentinel",
     lattice: "gate_lattice",
@@ -1057,7 +1665,7 @@ export async function runOrchestrationPipeline(args: {
       errorCode: "simulated_failure",
     });
 
-    log.info({ evt: "chat.responded", statusCode: 500, attemptsUsed: 0 }, "chat.responded");
+    logResponded(500, 0);
     return respond(500, {
       error: "simulated_failure",
       transmissionId: transmission.id,
@@ -1077,10 +1685,23 @@ export async function runOrchestrationPipeline(args: {
     summary: "Retrieving context",
   });
 
+  const threadContextMode = resolveThreadContextMode(packet);
+  if (threadContextMode === "auto") {
+    const cachedLatest = getThreadMementoLatestCached(packet.threadId);
+    if (!cachedLatest) {
+      const persisted = await store.getThreadMementoLatest({ threadId: packet.threadId });
+      if (persisted) {
+        setThreadMementoLatestCached(persisted as ThreadMementoLatestInternal);
+        markThreadMementoLatestPersisted(persisted as ThreadMementoLatestInternal);
+      }
+    }
+  }
+
   const retrievalItems = await retrieveContext({
     threadId: packet.threadId,
     packetType: packet.packetType,
     message: packet.message,
+    threadContextMode,
   });
 
   log.debug(retrievalLogShape(retrievalItems), "control_plane.retrieval");
@@ -1136,7 +1757,7 @@ export async function runOrchestrationPipeline(args: {
     });
 
     log.error({ error: message, errorCode }, "evidence_provider.failed");
-    log.info({ evt: "chat.responded", statusCode: 500, attemptsUsed: 0 }, "chat.responded");
+    logResponded(500, 0);
     return respond(500, {
       error: "evidence_provider_failed",
       transmissionId: transmission.id,
@@ -1270,7 +1891,9 @@ export async function runOrchestrationPipeline(args: {
             logger: bgLog,
           });
 
-          const envelope0 = await parseOutputEnvelope({
+          let contractRetryUsed = false;
+          let envelopeAttempt: 0 | 1 = 0;
+          let envelope0 = await parseOutputEnvelope({
             rawText: attempt0.rawText,
             attempt: 0,
           });
@@ -1288,7 +1911,68 @@ export async function runOrchestrationPipeline(args: {
               reason: envelope0.reason,
               rawLength: attempt0.rawText.length,
               ...(typeof envelope0.issuesCount === "number" ? { issuesCount: envelope0.issuesCount } : {}),
+              ...(envelope0.issuesTop3 ? { issuesTop3: envelope0.issuesTop3 } : {}),
             }, "output_envelope.failed");
+          }
+
+          if (!envelope0.ok && shouldRetryOutputContract(envelope0.reason)) {
+            contractRetryUsed = true;
+            envelopeAttempt = 1;
+            bgLog.info({
+              evt: "output_contract.retry",
+              reason: envelope0.reason,
+              fromModel: modelSelection.model,
+              toModel: outputContractRetryModel,
+            }, "output_contract.retry");
+
+            await appendTrace({
+              traceRunId: traceRun.id,
+              transmissionId: transmission.id,
+              actor: "solserver",
+              phase: "model_call",
+              status: "warning",
+              summary: "Output contract retry",
+              metadata: {
+                kind: "output_contract_retry",
+                reason: envelope0.reason,
+                fromModel: modelSelection.model,
+                toModel: outputContractRetryModel,
+              },
+            });
+
+            const retryAttempt = await runModelAttempt({
+              attempt: 1,
+              promptPack,
+              modeLabel: modeDecision.modeLabel,
+              evidencePack,
+              forcedRawText: attempt1Output,
+              modelOverride: outputContractRetryModel,
+              providerOverride: outputContractRetryProvider === "openai" ? "openai" : "fake",
+              providerSourceOverride: "retry",
+              logger: bgLog,
+            });
+
+            envelope0 = await parseOutputEnvelope({
+              rawText: retryAttempt.rawText,
+              attempt: 1,
+            });
+
+            if (envelope0.ok) {
+              bgLog.debug({
+                evt: "output_envelope.completed",
+                attempt: 1,
+                rawLength: retryAttempt.rawText.length,
+              }, "output_envelope.completed");
+            } else {
+              bgLog.info({
+                evt: "output_envelope.failed",
+                attempt: 1,
+                reason: envelope0.reason,
+                rawLength: retryAttempt.rawText.length,
+                ...(typeof envelope0.issuesCount === "number" ? { issuesCount: envelope0.issuesCount } : {}),
+                ...(envelope0.issuesTop3 ? { issuesTop3: envelope0.issuesTop3 } : {}),
+              }, "output_envelope.failed");
+            }
           }
 
           if (!envelope0.ok) {
@@ -1322,15 +2006,21 @@ export async function runOrchestrationPipeline(args: {
             return;
           }
 
-          const evidenceGate0 = await runEvidenceOutputGates({
+          const librarianEnvelope0 = await runLibrarianGate({
             envelope: envelope0.envelope,
-            attempt: 0,
+            attempt: envelopeAttempt,
+            evidencePack,
+          });
+
+          const evidenceGate0 = await runEvidenceOutputGates({
+            envelope: librarianEnvelope0,
+            attempt: envelopeAttempt,
             evidencePack,
             transmissionId,
           });
 
           if (!evidenceGate0.ok) {
-            const stubAssistant = buildOutputContractStub();
+            const stubAssistant = buildOutputContractStub("evidence_gate");
 
             await store.appendDeliveryAttempt({
               transmissionId,
@@ -1360,6 +2050,7 @@ export async function runOrchestrationPipeline(args: {
           }
 
           const assistant0 = evidenceGate0.envelope.assistant_text;
+          const envelope0Normalized = normalizeOutputEnvelopeForResponse(evidenceGate0.envelope);
 
           await appendTrace({
             traceRunId: traceRun.id,
@@ -1368,7 +2059,7 @@ export async function runOrchestrationPipeline(args: {
             phase: "output_gates",
             status: "started",
             summary: "Running output linter",
-            metadata: { kind: "post_linter", attempt: 0 },
+            metadata: { kind: "post_linter", attempt: envelopeAttempt },
           });
 
           const lint0 = postOutputLinter({
@@ -1378,7 +2069,7 @@ export async function runOrchestrationPipeline(args: {
             enforcementMode,
           });
 
-          const lintTrace0 = buildPostLinterTrace(lint0, 0);
+          const lintTrace0 = buildPostLinterTrace(lint0, envelopeAttempt);
 
           await appendTrace({
             traceRunId: traceRun.id,
@@ -1393,7 +2084,7 @@ export async function runOrchestrationPipeline(args: {
           const driverBlockEvents0 = buildDriverBlockTraceEvents({
             blockResults: lint0.blockResults ?? [],
             driverBlocks: promptPack.driverBlocks,
-            attempt: 0,
+            attempt: envelopeAttempt,
           });
           for (const event of driverBlockEvents0) {
             await appendTrace({
@@ -1409,7 +2100,7 @@ export async function runOrchestrationPipeline(args: {
 
           bgLog.debug({
             evt: "post_linter.completed",
-            attempt: 0,
+            attempt: envelopeAttempt,
             ok: lint0.ok,
             violationsCount: lintTrace0.meta.violationsCount,
           }, "post_linter.completed");
@@ -1419,26 +2110,13 @@ export async function runOrchestrationPipeline(args: {
           }
 
           if (lint0.ok) {
-            if (attempt0.mementoDraft) {
-              const m = putThreadMemento({
-                threadId: packet.threadId,
-                arc: attempt0.mementoDraft.arc || "Untitled",
-                active: attempt0.mementoDraft.active ?? [],
-                parked: attempt0.mementoDraft.parked ?? [],
-                decisions: attempt0.mementoDraft.decisions ?? [],
-                next: attempt0.mementoDraft.next ?? [],
-              });
-
-              bgLog.info(
-                {
-                  plane: "memento",
-                  threadId: packet.threadId,
-                  mementoId: m.id,
-                  source: "model",
-                },
-                "control_plane.memento_auto_put"
-              );
-            }
+            await updateThreadMementoLatestFromEnvelope({
+              packet,
+              envelope: envelope0Normalized,
+              transmission,
+              store,
+              threadContextMode,
+            });
 
             await store.appendDeliveryAttempt({
               transmissionId,
@@ -1460,8 +2138,60 @@ export async function runOrchestrationPipeline(args: {
 
             await store.setChatResult({ transmissionId, assistant: assistant0 });
 
-            bgLog.info({ evt: "chat.async.completed", statusCode: 200, attemptsUsed: 1 }, "chat.async.completed");
+            bgLog.info({
+              evt: "chat.async.completed",
+              statusCode: 200,
+              attemptsUsed: contractRetryUsed ? 2 : 1,
+            }, "chat.async.completed");
             bgLog.info({ status: "completed", outputChars: assistant0.length }, "delivery.completed_async");
+            return;
+          }
+
+          if (contractRetryUsed) {
+            const stubAssistant = buildEnforcementStub();
+
+            await appendTrace({
+              traceRunId: traceRun.id,
+              transmissionId: transmission.id,
+              actor: "solserver",
+              phase: "output_gates",
+              status: "failed",
+              summary: "Driver block enforcement failed",
+              metadata: {
+                kind: "driver_block_enforcement",
+                outcome: "fail_closed_422",
+                attempts: 2,
+                violationsCount: lintTrace0.meta.violationsCount,
+              },
+            });
+
+            bgLog.info({
+              evt: "enforcement.failed",
+              attempt: envelopeAttempt,
+              error: "driver_block_enforcement_failed",
+            }, "enforcement.failed");
+
+            await store.appendDeliveryAttempt({
+              transmissionId,
+              provider: llmProvider,
+              status: "failed",
+              error: "driver_block_enforcement_failed",
+            });
+
+            const errorDetail = buildDriverBlockFailureDetail(lintTrace0.meta);
+            await store.updateTransmissionStatus({
+              transmissionId,
+              status: "failed",
+              statusCode: 422,
+              retryable: false,
+              errorCode: "driver_block_enforcement_failed",
+              errorDetail,
+            });
+
+            await store.setChatResult({ transmissionId, assistant: stubAssistant });
+
+            bgLog.info({ evt: "chat.async.failed", statusCode: 422 }, "chat.async.failed");
+            bgLog.warn({ status: "failed" }, "delivery.failed_async");
             return;
           }
 
@@ -1495,6 +2225,7 @@ export async function runOrchestrationPipeline(args: {
               reason: envelope1.reason,
               rawLength: attempt1.rawText.length,
               ...(typeof envelope1.issuesCount === "number" ? { issuesCount: envelope1.issuesCount } : {}),
+              ...(envelope1.issuesTop3 ? { issuesTop3: envelope1.issuesTop3 } : {}),
             }, "output_envelope.failed");
           }
 
@@ -1529,15 +2260,21 @@ export async function runOrchestrationPipeline(args: {
             return;
           }
 
-          const evidenceGate1 = await runEvidenceOutputGates({
+          const librarianEnvelope1 = await runLibrarianGate({
             envelope: envelope1.envelope,
+            attempt: 1,
+            evidencePack,
+          });
+
+          const evidenceGate1 = await runEvidenceOutputGates({
+            envelope: librarianEnvelope1,
             attempt: 1,
             evidencePack,
             transmissionId,
           });
 
           if (!evidenceGate1.ok) {
-            const stubAssistant = buildOutputContractStub();
+            const stubAssistant = buildOutputContractStub("evidence_gate");
 
             await store.appendDeliveryAttempt({
               transmissionId,
@@ -1567,6 +2304,7 @@ export async function runOrchestrationPipeline(args: {
           }
 
           const assistant1 = evidenceGate1.envelope.assistant_text;
+          const envelope1Normalized = normalizeOutputEnvelopeForResponse(evidenceGate1.envelope);
 
           await appendTrace({
             traceRunId: traceRun.id,
@@ -1626,26 +2364,13 @@ export async function runOrchestrationPipeline(args: {
           }
 
           if (lint1.ok) {
-            if (attempt1.mementoDraft) {
-              const m = putThreadMemento({
-                threadId: packet.threadId,
-                arc: attempt1.mementoDraft.arc || "Untitled",
-                active: attempt1.mementoDraft.active ?? [],
-                parked: attempt1.mementoDraft.parked ?? [],
-                decisions: attempt1.mementoDraft.decisions ?? [],
-                next: attempt1.mementoDraft.next ?? [],
-              });
-
-              bgLog.info(
-                {
-                  plane: "memento",
-                  threadId: packet.threadId,
-                  mementoId: m.id,
-                  source: "model",
-                },
-                "control_plane.memento_auto_put"
-              );
-            }
+            await updateThreadMementoLatestFromEnvelope({
+              packet,
+              envelope: envelope1Normalized,
+              transmission,
+              store,
+              threadContextMode,
+            });
 
             await store.appendDeliveryAttempt({
               transmissionId,
@@ -1742,7 +2467,7 @@ export async function runOrchestrationPipeline(args: {
       }, delayMs);
     }
 
-    log.info({ evt: "chat.responded", statusCode: 202, attemptsUsed: 0 }, "chat.responded");
+    logResponded(202, 0);
     return respond(202, {
       ok: true,
       transmissionId,
@@ -1754,7 +2479,12 @@ export async function runOrchestrationPipeline(args: {
       ...(hasEvidence ? { evidence: effectiveEvidence } : {}),
       evidenceSummary,
       ...(effectiveWarnings.length > 0 ? { evidenceWarnings: effectiveWarnings } : {}),
-      threadMemento: getLatestThreadMemento(packet.threadId, { includeDraft: true }),
+      threadMemento: threadContextMode === "auto"
+        ? (() => {
+            const latest = getThreadMementoLatestCached(packet.threadId);
+            return latest ? sanitizeThreadMementoLatest(latest) : null;
+          })()
+        : null,
     });
   }
 
@@ -1763,7 +2493,7 @@ export async function runOrchestrationPipeline(args: {
 
   let assistant: string;
   let outputEnvelope: OutputEnvelope | null = null;
-  let threadMemento: any = null;
+  let threadMemento: ThreadMementoLatest | null = null;
   let attemptsUsed = 0;
 
   try {
@@ -1776,7 +2506,9 @@ export async function runOrchestrationPipeline(args: {
       logger: log,
     });
 
-    const envelope0 = await parseOutputEnvelope({
+    let contractRetryUsed = false;
+    let contractAttempt: 0 | 1 = 0;
+    let envelope0 = await parseOutputEnvelope({
       rawText: attempt0.rawText,
       attempt: 0,
     });
@@ -1794,49 +2526,119 @@ export async function runOrchestrationPipeline(args: {
         reason: envelope0.reason,
         rawLength: getRawByteLength(attempt0.rawText),
         ...(typeof envelope0.issuesCount === "number" ? { issuesCount: envelope0.issuesCount } : {}),
+        ...(envelope0.issuesTop3 ? { issuesTop3: envelope0.issuesTop3 } : {}),
       }, "output_envelope.failed");
     }
 
     if (!envelope0.ok) {
-      const stubAssistant = buildOutputContractStub();
-      const errorCode = formatOutputContractError(envelope0.reason, envelope0.issuesCount);
+      if (shouldRetryOutputContract(envelope0.reason)) {
+        contractRetryUsed = true;
+        contractAttempt = 1;
+        log.info({
+          evt: "output_contract.retry",
+          reason: envelope0.reason,
+          fromModel: modelSelection.model,
+          toModel: outputContractRetryModel,
+        }, "output_contract.retry");
 
-      await store.appendDeliveryAttempt({
-        transmissionId: transmission.id,
-        provider: llmProvider,
-        status: "failed",
-        error: errorCode,
-      });
+        await appendTrace({
+          traceRunId: traceRun.id,
+          transmissionId: transmission.id,
+          actor: "solserver",
+          phase: "model_call",
+          status: "warning",
+          summary: "Output contract retry",
+          metadata: {
+            kind: "output_contract_retry",
+            reason: envelope0.reason,
+            fromModel: modelSelection.model,
+            toModel: outputContractRetryModel,
+          },
+        });
 
-      await store.updateTransmissionStatus({
-        transmissionId: transmission.id,
-        status: "failed",
-        statusCode: 422,
-        retryable: false,
-        errorCode,
-      });
+        const retryAttempt = await runModelAttempt({
+          attempt: 1,
+          promptPack,
+          modeLabel: modeDecision.modeLabel,
+          evidencePack,
+          forcedRawText: attempt1Output,
+          modelOverride: outputContractRetryModel,
+          providerOverride: outputContractRetryProvider === "openai" ? "openai" : "fake",
+          providerSourceOverride: "retry",
+          logger: log,
+        });
 
-      await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+        envelope0 = await parseOutputEnvelope({
+          rawText: retryAttempt.rawText,
+          attempt: 1,
+        });
 
-      log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 1 }, "chat.responded");
-      return respond(422, {
-        error: "output_contract_failed",
-        transmissionId: transmission.id,
-        traceRunId: traceRun.id,
-        retryable: false,
-        assistant: stubAssistant,
-      });
+        if (envelope0.ok) {
+          log.debug({
+            evt: "output_envelope.completed",
+            attempt: 1,
+            rawLength: getRawByteLength(retryAttempt.rawText),
+          }, "output_envelope.completed");
+        } else {
+          log.info({
+            evt: "output_envelope.failed",
+            attempt: 1,
+            reason: envelope0.reason,
+            rawLength: getRawByteLength(retryAttempt.rawText),
+            ...(typeof envelope0.issuesCount === "number" ? { issuesCount: envelope0.issuesCount } : {}),
+            ...(envelope0.issuesTop3 ? { issuesTop3: envelope0.issuesTop3 } : {}),
+          }, "output_envelope.failed");
+        }
+      }
+
+      if (!envelope0.ok) {
+        const stubAssistant = buildOutputContractStub();
+        const errorCode = formatOutputContractError(envelope0.reason, envelope0.issuesCount);
+
+        await store.appendDeliveryAttempt({
+          transmissionId: transmission.id,
+          provider: llmProvider,
+          status: "failed",
+          error: errorCode,
+        });
+
+        await store.updateTransmissionStatus({
+          transmissionId: transmission.id,
+          status: "failed",
+          statusCode: 422,
+          retryable: false,
+          errorCode,
+        });
+
+        await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+
+        logResponded(422, contractRetryUsed ? 2 : 1);
+        return respond(422, {
+          error: "output_contract_failed",
+          transmissionId: transmission.id,
+          traceRunId: traceRun.id,
+          retryable: false,
+          assistant: stubAssistant,
+        });
+      }
     }
 
-    const evidenceGate0 = await runEvidenceOutputGates({
+    const envelopeAttempt = contractAttempt;
+    const librarianEnvelope0 = await runLibrarianGate({
       envelope: envelope0.envelope,
-      attempt: 0,
+      attempt: envelopeAttempt,
+      evidencePack,
+    });
+
+    const evidenceGate0 = await runEvidenceOutputGates({
+      envelope: librarianEnvelope0,
+      attempt: envelopeAttempt,
       evidencePack,
       transmissionId: transmission.id,
     });
 
     if (!evidenceGate0.ok) {
-      const stubAssistant = buildOutputContractStub();
+      const stubAssistant = buildOutputContractStub("evidence_gate");
 
       await store.appendDeliveryAttempt({
         transmissionId: transmission.id,
@@ -1855,7 +2657,7 @@ export async function runOrchestrationPipeline(args: {
 
       await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
 
-      log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 1 }, "chat.responded");
+      logResponded(422, contractRetryUsed ? 2 : 1);
       return respond(422, buildEvidenceGateFailureResponse({
         code: evidenceGate0.code,
         transmissionId: transmission.id,
@@ -1873,7 +2675,7 @@ export async function runOrchestrationPipeline(args: {
       phase: "output_gates",
       status: "started",
       summary: "Running output linter",
-      metadata: { kind: "post_linter", attempt: 0 },
+      metadata: { kind: "post_linter", attempt: envelopeAttempt },
     });
 
     const lint0 = postOutputLinter({
@@ -1883,7 +2685,7 @@ export async function runOrchestrationPipeline(args: {
       enforcementMode,
     });
 
-    const lintTrace0 = buildPostLinterTrace(lint0, 0);
+    const lintTrace0 = buildPostLinterTrace(lint0, envelopeAttempt);
 
     await appendTrace({
       traceRunId: traceRun.id,
@@ -1898,7 +2700,7 @@ export async function runOrchestrationPipeline(args: {
     const driverBlockEvents0 = buildDriverBlockTraceEvents({
       blockResults: lint0.blockResults ?? [],
       driverBlocks: promptPack.driverBlocks,
-      attempt: 0,
+      attempt: envelopeAttempt,
     });
     for (const event of driverBlockEvents0) {
       await appendTrace({
@@ -1914,7 +2716,7 @@ export async function runOrchestrationPipeline(args: {
 
     log.debug({
       evt: "post_linter.completed",
-      attempt: 0,
+      attempt: envelopeAttempt,
       ok: lint0.ok,
       violationsCount: lintTrace0.meta.violationsCount,
     }, "post_linter.completed");
@@ -1926,20 +2728,61 @@ export async function runOrchestrationPipeline(args: {
     if (lint0.ok) {
       assistant = assistant0;
       outputEnvelope = envelope0Normalized;
-      attemptsUsed = 1;
-      if (attempt0.mementoDraft) {
-        const m = putThreadMemento({
-          threadId: packet.threadId,
-          arc: attempt0.mementoDraft.arc || "Untitled",
-          active: attempt0.mementoDraft.active ?? [],
-          parked: attempt0.mementoDraft.parked ?? [],
-          decisions: attempt0.mementoDraft.decisions ?? [],
-          next: attempt0.mementoDraft.next ?? [],
-        });
-        threadMemento = m;
-        log.info({ plane: "memento", threadId: packet.threadId, mementoId: m.id, source: "model" }, "control_plane.memento_auto_put");
-      }
+      attemptsUsed = contractRetryUsed ? 2 : 1;
     } else {
+      if (contractRetryUsed) {
+        const stubAssistant = buildEnforcementStub();
+
+        await appendTrace({
+          traceRunId: traceRun.id,
+          transmissionId: transmission.id,
+          actor: "solserver",
+          phase: "output_gates",
+          status: "failed",
+          summary: "Driver block enforcement failed",
+          metadata: {
+            kind: "driver_block_enforcement",
+            outcome: "fail_closed_422",
+            attempts: 2,
+            violationsCount: lintTrace0.meta.violationsCount,
+          } satisfies EnforcementFailureMetadata,
+        });
+
+        log.info({
+          evt: "enforcement.failed",
+          attempt: envelopeAttempt,
+          error: "driver_block_enforcement_failed",
+        }, "enforcement.failed");
+
+        await store.appendDeliveryAttempt({
+          transmissionId: transmission.id,
+          provider: llmProvider,
+          status: "failed",
+          error: "driver_block_enforcement_failed",
+        });
+
+        const errorDetail = buildDriverBlockFailureDetail(lintTrace0.meta);
+        await store.updateTransmissionStatus({
+          transmissionId: transmission.id,
+          status: "failed",
+          statusCode: 422,
+          retryable: false,
+          errorCode: "driver_block_enforcement_failed",
+          errorDetail,
+        });
+
+        await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+
+        logResponded(422, 2);
+        return respond(422, {
+          error: "driver_block_enforcement_failed",
+          transmissionId: transmission.id,
+          traceRunId: traceRun.id,
+          retryable: false,
+          assistant: stubAssistant,
+        });
+      }
+
       const correctionText = buildCorrectionText(lint0.violations, promptPack.driverBlocks);
       const promptPack1 = withCorrectionSection(promptPack, correctionText);
 
@@ -1970,6 +2813,7 @@ export async function runOrchestrationPipeline(args: {
           reason: envelope1.reason,
           rawLength: getRawByteLength(attempt1.rawText),
           ...(typeof envelope1.issuesCount === "number" ? { issuesCount: envelope1.issuesCount } : {}),
+          ...(envelope1.issuesTop3 ? { issuesTop3: envelope1.issuesTop3 } : {}),
         }, "output_envelope.failed");
       }
 
@@ -1994,7 +2838,7 @@ export async function runOrchestrationPipeline(args: {
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
 
-        log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 2 }, "chat.responded");
+        logResponded(422, 2);
         return respond(422, {
           error: "output_contract_failed",
           transmissionId: transmission.id,
@@ -2004,15 +2848,21 @@ export async function runOrchestrationPipeline(args: {
         });
       }
 
-      const evidenceGate1 = await runEvidenceOutputGates({
+      const librarianEnvelope1 = await runLibrarianGate({
         envelope: envelope1.envelope,
+        attempt: 1,
+        evidencePack,
+      });
+
+      const evidenceGate1 = await runEvidenceOutputGates({
+        envelope: librarianEnvelope1,
         attempt: 1,
         evidencePack,
         transmissionId: transmission.id,
       });
 
       if (!evidenceGate1.ok) {
-        const stubAssistant = buildOutputContractStub();
+        const stubAssistant = buildOutputContractStub("evidence_gate");
 
         await store.appendDeliveryAttempt({
           transmissionId: transmission.id,
@@ -2031,7 +2881,7 @@ export async function runOrchestrationPipeline(args: {
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
 
-        log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 2 }, "chat.responded");
+        logResponded(422, 2);
         return respond(422, buildEvidenceGateFailureResponse({
           code: evidenceGate1.code,
           transmissionId: transmission.id,
@@ -2103,18 +2953,6 @@ export async function runOrchestrationPipeline(args: {
         assistant = assistant1;
         outputEnvelope = envelope1Normalized;
         attemptsUsed = 2;
-        if (attempt1.mementoDraft) {
-          const m = putThreadMemento({
-            threadId: packet.threadId,
-            arc: attempt1.mementoDraft.arc || "Untitled",
-            active: attempt1.mementoDraft.active ?? [],
-            parked: attempt1.mementoDraft.parked ?? [],
-            decisions: attempt1.mementoDraft.decisions ?? [],
-            next: attempt1.mementoDraft.next ?? [],
-          });
-          threadMemento = m;
-          log.info({ plane: "memento", threadId: packet.threadId, mementoId: m.id, source: "model" }, "control_plane.memento_auto_put");
-        }
       } else {
         const stubAssistant = buildEnforcementStub();
 
@@ -2158,7 +2996,7 @@ export async function runOrchestrationPipeline(args: {
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
 
-        log.info({ evt: "chat.responded", statusCode: 422, attemptsUsed: 2 }, "chat.responded");
+        logResponded(422, 2);
         return respond(422, {
           error: "driver_block_enforcement_failed",
           transmissionId: transmission.id,
@@ -2201,11 +3039,152 @@ export async function runOrchestrationPipeline(args: {
     });
   }
 
+  const mementoUpdate = await updateThreadMementoLatestFromEnvelope({
+    packet,
+    envelope: outputEnvelope,
+    transmission,
+    store,
+    threadContextMode,
+  });
+  threadMemento = mementoUpdate.latest ? sanitizeThreadMementoLatest(mementoUpdate.latest) : null;
+
+  const avoidPeakOverwhelm = resolveAvoidPeakOverwhelm(packet);
+  const messageIdForAffect = resolvePacketMessageId(packet, transmission);
+  const offerSpanStart = mementoUpdate.latest?.affect.points[0]?.endMessageId ?? messageIdForAffect;
+  const offerSpanEnd = mementoUpdate.latest?.affect.points.at(-1)?.endMessageId ?? messageIdForAffect;
+  const offerPhase = mementoUpdate.latest?.affect.rollup.phase;
+  const offerIntensityBucket = mementoUpdate.latest?.affect.rollup.intensityBucket;
+  const offerRisk = gatesOutput.sentinel.risk;
+  const offerLabel = mementoUpdate.moodSignal?.label ?? mementoUpdate.affectSignal?.label;
+  const offerMode = resolveJournalOfferMode(packet);
+
+  const offerSkipReasons: Array<
+    "no_affect_signal" | "label_neutral" | "risk_not_low" | "phase_blocked" | "cooldown" | "other"
+  > = [];
+
+  let journalOffer = null as ReturnType<typeof classifyJournalOffer>;
+  if (threadContextMode !== "auto" || !mementoUpdate.latest) {
+    offerSkipReasons.push("other");
+  } else if (!mementoUpdate.affectSignal) {
+    offerSkipReasons.push("no_affect_signal");
+  } else if (mementoUpdate.affectSignal.label === "neutral") {
+    offerSkipReasons.push("label_neutral");
+  } else if (offerRisk !== "low") {
+    offerSkipReasons.push("risk_not_low");
+  } else if (mementoUpdate.moodSignal && offerPhase) {
+    journalOffer = classifyJournalOffer({
+      mood: mementoUpdate.moodSignal,
+      risk: offerRisk,
+      phase: offerPhase,
+      avoidPeakOverwhelm,
+      evidenceSpan: { startMessageId: offerSpanStart, endMessageId: offerSpanEnd },
+    });
+
+    if (!journalOffer) {
+      const label = mementoUpdate.affectSignal.label;
+      if (label === "overwhelm") {
+        if (offerPhase !== "settled") {
+          offerSkipReasons.push("phase_blocked");
+        } else if (avoidPeakOverwhelm) {
+          offerSkipReasons.push("cooldown");
+        } else {
+          offerSkipReasons.push("other");
+        }
+      } else if (label === "gratitude") {
+        if (offerPhase === "rising" || offerPhase === "peak") {
+          offerSkipReasons.push("phase_blocked");
+        } else {
+          offerSkipReasons.push("other");
+        }
+      } else if (label === "resolve") {
+        if (offerPhase !== "settled") {
+          offerSkipReasons.push("phase_blocked");
+        } else {
+          offerSkipReasons.push("other");
+        }
+      } else {
+        offerSkipReasons.push("other");
+      }
+    }
+  }
+
+  log.info({
+    evt: "journal_offer.decision",
+    offerEligible: Boolean(journalOffer),
+    showOffer: Boolean(journalOffer),
+    label: offerLabel ?? null,
+    phase: offerPhase ?? null,
+    risk: offerRisk,
+    intensityBucket: offerIntensityBucket ?? null,
+    skipReasons: offerSkipReasons.length > 0 ? offerSkipReasons : null,
+  }, "journal_offer.decision");
+
+  if (journalOffer) {
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "output_gates",
+      status: "completed",
+      summary: "Journal offer attached",
+      metadata: {
+        kind: "journal_offer",
+        action: "attached",
+        offerEligible: true,
+        showOffer: true,
+        label: offerLabel ?? null,
+        phase: offerPhase ?? null,
+        risk: offerRisk,
+        intensityBucket: offerIntensityBucket ?? null,
+      },
+    });
+  } else {
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "output_gates",
+      status: "completed",
+      summary: "Journal offer skipped",
+      metadata: {
+        kind: "journal_offer",
+        action: "skipped",
+        offerEligible: false,
+        showOffer: false,
+        reason_codes: offerSkipReasons.length > 0 ? offerSkipReasons : ["other"],
+        label: offerLabel ?? null,
+        phase: offerPhase ?? null,
+        risk: offerRisk,
+        intensityBucket: offerIntensityBucket ?? null,
+      },
+    });
+  }
+
+  const journalOfferRecord = buildJournalOfferRecord({
+    journalOffer,
+    offerSpanStart,
+    offerSpanEnd,
+    offerSkipReasons,
+    offerPhase,
+    offerRisk,
+    offerLabel: offerLabel as JournalOfferRecord["label"] | undefined,
+    offerIntensityBucket: offerIntensityBucket as JournalOfferRecord["intensityBucket"] | undefined,
+    offerMode,
+  });
+
+  if (journalOffer) {
+    outputEnvelope = {
+      ...outputEnvelope,
+      meta: { ...(outputEnvelope.meta ?? {}), journalOffer: journalOffer },
+    };
+  }
+
   await store.appendDeliveryAttempt({
     transmissionId: transmission.id,
     provider: llmProvider,
     status: "succeeded",
     outputChars: assistant.length,
+    journalOffer: journalOfferRecord,
   });
 
   await store.recordUsage({
@@ -2247,14 +3226,16 @@ export async function runOrchestrationPipeline(args: {
     notificationPolicy: resolvedNotificationPolicy,
   });
 
-  log.info({ evt: "chat.responded", statusCode: 200, attemptsUsed }, "chat.responded");
+  const responseThreadMemento = formatThreadMementoResponse(threadMemento);
+
+  logResponded(200, attemptsUsed);
   return respond(200, {
     ok: true,
     transmissionId: transmission.id,
     modeDecision,
     assistant,
     outputEnvelope: responseEnvelope,
-    threadMemento,
+    threadMemento: responseThreadMemento,
     driverBlocks: driverBlockSummary,
     // Evidence fields (PR #7.1): include evidence only when present
     ...(hasEvidence ? { evidence: effectiveEvidence } : {}),

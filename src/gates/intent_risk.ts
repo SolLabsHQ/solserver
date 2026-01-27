@@ -1,4 +1,5 @@
 import type { GateInput } from "./normalize_modality";
+import { detectMoodSignal, type MoodSignal } from "../memory/journal_offer_classifier";
 
 export type Intent =
   | "draft"
@@ -35,6 +36,7 @@ export type SentinelGateOutput = {
   isUrgent?: boolean;
   urgentReasonCode?: string;
   urgentSummary?: string;
+  mood?: MoodSignal | null;
 };
 
 /**
@@ -60,6 +62,7 @@ export function runSentinelGate(input: GateInput): SentinelGateOutput {
   // Risk classification (keyword-based)
   const { risk, riskReasons } = classifyRisk(messageText);
   const boundedReasons = riskReasons.slice(0, 5);
+  const mood = detectMoodSignal(input.messageText);
 
   const urgentSignals: Partial<Record<RiskReason, { code: string; summary: string }>> = {
     SELF_HARM: { code: "self_harm_signal", summary: "Self-harm signal" },
@@ -71,6 +74,7 @@ export function runSentinelGate(input: GateInput): SentinelGateOutput {
   return {
     risk,
     riskReasons: boundedReasons,
+    mood,
     ...(urgentMeta
       ? {
           isUrgent: true,

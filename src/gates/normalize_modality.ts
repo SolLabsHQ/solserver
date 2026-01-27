@@ -16,7 +16,8 @@ export type NormalizeModalityOutput = {
 
 export type GateInput = {
   messageText: string;
-  urls: string[];
+  urlHintCount: number;
+  captureUrlCount: number;
   evidenceCounts: {
     captureCount: number;
     supportCount: number;
@@ -37,6 +38,7 @@ export type GateInput = {
  */
 export function runNormalizeModality(input: GateInput): NormalizeModalityOutput {
   const modalities: Modality[] = [];
+  const urlCount = input.urlHintCount + input.captureUrlCount;
   
   // Detect text modality
   const hasText = input.messageText.trim().length > 0;
@@ -44,8 +46,8 @@ export function runNormalizeModality(input: GateInput): NormalizeModalityOutput 
     modalities.push("text");
   }
   
-  // Detect URL modality (from URLs array which includes inline + captures)
-  if (input.urls.length > 0) {
+  // Detect URL modality (hint count + capture URL count, no validation here)
+  if (urlCount > 0) {
     modalities.push("url");
   }
   
@@ -62,7 +64,7 @@ export function runNormalizeModality(input: GateInput): NormalizeModalityOutput 
   // Build modality summary
   const modalitySummary: ModalitySummary = {
     textCharCount: input.messageText.length,
-    urlCount: input.urls.length,
+    urlCount,
     snippetCount: input.evidenceCounts.supportCount, // Count of snippet supports
     attachmentCount: 0, // v0: no attachments yet
   };

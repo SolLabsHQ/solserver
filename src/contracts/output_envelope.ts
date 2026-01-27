@@ -2,6 +2,10 @@ import { z } from "zod";
 
 import { NotificationPolicy } from "./chat";
 
+const SHAPE_MAX_ARC_CHARS = 200;
+const SHAPE_MAX_ITEMS = 6;
+const SHAPE_MAX_ITEM_CHARS = 160;
+
 const EvidenceRefSchema = z.object({
   evidence_id: z.string().min(1),
   span_id: z.string().min(1).optional(),
@@ -49,6 +53,54 @@ const CaptureSuggestionSchema = z.object({
 });
 const GhostKindSchema = z.enum(["memory_artifact", "journal_moment", "action_proposal"]);
 const GhostRigorSchema = z.enum(["normal", "high"]);
+const AffectLabelSchema = z.enum(["overwhelm", "insight", "gratitude", "resolve", "curiosity", "neutral"]);
+const AffectConfidenceSchema = z.enum(["low", "med", "high"]);
+const confidenceBucket = (value: number): z.infer<typeof AffectConfidenceSchema> => {
+  if (value >= 0.7) return "high";
+  if (value >= 0.34) return "med";
+  return "low";
+};
+
+export const OutputEnvelopeShapeSchema = z.object({
+  arc: z.string().min(1).max(SHAPE_MAX_ARC_CHARS),
+  active: z.array(z.string().min(1).max(SHAPE_MAX_ITEM_CHARS)).max(SHAPE_MAX_ITEMS),
+  parked: z.array(z.string().min(1).max(SHAPE_MAX_ITEM_CHARS)).max(SHAPE_MAX_ITEMS),
+  decisions: z.array(z.string().min(1).max(SHAPE_MAX_ITEM_CHARS)).max(SHAPE_MAX_ITEMS),
+  next: z.array(z.string().min(1).max(SHAPE_MAX_ITEM_CHARS)).max(SHAPE_MAX_ITEMS),
+}).strict();
+
+export const OutputEnvelopeAffectSignalSchema = z.object({
+  label: AffectLabelSchema,
+  intensity: z.number().min(0).max(1),
+  confidence: z.preprocess((value) => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const clamped = Math.min(1, Math.max(0, value));
+      return confidenceBucket(clamped);
+    }
+    return value;
+  }, AffectConfidenceSchema),
+}).strict();
+
+const JournalOfferSchema = z.object({
+  momentId: z.string().min(1),
+  momentType: z.enum(["overwhelm", "vent", "insight", "gratitude", "decision", "fun"]),
+  phase: z.enum(["rising", "peak", "downshift", "settled"]),
+  confidence: z.enum(["low", "med", "high"]),
+  evidenceSpan: z.object({
+    startMessageId: z.string().min(1),
+    endMessageId: z.string().min(1),
+  }).strict(),
+  why: z.array(z.string()).max(6).optional(),
+  offerEligible: z.boolean(),
+}).strict();
+
+const LibrarianGateSchema = z.object({
+  version: z.literal("v0"),
+  pruned_refs: z.number().int().min(0),
+  unsupported_claims: z.number().int().min(0),
+  support_score: z.number().min(0).max(1),
+  verdict: z.enum(["pass", "prune", "flag"]),
+}).strict();
 
 const OutputEnvelopeMetaKeys = [
   "meta_version",
@@ -67,6 +119,11 @@ const OutputEnvelopeMetaKeys = [
   "snippet",
   "fact_null",
   "mood_anchor",
+  "shape",
+  "affect_signal",
+  "journal_offer",
+  "journalOffer",
+  "librarian_gate",
 ] as const;
 
 export const OUTPUT_ENVELOPE_META_ALLOWED_KEYS = new Set<string>(OutputEnvelopeMetaKeys);
@@ -88,6 +145,11 @@ const OutputEnvelopeMetaSchema = z.object({
   snippet: z.string().nullable().optional(),
   fact_null: z.boolean().optional(),
   mood_anchor: z.string().nullable().optional(),
+  shape: OutputEnvelopeShapeSchema.optional(),
+  affect_signal: OutputEnvelopeAffectSignalSchema.optional(),
+  journalOffer: JournalOfferSchema.optional(),
+  journal_offer: JournalOfferSchema.optional(),
+  librarian_gate: LibrarianGateSchema.optional(),
 })
   .strip()
   .superRefine((value, ctx) => {
@@ -206,6 +268,19 @@ export const OutputEnvelopeSchema = z.object({
   notification_policy: NotificationPolicy.optional(),
   // Future structured outputs (e.g., capture_suggestion) live under meta.
   meta: OutputEnvelopeMetaSchema.optional(),
+}).strict();
+
+const OutputEnvelopeV0MinMetaSchema = z.object({
+  meta_version: z.literal("v1").optional(),
+}).passthrough();
+
+export const OutputEnvelopeV0MinSchema = z.object({
+  assistant_text: z.string().min(1),
+  assumptions: z.array(z.string()).optional(),
+  unknowns: z.array(z.string()).optional(),
+  used_context_ids: z.array(z.string()).optional(),
+  notification_policy: NotificationPolicy.optional(),
+  meta: OutputEnvelopeV0MinMetaSchema.optional(),
 }).strict();
 
 export type OutputEnvelope = z.infer<typeof OutputEnvelopeSchema>;

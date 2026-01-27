@@ -106,7 +106,7 @@ describe("Step 6 - retrieval seam", () => {
     expect(items).toEqual([]);
   });
 
-  it("retrieveContext uses accepted-only memento (draft is ignored)", async () => {
+  it("retrieveContext includes pinned memento (draft is ignored)", async () => {
     const draft = putThreadMemento({
       threadId: "t1",
       arc: "SolServer v0 build",
@@ -117,7 +117,7 @@ describe("Step 6 - retrieval seam", () => {
     });
 
     // Draft should be visible only when includeDraft=true.
-    expect(getLatestThreadMemento("t1", { includeDraft: true })?.id).toBe(draft.id);
+    expect(getLatestThreadMemento("t1", { includeDraft: true })?.mementoId).toBe(draft.mementoId);
 
     // Retrieval MUST ignore draft until the user accepts.
     const before = await retrieveContext({
@@ -128,8 +128,8 @@ describe("Step 6 - retrieval seam", () => {
     expect(before).toEqual([]);
 
     // Accept promotes draft -> accepted.
-    const accepted = acceptThreadMemento({ threadId: "t1", mementoId: draft.id });
-    expect(accepted?.id).toBe(draft.id);
+    const accepted = acceptThreadMemento({ threadId: "t1", mementoId: draft.mementoId });
+    expect(accepted?.mementoId).toBe(draft.mementoId);
 
     const items = await retrieveContext({
       threadId: "t1",
@@ -138,7 +138,7 @@ describe("Step 6 - retrieval seam", () => {
     });
 
     expect(items).toHaveLength(1);
-    expect(items[0].kind).toBe("memento");
+    expect(items[0].kind).toBe("bookmark");
 
     // Summary format should stay stable and human-readable.
     expect(items[0].summary).toContain("Arc:");
@@ -159,9 +159,9 @@ describe("Step 6 - retrieval seam", () => {
     });
 
     // Decline removes the draft.
-    const declined = declineThreadMemento({ threadId: "t1", mementoId: draft.id });
+    const declined = declineThreadMemento({ threadId: "t1", mementoId: draft.mementoId });
     expect(declined).not.toBeNull();
-    expect(declined!.id).toBe(draft.id);
+    expect(declined!.mementoId).toBe(draft.mementoId);
 
     // No draft, no accepted.
     expect(getLatestThreadMemento("t1", { includeDraft: true })).toBeNull();
@@ -190,7 +190,7 @@ describe("Step 6 - retrieval seam", () => {
     expect(wrong).toBeNull();
 
     // Draft still exists.
-    expect(getLatestThreadMemento("t1", { includeDraft: true })?.id).toBe(draft.id);
+    expect(getLatestThreadMemento("t1", { includeDraft: true })?.mementoId).toBe(draft.mementoId);
 
     const items = await retrieveContext({
       threadId: "t1",
@@ -211,8 +211,8 @@ describe("Step 6 - retrieval seam", () => {
     });
 
     // Accept promotes draft -> accepted.
-    const accepted = acceptThreadMemento({ threadId: "t1", mementoId: draft.id });
-    expect(accepted?.id).toBe(draft.id);
+    const accepted = acceptThreadMemento({ threadId: "t1", mementoId: draft.mementoId });
+    expect(accepted?.mementoId).toBe(draft.mementoId);
 
     // Retrieval should now include the accepted memento.
     const before = await retrieveContext({
@@ -221,11 +221,11 @@ describe("Step 6 - retrieval seam", () => {
       message: "hello",
     });
     expect(before).toHaveLength(1);
-    expect(before[0].kind).toBe("memento");
+    expect(before[0].kind).toBe("bookmark");
 
     // Revoke removes the accepted memento.
-    const revoked = revokeThreadMemento({ threadId: "t1", mementoId: draft.id });
-    expect(revoked?.id).toBe(draft.id);
+    const revoked = revokeThreadMemento({ threadId: "t1", mementoId: draft.mementoId });
+    expect(revoked?.mementoId).toBe(draft.mementoId);
 
     const after = await retrieveContext({
       threadId: "t1",

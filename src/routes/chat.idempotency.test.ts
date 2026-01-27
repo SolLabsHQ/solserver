@@ -38,7 +38,7 @@ describe("/v1/chat idempotency", () => {
     expect(firstJson.threadMemento).toBeTruthy();
     expect(firstJson.threadMemento.threadId).toBe("t1");
     expect(firstJson.threadMemento.arc).toBeTruthy();
-    expect(firstJson.threadMemento.version).toBe("memento-v0");
+    expect(firstJson.threadMemento.version).toBe("memento-v0.1");
 
     const second = await app.inject({
       method: "POST",
@@ -52,7 +52,7 @@ describe("/v1/chat idempotency", () => {
     expect(secondJson.idempotentReplay).toBe(true);
     expect(secondJson.threadMemento).toBeTruthy();
     // Replay should return the same latest ThreadMemento snapshot.
-    expect(secondJson.threadMemento.id).toBe(firstJson.threadMemento.id);
+    expect(secondJson.threadMemento.mementoId).toBe(firstJson.threadMemento.mementoId);
   });
 
   it("returns 409 if the same clientRequestId is reused for a different payload", async () => {
@@ -120,19 +120,25 @@ describe("/v1/memento/decision", () => {
 
   it("accepts a draft memento and is idempotent on repeat accept", async () => {
     const threadId = "t-memento-accept";
-    const clientRequestId = "memento-accept-1";
 
-    // Create a draft memento via chat.
+    // Create a draft memento via explicit endpoint.
     const chat = await app.inject({
       method: "POST",
-      url: "/v1/chat",
-      payload: { threadId, clientRequestId, message: "hello memento" },
+      url: "/v1/memento",
+      payload: {
+        threadId,
+        arc: "Draft arc",
+        active: ["Step 1"],
+        parked: [],
+        decisions: [],
+        next: ["Next step"],
+      },
     });
 
     expect(chat.statusCode).toBe(200);
     const chatJson = chat.json();
-    expect(chatJson.threadMemento).toBeTruthy();
-    const mementoId = chatJson.threadMemento.id as string;
+    expect(chatJson.memento).toBeTruthy();
+    const mementoId = chatJson.memento.mementoId as string;
     expect(typeof mementoId).toBe("string");
 
     const accept1 = await app.inject({
@@ -148,7 +154,7 @@ describe("/v1/memento/decision", () => {
     expect(a1.applied).toBe(true);
     expect(a1.reason).toBe("applied");
     expect(a1.memento).toBeTruthy();
-    expect(a1.memento.id).toBe(mementoId);
+    expect(a1.memento.mementoId).toBe(mementoId);
 
     const accept2 = await app.inject({
       method: "POST",
@@ -163,24 +169,30 @@ describe("/v1/memento/decision", () => {
     expect(a2.applied).toBe(false);
     expect(a2.reason).toBe("already_accepted");
     expect(a2.memento).toBeTruthy();
-    expect(a2.memento.id).toBe(mementoId);
+    expect(a2.memento.mementoId).toBe(mementoId);
   });
 
   it("declines a draft memento and repeat decline is not_found", async () => {
     const threadId = "t-memento-decline";
-    const clientRequestId = "memento-decline-1";
 
-    // Create a draft memento via chat.
+    // Create a draft memento via explicit endpoint.
     const chat = await app.inject({
       method: "POST",
-      url: "/v1/chat",
-      payload: { threadId, clientRequestId, message: "hello decline" },
+      url: "/v1/memento",
+      payload: {
+        threadId,
+        arc: "Draft arc",
+        active: ["Step 1"],
+        parked: [],
+        decisions: [],
+        next: ["Next step"],
+      },
     });
 
     expect(chat.statusCode).toBe(200);
     const chatJson = chat.json();
-    expect(chatJson.threadMemento).toBeTruthy();
-    const mementoId = chatJson.threadMemento.id as string;
+    expect(chatJson.memento).toBeTruthy();
+    const mementoId = chatJson.memento.mementoId as string;
 
     const decline1 = await app.inject({
       method: "POST",

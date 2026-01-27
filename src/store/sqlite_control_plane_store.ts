@@ -22,6 +22,9 @@ import type {
   TraceEventPhase,
   TraceEventStatus,
   TraceSummary,
+  JournalEntry,
+  TraceIngestEvent,
+  ThreadMementoLatestRecord,
 } from "./control_plane_store";
 import type { PacketInput, ModeDecision, Evidence, NotificationPolicy } from "../contracts/chat";
 import type { OutputEnvelope } from "../contracts/output_envelope";
@@ -175,6 +178,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         created_at TEXT NOT NULL,
         output_chars INTEGER,
         error TEXT,
+        journal_offer_json TEXT,
         FOREIGN KEY (transmission_id) REFERENCES transmissions(id)
       );
 
@@ -364,6 +368,55 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         created_at TEXT NOT NULL
       );
 
+      -- Journal entries (PR #10)
+      CREATE TABLE IF NOT EXISTS journal_entries (
+        entry_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        created_ts TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        tags_json TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        start_message_id TEXT NOT NULL,
+        end_message_id TEXT NOT NULL,
+        draft_mode TEXT NOT NULL,
+        draft_cpb_id TEXT,
+        draft_id TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_journal_entries_user_created
+        ON journal_entries(user_id, created_ts DESC);
+      CREATE INDEX IF NOT EXISTS idx_journal_entries_thread
+        ON journal_entries(thread_id);
+
+      -- ThreadMementoLatest (v0.1)
+      CREATE TABLE IF NOT EXISTS thread_memento_latest (
+        thread_id TEXT PRIMARY KEY,
+        memento_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      -- Trace ingestion events (PR #10)
+      CREATE TABLE IF NOT EXISTS trace_ingest_events (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        local_user_uuid TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        message_id TEXT,
+        ts TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_trace_ingest_user
+        ON trace_ingest_events(local_user_uuid);
+      CREATE INDEX IF NOT EXISTS idx_trace_ingest_thread
+        ON trace_ingest_events(thread_id);
+      CREATE INDEX IF NOT EXISTS idx_trace_ingest_message
+        ON trace_ingest_events(message_id);
+
       CREATE INDEX IF NOT EXISTS idx_memory_audit_user
         ON memory_audit_log(user_id, created_at DESC);
     `);
@@ -400,6 +453,9 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     } catch {}
     try {
       this.db.exec("ALTER TABLE memory_artifacts ADD COLUMN rigor_reason TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE delivery_attempts ADD COLUMN journal_offer_json TEXT");
     } catch {}
   }
 
@@ -662,6 +718,16 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     return this.rowToTransmission(row);
   }
 
+  async listTransmissionsByThread(args: { threadId: string }): Promise<Transmission[]> {
+    const stmt = this.db.prepare(`
+      SELECT * FROM transmissions
+      WHERE thread_id = ? AND packet_type = 'chat'
+      ORDER BY created_at ASC
+    `);
+    const rows = stmt.all(args.threadId) as any[];
+    return rows.map((row) => this.rowToTransmission(row));
+  }
+
   async updateTransmissionStatus(args: {
     transmissionId: string;
     status: TransmissionStatus;
@@ -828,6 +894,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     status: DeliveryStatus;
     outputChars?: number;
     error?: string;
+    journalOffer?: DeliveryAttempt["journalOffer"] | null;
   }): Promise<DeliveryAttempt> {
     const a: DeliveryAttempt = {
       id: randomUUID(),
@@ -837,11 +904,14 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       createdAt: new Date().toISOString(),
       outputChars: args.outputChars,
       error: args.error,
+      journalOffer: args.journalOffer ?? null,
     };
 
     const stmt = this.db.prepare(`
-      INSERT INTO delivery_attempts (id, transmission_id, provider, status, created_at, output_chars, error)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO delivery_attempts (
+        id, transmission_id, provider, status, created_at, output_chars, error, journal_offer_json
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -851,7 +921,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       a.status,
       a.createdAt,
       a.outputChars ?? null,
-      a.error ?? null
+      a.error ?? null,
+      a.journalOffer ? JSON.stringify(a.journalOffer) : null
     );
 
     return a;
@@ -906,6 +977,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       createdAt: row.created_at,
       outputChars: row.output_chars ?? undefined,
       error: row.error ?? undefined,
+      journalOffer: row.journal_offer_json ? JSON.parse(row.journal_offer_json) : null,
     }));
   }
 
@@ -1698,6 +1770,223 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     );
   }
 
+  async createJournalEntry(args: { entry: JournalEntry }): Promise<JournalEntry> {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO journal_entries (
+        entry_id,
+        user_id,
+        created_ts,
+        updated_at,
+        title,
+        body,
+        tags_json,
+        thread_id,
+        start_message_id,
+        end_message_id,
+        draft_mode,
+        draft_cpb_id,
+        draft_id
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      args.entry.entryId,
+      args.entry.userId,
+      args.entry.createdTs,
+      args.entry.updatedAt,
+      args.entry.title,
+      args.entry.body,
+      this.serializeTags(args.entry.tags),
+      args.entry.sourceSpan.threadId,
+      args.entry.sourceSpan.startMessageId,
+      args.entry.sourceSpan.endMessageId,
+      args.entry.draftMeta.mode,
+      args.entry.draftMeta.cpbId ?? null,
+      args.entry.draftMeta.draftId ?? null
+    );
+
+    return args.entry;
+  }
+
+  async getJournalEntry(args: { entryId: string; userId: string }): Promise<JournalEntry | null> {
+    const row = this.db.prepare(`
+      SELECT * FROM journal_entries WHERE entry_id = ? AND user_id = ?
+    `).get(args.entryId, args.userId) as any;
+    if (!row) return null;
+    return this.rowToJournalEntry(row);
+  }
+
+  async listJournalEntries(args: {
+    userId: string;
+    threadId?: string | null;
+    before?: string | null;
+    limit?: number;
+  }): Promise<{ items: JournalEntry[]; nextCursor: string | null }> {
+    const params: Array<string | number> = [args.userId];
+    const where: string[] = ["user_id = ?"];
+
+    if (args.threadId) {
+      where.push("thread_id = ?");
+      params.push(args.threadId);
+    }
+
+    if (args.before) {
+      where.push("created_ts < ?");
+      params.push(args.before);
+    }
+
+    const limit = args.limit ?? 50;
+    params.push(limit);
+
+    const rows = this.db.prepare(`
+      SELECT * FROM journal_entries
+      WHERE ${where.join(" AND ")}
+      ORDER BY created_ts DESC, entry_id DESC
+      LIMIT ?
+    `).all(...params) as any[];
+
+    const items = rows.map((row) => this.rowToJournalEntry(row));
+    const nextCursor = items.length === limit ? items[items.length - 1]?.createdTs ?? null : null;
+    return { items, nextCursor };
+  }
+
+  async updateJournalEntry(args: {
+    userId: string;
+    entryId: string;
+    title?: string;
+    body?: string;
+    tags?: string[];
+  }): Promise<JournalEntry | null> {
+    const existing = await this.getJournalEntry({
+      entryId: args.entryId,
+      userId: args.userId,
+    });
+    if (!existing) return null;
+
+    const updated: JournalEntry = {
+      ...existing,
+      title: args.title ?? existing.title,
+      body: args.body ?? existing.body,
+      tags: args.tags ?? existing.tags,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const stmt = this.db.prepare(`
+      UPDATE journal_entries
+      SET title = ?,
+        body = ?,
+        tags_json = ?,
+        updated_at = ?
+      WHERE entry_id = ? AND user_id = ?
+    `);
+
+    stmt.run(
+      updated.title,
+      updated.body,
+      this.serializeTags(updated.tags),
+      updated.updatedAt,
+      args.entryId,
+      args.userId
+    );
+
+    return updated;
+  }
+
+  async deleteJournalEntry(args: { userId: string; entryId: string }): Promise<boolean> {
+    const stmt = this.db.prepare(`
+      DELETE FROM journal_entries WHERE entry_id = ? AND user_id = ?
+    `);
+    const result = stmt.run(args.entryId, args.userId);
+    return (result.changes ?? 0) > 0;
+  }
+
+  async appendTraceIngestEvents(args: {
+    requestId: string;
+    localUserUuid: string;
+    events: Array<{
+      eventType: TraceIngestEvent["eventType"];
+      threadId: string;
+      messageId?: string | null;
+      ts: string;
+      payload: Record<string, any>;
+    }>;
+  }): Promise<TraceIngestEvent[]> {
+    const createdAt = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT INTO trace_ingest_events (
+        id,
+        request_id,
+        local_user_uuid,
+        event_type,
+        thread_id,
+        message_id,
+        ts,
+        payload_json,
+        created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const records: TraceIngestEvent[] = [];
+    for (const event of args.events) {
+      const record: TraceIngestEvent = {
+        id: randomUUID(),
+        requestId: args.requestId,
+        localUserUuid: args.localUserUuid,
+        eventType: event.eventType,
+        threadId: event.threadId,
+        messageId: event.messageId ?? null,
+        ts: event.ts,
+        payload: event.payload,
+        createdAt,
+      };
+      stmt.run(
+        record.id,
+        record.requestId,
+        record.localUserUuid,
+        record.eventType,
+        record.threadId,
+        record.messageId,
+        record.ts,
+        JSON.stringify(record.payload),
+        record.createdAt
+      );
+      records.push(record);
+    }
+
+    return records;
+  }
+
+  async getThreadMementoLatest(args: { threadId: string }): Promise<ThreadMementoLatestRecord | null> {
+    const row = this.db.prepare(`
+      SELECT memento_json FROM thread_memento_latest WHERE thread_id = ?
+    `).get(args.threadId) as { memento_json?: string } | undefined;
+
+    if (!row?.memento_json) return null;
+    try {
+      return JSON.parse(row.memento_json) as ThreadMementoLatestRecord;
+    } catch {
+      return null;
+    }
+  }
+
+  async upsertThreadMementoLatest(args: { memento: ThreadMementoLatestRecord }): Promise<void> {
+    const stmt = this.db.prepare(`
+      INSERT INTO thread_memento_latest (thread_id, memento_json, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET
+        memento_json = excluded.memento_json,
+        updated_at = excluded.updated_at
+    `);
+
+    stmt.run(
+      args.memento.threadId,
+      JSON.stringify(args.memento),
+      args.memento.updatedAt
+    );
+  }
+
   private rowToTransmission(row: any): Transmission {
     let packet: PacketInput | undefined;
     const packetJson = row.packet_json ?? undefined;
@@ -1770,6 +2059,28 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       requestId: row.request_id ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+    };
+  }
+
+  private rowToJournalEntry(row: any): JournalEntry {
+    return {
+      entryId: row.entry_id,
+      userId: row.user_id,
+      createdTs: row.created_ts,
+      updatedAt: row.updated_at,
+      title: row.title,
+      body: row.body,
+      tags: this.parseTags(row.tags_json),
+      sourceSpan: {
+        threadId: row.thread_id,
+        startMessageId: row.start_message_id,
+        endMessageId: row.end_message_id,
+      },
+      draftMeta: {
+        mode: row.draft_mode,
+        cpbId: row.draft_cpb_id ?? null,
+        draftId: row.draft_id ?? null,
+      },
     };
   }
 

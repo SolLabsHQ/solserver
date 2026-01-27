@@ -11,6 +11,17 @@ describe("Driver Blocks (v0)", () => {
   let store: MemoryControlPlaneStore;
   let previousEnforcement: string | undefined;
 
+  const VALID_ASSISTANT_TEXT = [
+    "Receipt: Noted.",
+    "Release: Keeping this lightweight.",
+    "Next: I can help once I have the missing details.",
+    "Provisional marker: working assumption.",
+    "Assumption: I'm missing key context.",
+    "Missing: I don't have the specific requirement yet.",
+    "Question: Which details, what scope, when due, where used, who owns it, how to measure?",
+  ].join("\n");
+  const VALID_ENVELOPE_HEADER = JSON.stringify({ assistant_text: VALID_ASSISTANT_TEXT });
+
   beforeAll(async () => {
     previousEnforcement = process.env.DRIVER_BLOCK_ENFORCEMENT;
     process.env.DRIVER_BLOCK_ENFORCEMENT = "strict";
@@ -37,6 +48,9 @@ describe("Driver Blocks (v0)", () => {
       const response = await app.inject({
         method: "POST",
         url: "/v1/chat",
+        headers: {
+          "x-sol-test-output-envelope": VALID_ENVELOPE_HEADER,
+        },
         payload: {
           packetType: "chat",
           threadId: "thread-db-001",
@@ -55,6 +69,9 @@ describe("Driver Blocks (v0)", () => {
       const response = await app.inject({
         method: "POST",
         url: "/v1/chat",
+        headers: {
+          "x-sol-test-output-envelope": VALID_ENVELOPE_HEADER,
+        },
         payload: {
           packetType: "chat",
           threadId: "thread-db-002",
@@ -283,6 +300,9 @@ describe("Driver Blocks (v0)", () => {
       const response = await app.inject({
         method: "POST",
         url: "/v1/chat",
+        headers: {
+          "x-sol-test-output-envelope": VALID_ENVELOPE_HEADER,
+        },
         payload: {
           packetType: "chat",
           threadId: "thread-trace-001",
@@ -323,7 +343,7 @@ describe("Driver Blocks (v0)", () => {
         url: "/v1/chat",
         headers: {
           "x-sol-test-output-attempt-0": "I sent the email for you.",
-          "x-sol-test-output-attempt-1": "shape\nReceipt: Acknowledged.\nRelease: You are not required to take external actions.\nNext: Tell me if you want a draft or steps.\nAssumption: No external actions were taken.\nHere is a draft email you can send.",
+          "x-sol-test-output-attempt-1": VALID_ASSISTANT_TEXT,
         },
         payload: {
           packetType: "chat",
@@ -335,7 +355,7 @@ describe("Driver Blocks (v0)", () => {
 
       expect(response.statusCode).toBe(200);
       const body = JSON.parse(response.body);
-      expect(body.assistant).toBe("shape\nReceipt: Acknowledged.\nRelease: You are not required to take external actions.\nNext: Tell me if you want a draft or steps.\nAssumption: No external actions were taken.\nHere is a draft email you can send.");
+      expect(body.assistant).toBe(VALID_ASSISTANT_TEXT);
       expect(body.outputEnvelope).toBeDefined();
       expect(body.outputEnvelope.assistant_text).toBe(body.assistant);
 
@@ -402,6 +422,9 @@ describe("Driver Blocks (v0)", () => {
       const response = await app.inject({
         method: "POST",
         url: "/v1/chat",
+        headers: {
+          "x-sol-test-output-envelope": VALID_ENVELOPE_HEADER,
+        },
         payload: {
           packetType: "chat",
           threadId: "thread-trace-002",
@@ -436,6 +459,9 @@ describe("Driver Blocks (v0)", () => {
       const response = await app.inject({
         method: "POST",
         url: "/v1/chat",
+        headers: {
+          "x-sol-test-output-envelope": VALID_ENVELOPE_HEADER,
+        },
         payload: {
           packetType: "chat",
           threadId: "thread-e2e-001",
@@ -661,6 +687,9 @@ describe("Driver Blocks (v0)", () => {
       const response = await app.inject({
         method: "POST",
         url: "/v1/chat",
+        headers: {
+          "x-sol-test-output-envelope": VALID_ENVELOPE_HEADER,
+        },
         payload: {
           packetType: "chat",
           threadId: "thread-e2e-001",
@@ -718,6 +747,9 @@ describe("Driver Blocks (v0)", () => {
       const response = await app.inject({
         method: "POST",
         url: "/v1/chat",
+        headers: {
+          "x-sol-test-output-envelope": VALID_ENVELOPE_HEADER,
+        },
         payload: {
           packetType: "chat",
           threadId: "thread-e2e-002",

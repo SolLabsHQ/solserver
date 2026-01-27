@@ -11,8 +11,11 @@ import {
 import { validateEvidencePack, type EvidencePack } from "../src/evidence/evidence_provider";
 import type { OutputEnvelope } from "../src/contracts/output_envelope";
 
-const OUTPUT_CONTRACT_STUB =
-  "I can't do that directly from here. Tell me what you're trying to accomplish and I'll give you a safe draft or step-by-step instructions.";
+const OUTPUT_CONTRACT_STUB = [
+  "Missing info: I couldn't validate the evidence references for this response.",
+  "Provisional: I can retry with a stricter output format if you'd like.",
+  "Question: Want me to retry, or can you rephrase your request?",
+].join("\n");
 const COMPLIANT_ASSISTANT =
   "shape\nReceipt: ok\nRelease: ok\nNext: ok\nAssumption: ok";
 
