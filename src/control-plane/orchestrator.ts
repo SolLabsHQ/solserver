@@ -492,7 +492,6 @@ function resolveDriverBlockEnforcementMode(): DriverBlockEnforcementMode {
   if (override === "strict" || override === "warn" || override === "off") return override;
   const raw = String(process.env.DRIVER_BLOCK_ENFORCEMENT ?? "").toLowerCase();
   if (raw === "strict" || raw === "warn" || raw === "off") return raw;
-  if (process.env.NODE_ENV === "test") return "strict";
   if (process.env.SOL_ENV === "staging") return "warn";
   if (process.env.SOL_ENV === "production" || process.env.NODE_ENV === "production") return "strict";
   return "warn";

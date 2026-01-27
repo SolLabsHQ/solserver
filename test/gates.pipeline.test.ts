@@ -223,9 +223,11 @@ describe("Gates Pipeline", () => {
   it("should ignore forceEvidence in production", async () => {
     const prevNodeEnv = process.env.NODE_ENV;
     const prevForce = process.env.EVIDENCE_PROVIDER_FORCE;
+    const prevEnforcement = process.env.SOL_ENFORCEMENT_MODE;
     try {
       process.env.NODE_ENV = "production";
       process.env.EVIDENCE_PROVIDER_FORCE = "1";
+      process.env.SOL_ENFORCEMENT_MODE = "warn";
 
       const response = await app.inject({
         method: "POST",
@@ -256,6 +258,11 @@ describe("Gates Pipeline", () => {
         delete process.env.EVIDENCE_PROVIDER_FORCE;
       } else {
         process.env.EVIDENCE_PROVIDER_FORCE = prevForce;
+      }
+      if (prevEnforcement === undefined) {
+        delete process.env.SOL_ENFORCEMENT_MODE;
+      } else {
+        process.env.SOL_ENFORCEMENT_MODE = prevEnforcement;
       }
     }
   });
