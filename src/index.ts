@@ -43,6 +43,10 @@ app.addHook("onRequest", async (req) => {
 });
 
 app.addHook("onResponse", async (req, reply) => {
+  const route = (req as any).routerPath ?? req.url;
+  if (route === "/healthz" || route === "/readyz") {
+    return;
+  }
   const startNs = (req as any).startNs as bigint | undefined;
   const endNs = process.hrtime.bigint();
   const responseTimeMs = startNs ? Number(endNs - startNs) / 1e6 : undefined;

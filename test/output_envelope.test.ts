@@ -5,8 +5,11 @@ import cors from "@fastify/cors";
 import { chatRoutes } from "../src/routes/chat";
 import { MemoryControlPlaneStore } from "../src/store/control_plane_store";
 
-const OUTPUT_CONTRACT_STUB =
-  "I can't do that directly from here. Tell me what you're trying to accomplish and I'll give you a safe draft or step-by-step instructions.";
+const OUTPUT_CONTRACT_STUB = [
+  "Missing info: I couldn't validate the model response against the output contract.",
+  "Provisional: I can retry with a stricter output format if you'd like.",
+  "Question: Want me to retry, or can you rephrase your request?",
+].join("\n");
 const SHAPE_ASSISTANT_TEXT = [
   "shape:",
   "- Arc: ok",
