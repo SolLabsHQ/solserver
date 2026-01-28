@@ -161,6 +161,7 @@ class SSEHub {
       this.closeConnection(conn, reason);
     }
     this.registry.remove(userId, connId);
+    this.stopPingLoopIfIdle();
   }
 
   publishToUser(userId: string, event: SSEEventEnvelopeV1): void {
@@ -197,6 +198,13 @@ class SSEHub {
 
     if (typeof this.pingTimer.unref === "function") {
       this.pingTimer.unref();
+    }
+  }
+
+  private stopPingLoopIfIdle() {
+    if (this.pingTimer && this.registry.countAll() === 0) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
     }
   }
 
