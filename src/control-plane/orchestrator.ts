@@ -47,6 +47,7 @@ import {
 } from "../contracts/output_envelope";
 import type { PacketInput, ModeDecision, NotificationPolicy, ThreadContextMode } from "../contracts/chat";
 import { classifyJournalOffer, type MoodSignal } from "../memory/journal_offer_classifier";
+import { buildSSEEnvelope, buildTransmissionSubject, sseHub } from "../sse/sse_hub";
 
 export type OrchestrationSource = "api" | "worker";
 export type SystemPersona = NonNullable<ModeDecision["personaLabel"]>;
@@ -56,6 +57,7 @@ export type OrchestrationRequest = {
   packet: PacketInput;
   simulate?: boolean;
   forcedPersona?: SystemPersona | null;
+  userId?: string;
 };
 
 export function makeForcedModeDecision(forcedPersona: SystemPersona): ModeDecision {
@@ -866,6 +868,12 @@ export async function runOrchestrationPipeline(args: {
     allowAsyncSimulation = false,
   } = args;
   const packet = request.packet;
+  const userId = request.userId;
+  const transmissionSubject = buildTransmissionSubject({
+    transmissionId: transmission.id,
+    threadId: packet.threadId,
+    clientRequestId: packet.clientRequestId,
+  });
   const simulate = simulateStatus;
   const requestStartNs = process.hrtime.bigint();
   const elapsedMs = () => Number(process.hrtime.bigint() - requestStartNs) / 1e6;
@@ -916,6 +924,52 @@ export async function runOrchestrationPipeline(args: {
     statusCode,
     body: attachPolicyFields(body),
   });
+
+  const publishSseEvent = (args: {
+    kind: "run_started" | "assistant_final_ready" | "assistant_failed";
+    payload?: Record<string, unknown>;
+  }) => {
+    if (!userId) return;
+    const envelope = buildSSEEnvelope({
+      kind: args.kind,
+      subject: transmissionSubject,
+      traceRunId: traceRun?.id,
+      payload: args.payload ?? {},
+    });
+    sseHub.publishToUser(userId, envelope);
+  };
+
+  const emitRunStarted = (args: { provider?: string; model?: string }) => {
+    const payload: Record<string, unknown> = {
+      ...(args.provider ? { provider: args.provider } : {}),
+      ...(args.model ? { model: args.model } : {}),
+    };
+    publishSseEvent({ kind: "run_started", payload });
+  };
+
+  const emitAssistantFinalReady = () => {
+    publishSseEvent({
+      kind: "assistant_final_ready",
+      payload: { transmission_status: "completed" },
+    });
+  };
+
+  const emitAssistantFailed = (args: {
+    code: string;
+    detail: string;
+    retryable: boolean;
+    retryAfterMs?: number;
+    category?: string;
+  }) => {
+    const payload: Record<string, unknown> = {
+      code: args.code,
+      detail: args.detail,
+      retryable: args.retryable,
+      ...(typeof args.retryAfterMs === "number" ? { retry_after_ms: args.retryAfterMs } : {}),
+      ...(args.category ? { category: args.category } : {}),
+    };
+    publishSseEvent({ kind: "assistant_failed", payload });
+  };
 
   await persistPolicy(resolvedNotificationPolicy);
 
@@ -1351,6 +1405,10 @@ export async function runOrchestrationPipeline(args: {
       "model_call.start"
     );
 
+    if (args.attempt === 0) {
+      emitRunStarted({ provider: providerUsed, model: modelUsed });
+    }
+
     const providerInputText = toSinglePromptText(args.promptPack);
     const meta = providerUsed === "openai"
       ? await openAIModelReplyWithMeta({
@@ -1435,6 +1493,13 @@ export async function runOrchestrationPipeline(args: {
       errorCode: "openai_api_key_missing",
     });
 
+    emitAssistantFailed({
+      code: "INTERNAL_ERROR",
+      detail: "Server configuration missing.",
+      retryable: false,
+      category: "internal",
+    });
+
     logResponded(500, 0);
     return respond(500, {
       error: "openai_api_key_missing",
@@ -1451,6 +1516,13 @@ export async function runOrchestrationPipeline(args: {
       statusCode: 500,
       retryable: false,
       errorCode: "openai_model_missing",
+    });
+
+    emitAssistantFailed({
+      code: "INTERNAL_ERROR",
+      detail: "Server configuration missing.",
+      retryable: false,
+      category: "internal",
     });
 
     logResponded(500, 0);
@@ -1538,6 +1610,13 @@ export async function runOrchestrationPipeline(args: {
         retryable: false,
         errorCode: error.code,
         errorDetail: error.details,
+      });
+
+      emitAssistantFailed({
+        code: "INTERNAL_ERROR",
+        detail: "Request invalid.",
+        retryable: false,
+        category: "validation",
       });
 
       logResponded(400, 0);
@@ -1665,6 +1744,13 @@ export async function runOrchestrationPipeline(args: {
       errorCode: "simulated_failure",
     });
 
+    emitAssistantFailed({
+      code: "INTERNAL_ERROR",
+      detail: "Server error.",
+      retryable: true,
+      category: "internal",
+    });
+
     logResponded(500, 0);
     return respond(500, {
       error: "simulated_failure",
@@ -1754,6 +1840,13 @@ export async function runOrchestrationPipeline(args: {
       statusCode: 500,
       retryable: true,
       errorCode,
+    });
+
+    emitAssistantFailed({
+      code: "INTERNAL_ERROR",
+      detail: "Server error.",
+      retryable: true,
+      category: "internal",
     });
 
     log.error({ error: message, errorCode }, "evidence_provider.failed");
@@ -1996,6 +2089,13 @@ export async function runOrchestrationPipeline(args: {
 
             await store.setChatResult({ transmissionId, assistant: stubAssistant });
 
+            emitAssistantFailed({
+              code: "OUTPUT_ENVELOPE_INVALID",
+              detail: "Output envelope invalid.",
+              retryable: false,
+              category: "gates",
+            });
+
             bgLog.info({
               evt: "simulate.persisted_failure",
               statusCode: 422,
@@ -2038,6 +2138,13 @@ export async function runOrchestrationPipeline(args: {
             });
 
             await store.setChatResult({ transmissionId, assistant: stubAssistant });
+
+            emitAssistantFailed({
+              code: "OUTPUT_ENVELOPE_INVALID",
+              detail: "Output failed evidence gates.",
+              retryable: false,
+              category: "gates",
+            });
 
             bgLog.info({
               evt: "simulate.persisted_failure",
@@ -2138,6 +2245,8 @@ export async function runOrchestrationPipeline(args: {
 
             await store.setChatResult({ transmissionId, assistant: assistant0 });
 
+            emitAssistantFinalReady();
+
             bgLog.info({
               evt: "chat.async.completed",
               statusCode: 200,
@@ -2189,6 +2298,13 @@ export async function runOrchestrationPipeline(args: {
             });
 
             await store.setChatResult({ transmissionId, assistant: stubAssistant });
+
+            emitAssistantFailed({
+              code: "GATE_REGEN_EXHAUSTED",
+              detail: "Output failed gating after retry.",
+              retryable: false,
+              category: "gates",
+            });
 
             bgLog.info({ evt: "chat.async.failed", statusCode: 422 }, "chat.async.failed");
             bgLog.warn({ status: "failed" }, "delivery.failed_async");
@@ -2250,6 +2366,13 @@ export async function runOrchestrationPipeline(args: {
 
             await store.setChatResult({ transmissionId, assistant: stubAssistant });
 
+            emitAssistantFailed({
+              code: "OUTPUT_ENVELOPE_INVALID",
+              detail: "Output envelope invalid.",
+              retryable: false,
+              category: "gates",
+            });
+
             bgLog.info({
               evt: "simulate.persisted_failure",
               statusCode: 422,
@@ -2292,6 +2415,13 @@ export async function runOrchestrationPipeline(args: {
             });
 
             await store.setChatResult({ transmissionId, assistant: stubAssistant });
+
+            emitAssistantFailed({
+              code: "OUTPUT_ENVELOPE_INVALID",
+              detail: "Output failed evidence gates.",
+              retryable: false,
+              category: "gates",
+            });
 
             bgLog.info({
               evt: "simulate.persisted_failure",
@@ -2392,6 +2522,8 @@ export async function runOrchestrationPipeline(args: {
 
             await store.setChatResult({ transmissionId, assistant: assistant1 });
 
+            emitAssistantFinalReady();
+
             bgLog.info({ evt: "chat.async.completed", statusCode: 200, attemptsUsed: 2 }, "chat.async.completed");
             bgLog.info({ status: "completed", outputChars: assistant1.length }, "delivery.completed_async");
             return;
@@ -2439,6 +2571,13 @@ export async function runOrchestrationPipeline(args: {
 
           await store.setChatResult({ transmissionId, assistant: stubAssistant });
 
+          emitAssistantFailed({
+            code: "GATE_REGEN_EXHAUSTED",
+            detail: "Output failed gating after retry.",
+            retryable: false,
+            category: "gates",
+          });
+
           bgLog.info({ evt: "chat.async.failed", statusCode: 422 }, "chat.async.failed");
           bgLog.warn({ status: "failed" }, "delivery.failed_async");
         } catch (err: any) {
@@ -2457,6 +2596,13 @@ export async function runOrchestrationPipeline(args: {
             statusCode: 500,
             retryable: true,
             errorCode: "provider_failed",
+          });
+
+          emitAssistantFailed({
+            code: "PROVIDER_ERROR",
+            detail: "Model request failed.",
+            retryable: true,
+            category: "provider",
           });
 
           bgLog.info({ evt: "chat.async.failed" }, "chat.async.failed");
@@ -2612,6 +2758,13 @@ export async function runOrchestrationPipeline(args: {
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
 
+        emitAssistantFailed({
+          code: "OUTPUT_ENVELOPE_INVALID",
+          detail: "Output envelope invalid.",
+          retryable: false,
+          category: "gates",
+        });
+
         logResponded(422, contractRetryUsed ? 2 : 1);
         return respond(422, {
           error: "output_contract_failed",
@@ -2656,6 +2809,13 @@ export async function runOrchestrationPipeline(args: {
       });
 
       await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+
+      emitAssistantFailed({
+        code: "OUTPUT_ENVELOPE_INVALID",
+        detail: "Output failed evidence gates.",
+        retryable: false,
+        category: "gates",
+      });
 
       logResponded(422, contractRetryUsed ? 2 : 1);
       return respond(422, buildEvidenceGateFailureResponse({
@@ -2773,6 +2933,13 @@ export async function runOrchestrationPipeline(args: {
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
 
+        emitAssistantFailed({
+          code: "GATE_REGEN_EXHAUSTED",
+          detail: "Output failed gating after retry.",
+          retryable: false,
+          category: "gates",
+        });
+
         logResponded(422, 2);
         return respond(422, {
           error: "driver_block_enforcement_failed",
@@ -2838,6 +3005,13 @@ export async function runOrchestrationPipeline(args: {
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
 
+        emitAssistantFailed({
+          code: "OUTPUT_ENVELOPE_INVALID",
+          detail: "Output envelope invalid.",
+          retryable: false,
+          category: "gates",
+        });
+
         logResponded(422, 2);
         return respond(422, {
           error: "output_contract_failed",
@@ -2880,6 +3054,13 @@ export async function runOrchestrationPipeline(args: {
         });
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
+
+        emitAssistantFailed({
+          code: "OUTPUT_ENVELOPE_INVALID",
+          detail: "Output failed evidence gates.",
+          retryable: false,
+          category: "gates",
+        });
 
         logResponded(422, 2);
         return respond(422, buildEvidenceGateFailureResponse({
@@ -2996,6 +3177,13 @@ export async function runOrchestrationPipeline(args: {
 
         await store.setChatResult({ transmissionId: transmission.id, assistant: stubAssistant });
 
+        emitAssistantFailed({
+          code: "GATE_REGEN_EXHAUSTED",
+          detail: "Output failed gating after retry.",
+          retryable: false,
+          category: "gates",
+        });
+
         logResponded(422, 2);
         return respond(422, {
           error: "driver_block_enforcement_failed",
@@ -3018,24 +3206,49 @@ export async function runOrchestrationPipeline(args: {
       error: String(err?.message ?? err),
     });
 
-    const statusCode = err instanceof OpenAIProviderError ? err.statusCode : 500;
-    const errorTag = statusCode === 502 ? "provider_upstream_failed" : "provider_failed";
+    const isProviderError = err instanceof OpenAIProviderError;
+    const statusCode = isProviderError ? err.statusCode : 500;
+    const retryable = isProviderError ? err.retryable : true;
+    const errorTag = isProviderError && !retryable
+      ? "provider_invalid_request"
+      : (statusCode === 502 ? "provider_upstream_failed" : "provider_failed");
 
     await store.updateTransmissionStatus({
       transmissionId: transmission.id,
       status: "failed",
       statusCode,
-      retryable: true,
+      retryable,
       errorCode: errorTag,
     });
 
     log.error({ error: String(err?.message ?? err) }, "provider.failed");
 
+    const isTimeout = isProviderError
+      && (statusCode === 408
+        || statusCode === 504
+        || String(err?.message ?? "").toLowerCase().includes("timeout"));
+    const isInvalidSchema = isProviderError
+      && err.errorType === "invalid_request_error"
+      && err.errorCode === "invalid_json_schema";
+    emitAssistantFailed({
+      code: isProviderError
+        ? (isTimeout ? "PROVIDER_TIMEOUT" : "PROVIDER_ERROR")
+        : "INTERNAL_ERROR",
+      detail: isProviderError
+        ? (isTimeout
+          ? "Model request timed out."
+          : (isInvalidSchema ? "Model rejected output schema." : "Model request failed."))
+        : "Internal server error.",
+      retryable,
+      retryAfterMs: isProviderError ? err.retryAfterMs : undefined,
+      category: isProviderError ? "provider" : "internal",
+    });
+
     return respond(statusCode, {
       error: errorTag,
       transmissionId: transmission.id,
       traceRunId: traceRun.id,
-      retryable: true,
+      retryable,
     });
   }
 
@@ -3199,6 +3412,8 @@ export async function runOrchestrationPipeline(args: {
   });
 
   await store.setChatResult({ transmissionId: transmission.id, assistant });
+
+  emitAssistantFinalReady();
 
   log.info({
     status: "completed",

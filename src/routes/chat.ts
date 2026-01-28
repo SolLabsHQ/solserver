@@ -12,6 +12,7 @@ import {
   runOrchestrationPipeline,
   type SystemPersona,
 } from "../control-plane/orchestrator";
+import { buildSSEEnvelope, buildTransmissionSubject, sseHub } from "../sse/sse_hub";
 import {
   getLatestThreadMemento,
   putThreadMemento,
@@ -474,6 +475,23 @@ export async function chatRoutes(
     }
 
     const packet = parsed.data;
+    const headerUserId = (() => {
+      const header = (req.headers as any)["x-sol-user-id"] ?? (req.headers as any)["x-user-id"];
+      if (Array.isArray(header)) {
+        return header[0]?.trim() ?? null;
+      }
+      if (typeof header === "string" && header.trim().length > 0) {
+        return header.trim();
+      }
+      return null;
+    })();
+    if (headerUserId) {
+      const meta = (packet.meta ?? {}) as Record<string, any>;
+      if (meta.user_id === undefined && meta.userId === undefined) {
+        meta.user_id = headerUserId;
+      }
+      packet.meta = meta;
+    }
     const simulateStatus = String((req.headers as any)["x-sol-simulate-status"] ?? "");
     const simulate = packet.simulate === true;
     const emptyEvidenceSummary = { captures: 0, supports: 0, claims: 0, warnings: 0 };
@@ -494,6 +512,31 @@ export async function chatRoutes(
 
     const setTransmissionHeader = (transmissionId: string) => {
       reply.header("x-sol-transmission-id", transmissionId);
+    };
+
+    const emitTxAccepted = (args: {
+      transmissionId: string;
+      status: "queued" | "pending";
+      notificationPolicy?: string;
+      traceRunId?: string;
+    }) => {
+      if (!headerUserId) return;
+      const subject = buildTransmissionSubject({
+        transmissionId: args.transmissionId,
+        threadId: packet.threadId,
+        clientRequestId: packet.clientRequestId,
+      });
+      const payload: Record<string, unknown> = {
+        transmission_status: args.status,
+        ...(args.notificationPolicy ? { notification_policy: args.notificationPolicy } : {}),
+      };
+      const envelope = buildSSEEnvelope({
+        kind: "tx_accepted",
+        subject,
+        traceRunId: args.traceRunId,
+        payload,
+      });
+      sseHub.publishToUser(headerUserId, envelope);
     };
 
     const resolveStoredPolicy = async (existing: any, decision: ModeDecision) => {
@@ -547,6 +590,11 @@ export async function chatRoutes(
           if (cached) {
             setTransmissionHeader(existing.id);
             const policy = await resolveStoredPolicy(existing, existing.modeDecision);
+            emitTxAccepted({
+              transmissionId: existing.id,
+              status: "queued",
+              notificationPolicy: policy,
+            });
             const replayEnvelope = buildOutputEnvelopeMeta({
               envelope: { assistant_text: cached.assistant },
               personaLabel: resolvePersonaLabel(existing.modeDecision),
@@ -569,6 +617,11 @@ export async function chatRoutes(
           // Completed but no cached assistant (shouldn't happen) => treat as pending.
           setTransmissionHeader(existing.id);
           const policy = await resolveStoredPolicy(existing, existing.modeDecision);
+          emitTxAccepted({
+            transmissionId: existing.id,
+            status: "pending",
+            notificationPolicy: policy,
+          });
           return reply.code(202).send({
             ok: true,
             transmissionId: existing.id,
@@ -586,6 +639,11 @@ export async function chatRoutes(
         if (existing.status === "created" || existing.status === "processing") {
           setTransmissionHeader(existing.id);
           const policy = await resolveStoredPolicy(existing, existing.modeDecision);
+          emitTxAccepted({
+            transmissionId: existing.id,
+            status: "pending",
+            notificationPolicy: policy,
+          });
           return reply.code(202).send({
             ok: true,
             transmissionId: existing.id,
@@ -644,6 +702,12 @@ export async function chatRoutes(
     });
 
     reply.header("x-sol-trace-run-id", traceRun.id);
+    emitTxAccepted({
+      transmissionId: transmission.id,
+      status: "queued",
+      notificationPolicy: transmission.notificationPolicy ?? packet.notification_policy,
+      traceRunId: traceRun.id,
+    });
 
     if (!inlineProcessing) {
       const packetEvidence = packet.evidence ?? null;
@@ -692,6 +756,7 @@ export async function chatRoutes(
         packet,
         simulate,
         forcedPersona,
+        userId: headerUserId ?? undefined,
       },
       transmission,
       modeDecision,

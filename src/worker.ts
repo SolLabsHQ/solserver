@@ -419,6 +419,13 @@ async function processChat(opts: { logIdle: boolean }) {
   }
 
   try {
+    const packetMeta = (packet.meta ?? {}) as Record<string, any>;
+    const packetUserId = typeof packetMeta.user_id === "string"
+      ? packetMeta.user_id
+      : typeof packetMeta.userId === "string"
+        ? packetMeta.userId
+        : undefined;
+
     const result = await runOrchestrationPipeline({
       store: activeStore,
       request: {
@@ -426,6 +433,7 @@ async function processChat(opts: { logIdle: boolean }) {
         packet,
         simulate: packet.simulate === true,
         forcedPersona: transmission.forcedPersona ?? undefined,
+        userId: packetUserId,
       },
       transmission,
       modeDecision: transmission.modeDecision,
