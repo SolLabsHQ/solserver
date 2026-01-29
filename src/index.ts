@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import fastifySse from "fastify-sse-v2";
 import pino from "pino";
 import { statSync } from "node:fs";
 import { config as loadEnv } from "dotenv";
@@ -70,6 +71,7 @@ app.addHook("onResponse", async (req, reply) => {
 
 import { healthRoutes } from "./routes/healthz";
 import { chatRoutes } from "./routes/chat";
+import { eventsRoutes } from "./routes/events";
 import { memoryRoutes } from "./routes/memories";
 import { journalRoutes } from "./routes/journal";
 import { traceRoutes } from "./routes/trace";
@@ -108,7 +110,9 @@ async function main() {
   });
 
   // Routes
+  app.register(fastifySse);
   app.register(healthRoutes, { dbPath });
+  app.register(eventsRoutes, { prefix: "/v1" });
   app.register(chatRoutes, { prefix: "/v1", store });
   app.register(memoryRoutes, { prefix: "/v1", store });
   app.register(journalRoutes, { prefix: "/v1", store });

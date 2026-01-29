@@ -1,6 +1,24 @@
 # Gates: canonical catalog + routing (first pass)
 
+
 This document captures the current SolServer gate catalog, routing order, and trace fields as implemented today. It is intended as a canonical reference for gate wiring, including `librarian_gate`.
+
+## Grounding clarifications (read this when we drift)
+
+These are the recurring “wait, where does X live?” answers, captured here so we don’t re-litigate them.
+
+- **Claims live at `OutputEnvelope.meta.claims` (not top-level).** Evidence output gates consume these claims for binding/budget.
+- **Ghost cards are indicated by `meta.display_hint === "ghost_card"`.** When this is set, `ghost_kind` is required.
+- **`MAX_CLAIMS` in `evidence_intake` caps *evidence-side* claim map entries** in `PacketInput.evidence.claims` (not model output claims).
+- **Synaptic (memory) gate is worker-only.** It runs in the memory distillation worker flow, not in the chat request flow.
+- **Trace phase naming convention:** gates use `gate_*` phases (e.g., `gate_url_extraction`). Output gating uses `phase: "output_gates"` with a `kind` field.
+
+### Policy capsules
+Policy capsules are **small, bounded excerpts** that get injected into the prompt pack when relevant.
+
+- In **v0.1**, policy capsules are derived from **ADRs + governance docs** (plus any explicit “safety/behavior rules” docs you keep alongside ADRs).
+- They are intentionally **short** (excerpt-sized) so they can be included without bloating prompts.
+- Longer-term, policy capsules can evolve into a dedicated **Constraint Manifest** store, but ADR-derived capsules are the default starting point.
 
 ## Chat flow routing (current)
 
@@ -72,14 +90,63 @@ Ordered with exact call sites:
 - **Trace event:** `phase: "gate_sentinel"` with risk metadata. 【F:src/control-plane/orchestrator.ts†L1086-L1117】
 - **Caps / limits:** Risk reasons capped to 5. 【F:src/gates/intent_risk.ts†L62-L65】
 
-### lattice (stub)
-- **Purpose:** Placeholder for future enrichment/retrieval logic. 【F:src/gates/lattice.ts†L8-L17】
-- **Function(s):** `runLattice`. 【F:src/gates/lattice.ts†L13-L17】
-- **Input shape:** `GateInput`. 【F:src/gates/normalize_modality.ts†L17-L26】
-- **Output fields:** `{ status: "stub" }`. 【F:src/gates/lattice.ts†L3-L17】
-- **Warnings vs hard-fails:** None. 【F:src/gates/lattice.ts†L13-L17】
-- **Trace event:** `phase: "gate_lattice"` with metadata `lattice`. 【F:src/control-plane/orchestrator.ts†L1086-L1117】
-- **Caps / limits:** None. 【F:src/gates/lattice.ts†L13-L17】
+
+### lattice (v0.1 planned; stub today)
+- **Purpose (today):** Placeholder for future enrichment/retrieval logic. 【F:src/gates/lattice.ts†L8-L17】
+- **Purpose (v0.1):** Pre-model retrieval/enrichment that injects:
+  - **User memory + thread mementos** (to restore decisions, preferences, and recent commitments)
+  - **ADRs + governance/policy capsules** (to reload the relevant constraints for this turn)
+
+#### v0.1 behavior (design)
+- **Retrieval sources (C = both):**
+  1) **Memory index:** user memory + thread mementos (vector search)
+  2) **Governance index:** ADRs + governance docs + policy capsules (vector search)
+- **Triggering:** Lattice runs after `gate_sentinel`, so it can decide whether to pull policy capsules based on risk/urgency and intent.
+- **No enforcement:** Lattice does not block or rewrite. It supplies context; enforcement remains with sentinel, output gates, and post-output linter.
+
+#### Function(s)
+- **Today:** `runLattice` (stub). 【F:src/gates/lattice.ts†L13-L17】
+- **v0.1:** `runLattice` will perform retrieval and return a bounded enrichment bundle.
+
+#### Input shape
+- `GateInput` (includes `messageText`, `urlHintCount`, `captureUrlCount`, evidence counts) plus prior gate outputs (`intent`, `sentinel`).
+
+#### Output fields
+- **Today:** `{ status: "stub" }`. 【F:src/gates/lattice.ts†L3-L17】
+- **v0.1 (proposed):**
+
+```ts
+type LatticeOutputV01 = {
+  status: "ok" | "stub";
+  retrieved: {
+    memories: Array<{ id: string; kind: "user_memory" | "thread_memento"; title?: string; snippet: string; score: number }>;
+    adr_snips: Array<{ id: string; title?: string; snippet: string; score: number }>;
+    policy_capsules: Array<{ id: string; title?: string; snippet: string; score: number }>;
+  };
+  trace: {
+    memory_hits: number;
+    adr_hits: number;
+    policy_hits: number;
+    bytes_total: number;
+    query_terms?: string[];
+  };
+};
+```
+
+#### Warnings vs hard-fails
+- **Today:** None. 【F:src/gates/lattice.ts†L13-L17】
+- **v0.1:** Fail-open with warnings and an empty retrieval bundle if indexes are unavailable.
+
+#### Trace event
+- **Today:** `phase: "gate_lattice"` with metadata `lattice`. 【F:src/control-plane/orchestrator.ts†L1086-L1117】
+- **v0.1:** `phase: "gate_lattice"` with hit counts + bytes + source breakdown (`memory_hits`, `adr_hits`, `policy_hits`).
+
+#### Caps / limits (v0.1 defaults)
+- `max_memories`: 6
+- `max_adr_snips`: 4
+- `max_policy_capsules`: 4
+- `max_total_bytes`: 8KB (combined snippets)
+- `min_score`: 0.72 (vector score threshold; tune later)
 
 ### output_envelope parse / schema validation
 - **Purpose:** Parse JSON, enforce schema/meta keys, and size limits. 【F:src/control-plane/orchestrator.ts†L648-L766】
@@ -190,17 +257,3 @@ Suggested tests/locations:
 - **EvidencePack**: `src/evidence/evidence_provider.ts`. 【F:src/evidence/evidence_provider.ts†L1-L24】
 - **EvidenceWarning**: `src/contracts/evidence_warning.ts`. 【F:src/contracts/evidence_warning.ts†L1-L13】
 
-## Clarifications (for librarian gate + schema)
-
-### Where do claims live in OutputEnvelope today?
-- **Claims live at `OutputEnvelope.meta.claims`** (not top-level). This is enforced by the meta schema and consumed by evidence output gates. 【F:src/contracts/output_envelope.ts†L65-L92】【F:src/gates/evidence_output_gates.ts†L56-L75】
-
-### Canonical ghost card indicator
-- The **canonical indicator** is `meta.display_hint === "ghost_card"`; ghost metadata is required only when this is set, and ghost_kind is required for ghost cards. 【F:src/contracts/output_envelope.ts†L96-L147】
-- **Where it is set:** memory distillation builds ghost envelopes with `display_hint: "ghost_card"` and `ghost_kind`. 【F:src/memory/ghost_envelope.ts†L16-L30】
-
-### Evidence intake caps (MAX_CLAIMS) meaning
-- **`MAX_CLAIMS` limits evidence-side claim map entries** in `PacketInput.evidence.claims` (not model OutputEnvelope claims). 【F:src/gates/evidence_intake.ts†L7-L189】【F:src/contracts/chat.ts†L86-L101】
-
-### Trace naming uniformity (gate_* vs gate_url_extraction)
-- **Phases:** `gate_normalize_modality`, `gate_url_extraction`, `gate_intent`, `gate_sentinel`, `gate_lattice` to keep the gate_* convention. 【F:src/control-plane/orchestrator.ts†L1040-L1117】
