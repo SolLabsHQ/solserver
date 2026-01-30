@@ -93,7 +93,20 @@ const extractFactToken = (snippet: string): string | null => {
   return null;
 };
 
-const validateDistillOutput = (raw: z.infer<typeof DistillSchema>) => {
+type DistillCheck =
+  | { ok: true; snippet: string; summary: string; memoryKind: MemoryKind }
+  | {
+      ok: false;
+      reason:
+        | "snippet_length"
+        | "snippet_transcript"
+        | "summary_lines"
+        | "summary_transcript"
+        | "summary_boilerplate"
+        | "summary_missing_fact";
+    };
+
+const validateDistillOutput = (raw: z.infer<typeof DistillSchema>): DistillCheck => {
   const snippet = raw.snippet.trim();
   const summary = raw.summary.trim();
 
