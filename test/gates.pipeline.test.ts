@@ -15,6 +15,7 @@ function makeApp(dbPath: string) {
 }
 
 describe("Gates Pipeline", () => {
+  const originalEnv: Record<string, string | undefined> = {};
   it("should expose adapter results in order", () => {
     const output = runGatesPipeline({
       packetType: "chat",
@@ -38,6 +39,11 @@ describe("Gates Pipeline", () => {
   const testDbPath = "./data/test_gates_pipeline.db";
 
   beforeAll(async () => {
+    for (const key of ["LLM_PROVIDER"]) {
+      originalEnv[key] = process.env[key];
+    }
+    process.env.LLM_PROVIDER = "fake";
+
     // Clean up any existing test database
     try {
       unlinkSync(testDbPath);
@@ -55,6 +61,14 @@ describe("Gates Pipeline", () => {
   afterAll(async () => {
     if (app) {
       await app.close();
+    }
+    for (const key of Object.keys(originalEnv)) {
+      const value = originalEnv[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
     }
     // Clean up test database
     try {
