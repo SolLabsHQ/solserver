@@ -132,6 +132,158 @@ describe("/v1/memories routes", () => {
     expect(tooLarge.statusCode).toBe(400);
   });
 
+  it("saves a memory span and includes evidence_message_ids", async () => {
+    const userId = "user-span-1";
+    const threadId = "thread-span-1";
+
+    const first = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: { "x-sol-user-id": userId },
+      payload: {
+        threadId,
+        message: "First message for span.",
+      },
+    });
+    const firstBody = first.json();
+    const firstTx = firstBody.transmissionId as string;
+
+    const second = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: { "x-sol-user-id": userId },
+      payload: {
+        threadId,
+        message: "Second message for span.",
+      },
+    });
+    const secondBody = second.json();
+    const secondTx = secondBody.transmissionId as string;
+
+    const save = await app.inject({
+      method: "POST",
+      url: "/v1/memories",
+      headers: { "x-sol-user-id": userId },
+      payload: {
+        request_id: "span-save-1",
+        thread_id: threadId,
+        anchor_message_id: firstTx,
+        window: { before: 0, after: 1 },
+        memory_kind: "preference",
+        consent: { explicit_user_consent: true },
+      },
+    });
+
+    expect(save.statusCode).toBe(200);
+    const body = save.json();
+    expect(body.memory.evidence_message_ids.length).toBeGreaterThan(1);
+    expect(body.memory.evidence_message_ids).toContain(firstTx);
+    expect(body.memory.evidence_message_ids).toContain(secondTx);
+    expect(body.memory.snippet).toContain("User:");
+    expect(body.memory.snippet).toContain("Assistant:");
+  });
+
+  it("filters memory list by lifecycle_state and returns archived by id", async () => {
+    const userId = "user-life-1";
+    const pinned = await store.createMemoryArtifact({
+      userId,
+      transmissionId: null,
+      threadId: "thread-life-1",
+      triggerMessageId: "m-life-1",
+      type: "memory",
+      snippet: "Pinned memory",
+      summary: "Pinned memory",
+      moodAnchor: null,
+      rigorLevel: "normal",
+      tags: [],
+      fidelity: "direct",
+      transitionToHazyAt: null,
+      lifecycleState: "pinned",
+      memoryKind: "preference",
+    });
+    const archived = await store.createMemoryArtifact({
+      userId,
+      transmissionId: null,
+      threadId: "thread-life-1",
+      triggerMessageId: "m-life-2",
+      type: "memory",
+      snippet: "Archived memory",
+      summary: "Archived memory",
+      moodAnchor: null,
+      rigorLevel: "normal",
+      tags: [],
+      fidelity: "direct",
+      transitionToHazyAt: null,
+      lifecycleState: "archived",
+      memoryKind: "fact",
+    });
+
+    const listPinned = await app.inject({
+      method: "GET",
+      url: "/v1/memories",
+      headers: { "x-sol-user-id": userId },
+    });
+    expect(listPinned.statusCode).toBe(200);
+    const pinnedBody = listPinned.json();
+    const ids = pinnedBody.items.map((item: any) => item.memory_id);
+    expect(ids).toContain(pinned.id);
+    expect(ids).not.toContain(archived.id);
+
+    const detail = await app.inject({
+      method: "GET",
+      url: `/v1/memories/${archived.id}`,
+      headers: { "x-sol-user-id": userId },
+    });
+    expect(detail.statusCode).toBe(200);
+    const detailBody = detail.json();
+    expect(detailBody.memory.lifecycle_state).toBe("archived");
+  });
+
+  it("patch creates new memory id and archives old record", async () => {
+    const userId = "user-edit-1";
+    const artifact = await store.createMemoryArtifact({
+      userId,
+      transmissionId: null,
+      threadId: "thread-edit-1",
+      triggerMessageId: "m-edit-1",
+      type: "memory",
+      snippet: "Original",
+      summary: "Original",
+      moodAnchor: null,
+      rigorLevel: "normal",
+      tags: ["a"],
+      fidelity: "direct",
+      transitionToHazyAt: null,
+      lifecycleState: "pinned",
+      memoryKind: "fact",
+    });
+
+    const patch = await app.inject({
+      method: "PATCH",
+      url: `/v1/memories/${artifact.id}`,
+      headers: { "x-sol-user-id": userId },
+      payload: {
+        request_id: "edit-req-1",
+        patch: {
+          snippet: "Updated",
+        },
+        consent: { explicit_user_consent: true },
+      },
+    });
+    expect(patch.statusCode).toBe(200);
+    const patchBody = patch.json();
+    expect(patchBody.memory.memory_id).not.toBe(artifact.id);
+    expect(patchBody.memory.supersedes_memory_id).toBe(artifact.id);
+
+    const oldDetail = await app.inject({
+      method: "GET",
+      url: `/v1/memories/${artifact.id}`,
+      headers: { "x-sol-user-id": userId },
+    });
+    expect(oldDetail.statusCode).toBe(200);
+    expect(oldDetail.json().memory.lifecycle_state).toBe("archived");
+  });
+
   it("requires user identity for memory routes", async () => {
     const response = await app.inject({
       method: "GET",
@@ -174,6 +326,14 @@ describe("/v1/memories routes", () => {
     });
 
     expect(ok.statusCode).toBe(204);
+
+    const detail = await app.inject({
+      method: "GET",
+      url: `/v1/memories/${artifact.id}`,
+      headers: { "x-sol-user-id": userId },
+    });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().memory.lifecycle_state).toBe("archived");
 
     const idempotent = await app.inject({
       method: "DELETE",

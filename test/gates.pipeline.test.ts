@@ -428,11 +428,14 @@ describe("Gates Pipeline", () => {
     const body = JSON.parse(response.body);
 
     const traceEvents = await store.getTraceEvents(body.trace.traceRunId, { limit: 100 });
-    const lattice = traceEvents.find(e => e.phase === "gate_lattice");
-    
+    const lattice = traceEvents.find(
+      (e) => e.phase === "gate_lattice" && e.metadata?.memory_hits !== undefined
+    );
+
     expect(lattice).toBeDefined();
     expect(lattice!.metadata).toMatchObject({
-      status: "stub",
+      memory_hits: expect.any(Number),
+      bytes_total: expect.any(Number),
     });
   });
 
