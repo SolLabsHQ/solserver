@@ -8,6 +8,7 @@ primary_region = "sjc"
   CONTROL_PLANE_DB_PATH = "/data/control_plane.db"
   TOPOLOGY_GUARD_STRICT = "true"
   SOL_INTERNAL_API_BASE = "http://solserver-staging.internal:3333"
+  LATTICE_POLICY_BUNDLE_PATH = "/app/policy/policy_capsules.json"
 
 [http_service]
   internal_port = 3333

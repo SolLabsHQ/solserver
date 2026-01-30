@@ -55,6 +55,8 @@ describe("OutputEnvelope v0-min", () => {
     const body = response.json();
     expect(body.outputEnvelope).toBeDefined();
     expect(body.outputEnvelope.assistant_text).toBe(body.assistant);
+    expect(body.outputEnvelope.meta?.lattice).toBeDefined();
+    expect(body.outputEnvelope.meta?.lattice?.status).toBeDefined();
     expect(response.headers["x-sol-transmission-id"]).toBeTruthy();
     expect(response.headers["x-sol-trace-run-id"]).toBeTruthy();
   });

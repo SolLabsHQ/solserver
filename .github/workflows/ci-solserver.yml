@@ -27,7 +27,6 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10
           run_install: false
 
       - name: Setup Node.js
@@ -84,3 +83,21 @@ jobs:
           SOL_MODEL_PROD: ${{ vars.SOL_MODEL_PROD }}
           SOL_ALLOW_MODEL_OVERRIDE: ${{ vars.SOL_ALLOW_MODEL_OVERRIDE || '0' }}
         run: pnpm test
+
+      - name: Build docker image (sqlite-vec smoke)
+        run: |
+          docker build \
+            --build-arg SQLITE_VEC_ARCH=linux-x64 \
+            --build-arg SQLITE_VEC_VERSION=0.1.7-alpha.2 \
+            -t solserver:vec-smoke \
+            .
+
+      - name: Smoke test sqlite-vec load
+        run: |
+          docker run --rm solserver:vec-smoke \
+            node -e "const Database=require('better-sqlite3'); const db=new Database(':memory:'); db.loadExtension('/app/extensions/vec0.so'); console.log('sqlite-vec load ok');"
+
+      - name: Smoke test policy capsule bundle
+        run: |
+          docker run --rm solserver:vec-smoke \
+            node -e "const fs=require('fs'); const path='/app/policy/policy_capsules.json'; const raw=fs.readFileSync(path,'utf8'); const data=JSON.parse(raw); const caps=Array.isArray(data)?data:(data.capsules||[]); if(!caps.length){throw new Error('policy_capsules_empty');} console.log('policy_capsules_ok', caps.length);"

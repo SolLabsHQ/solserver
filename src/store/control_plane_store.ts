@@ -70,6 +70,15 @@ export type ChatResult = {
 export type MemoryArtifactType = "memory" | "journal" | "action";
 export type MemoryRigorLevel = "normal" | "high";
 export type MemoryFidelity = "direct" | "hazy";
+export type MemoryLifecycleState = "pinned" | "archived";
+export type MemoryKind =
+  | "preference"
+  | "fact"
+  | "workflow"
+  | "relationship"
+  | "constraint"
+  | "project"
+  | "other";
 
 export type MemoryArtifact = {
   id: string;
@@ -80,6 +89,7 @@ export type MemoryArtifact = {
   type: MemoryArtifactType;
   domain?: string | null;
   title?: string | null;
+  summary?: string | null;
   snippet: string;
   moodAnchor?: string | null;
   rigorLevel: MemoryRigorLevel;
@@ -88,6 +98,12 @@ export type MemoryArtifact = {
   importance?: string | null;
   fidelity: MemoryFidelity;
   transitionToHazyAt?: string | null;
+  lifecycleState: MemoryLifecycleState;
+  memoryKind: MemoryKind;
+  supersedesMemoryId?: string | null;
+  evidenceMessageIds?: string[] | null;
+  distillModel?: string | null;
+  distillAttempts?: number | null;
   requestId?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -364,6 +380,7 @@ export interface ControlPlaneStore {
     type: MemoryArtifactType;
     domain?: string | null;
     title?: string | null;
+    summary?: string | null;
     snippet: string;
     moodAnchor?: string | null;
     rigorLevel: MemoryRigorLevel;
@@ -372,6 +389,12 @@ export interface ControlPlaneStore {
     importance?: string | null;
     fidelity: MemoryFidelity;
     transitionToHazyAt?: string | null;
+    lifecycleState?: MemoryLifecycleState;
+    memoryKind?: MemoryKind;
+    supersedesMemoryId?: string | null;
+    evidenceMessageIds?: string[] | null;
+    distillModel?: string | null;
+    distillAttempts?: number | null;
     requestId?: string | null;
   }): Promise<MemoryArtifact>;
 
@@ -389,9 +412,31 @@ export interface ControlPlaneStore {
     userId: string;
     domain?: string | null;
     tagsAny?: string[] | null;
+    lifecycleState?: MemoryLifecycleState | null;
+    threadId?: string | null;
+    memoryKind?: MemoryKind | null;
     before?: string | null;
     limit?: number;
   }): Promise<{ items: MemoryArtifact[]; nextCursor: string | null }>;
+
+  searchMemoryArtifactsLexical(args: {
+    userId: string;
+    query: string;
+    lifecycleState?: MemoryLifecycleState | null;
+    threadId?: string | null;
+    memoryKind?: MemoryKind | null;
+    limit?: number;
+  }): Promise<Array<{ artifact: MemoryArtifact; score: number }>>;
+
+  searchMemoryArtifactsVector(args: {
+    userId: string;
+    embedding: number[];
+    lifecycleState?: MemoryLifecycleState | null;
+    threadId?: string | null;
+    memoryKind?: MemoryKind | null;
+    limit?: number;
+    maxDistance?: number | null;
+  }): Promise<Array<{ artifact: MemoryArtifact; score: number }>>;
 
   updateMemoryArtifact(args: {
     userId: string;
@@ -399,6 +444,13 @@ export interface ControlPlaneStore {
     snippet?: string | null;
     tags?: string[] | null;
     moodAnchor?: string | null;
+    summary?: string | null;
+  }): Promise<MemoryArtifact | null>;
+
+  setMemoryLifecycleState(args: {
+    userId: string;
+    memoryId: string;
+    lifecycleState: MemoryLifecycleState;
   }): Promise<MemoryArtifact | null>;
 
   deleteMemoryArtifact(args: {
@@ -420,7 +472,7 @@ export interface ControlPlaneStore {
 
   recordMemoryAudit(args: {
     userId: string;
-    action: "delete" | "batch_delete" | "clear_all";
+    action: "delete" | "batch_delete" | "clear_all" | "archive";
     requestId: string;
     threadId?: string | null;
     filter?: Record<string, any> | null;
@@ -527,7 +579,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
   private memoryAudit = new Map<string, {
     id: string;
     userId: string;
-    action: "delete" | "batch_delete" | "clear_all";
+    action: "delete" | "batch_delete" | "clear_all" | "archive";
     requestId: string;
     threadId?: string | null;
     filter?: Record<string, any> | null;
@@ -765,6 +817,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     type: MemoryArtifactType;
     domain?: string | null;
     title?: string | null;
+    summary?: string | null;
     snippet: string;
     moodAnchor?: string | null;
     rigorLevel: MemoryRigorLevel;
@@ -773,6 +826,12 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     importance?: string | null;
     fidelity: MemoryFidelity;
     transitionToHazyAt?: string | null;
+    lifecycleState?: MemoryLifecycleState;
+    memoryKind?: MemoryKind;
+    supersedesMemoryId?: string | null;
+    evidenceMessageIds?: string[] | null;
+    distillModel?: string | null;
+    distillAttempts?: number | null;
     requestId?: string | null;
   }): Promise<MemoryArtifact> {
     if (args.requestId) {
@@ -793,6 +852,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       type: args.type,
       domain: args.domain ?? null,
       title: args.title ?? null,
+      summary: args.summary ?? null,
       snippet: args.snippet,
       moodAnchor: args.moodAnchor ?? null,
       rigorLevel: args.rigorLevel,
@@ -801,6 +861,12 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       importance: args.importance ?? null,
       fidelity: args.fidelity,
       transitionToHazyAt: args.transitionToHazyAt ?? null,
+      lifecycleState: args.lifecycleState ?? "pinned",
+      memoryKind: args.memoryKind ?? "other",
+      supersedesMemoryId: args.supersedesMemoryId ?? null,
+      evidenceMessageIds: args.evidenceMessageIds ? [...args.evidenceMessageIds] : null,
+      distillModel: args.distillModel ?? null,
+      distillAttempts: args.distillAttempts ?? null,
       requestId: args.requestId ?? null,
       createdAt: now,
       updatedAt: now,
@@ -834,6 +900,9 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     userId: string;
     domain?: string | null;
     tagsAny?: string[] | null;
+    lifecycleState?: MemoryLifecycleState | null;
+    threadId?: string | null;
+    memoryKind?: MemoryKind | null;
     before?: string | null;
     limit?: number;
   }): Promise<{ items: MemoryArtifact[]; nextCursor: string | null }> {
@@ -842,6 +911,9 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     const filtered = Array.from(this.memoryArtifacts.values()).filter((artifact) => {
       if (artifact.userId !== args.userId) return false;
       if (args.domain && artifact.domain !== args.domain) return false;
+      if (args.lifecycleState && artifact.lifecycleState !== args.lifecycleState) return false;
+      if (args.threadId && artifact.threadId !== args.threadId) return false;
+      if (args.memoryKind && artifact.memoryKind !== args.memoryKind) return false;
       if (args.before && artifact.createdAt >= args.before) return false;
       if (tagsAny && tagsAny.length > 0) {
         const hasTag = tagsAny.some((tag) => artifact.tags.includes(tag));
@@ -862,20 +934,91 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     return { items, nextCursor };
   }
 
+  async searchMemoryArtifactsLexical(args: {
+    userId: string;
+    query: string;
+    lifecycleState?: MemoryLifecycleState | null;
+    threadId?: string | null;
+    memoryKind?: MemoryKind | null;
+    limit?: number;
+  }): Promise<Array<{ artifact: MemoryArtifact; score: number }>> {
+    const limit = args.limit ?? 10;
+    const tokens = args.query
+      .toLowerCase()
+      .match(/[a-z0-9]{3,}/g)
+      ?.slice(0, 12) ?? [];
+    if (tokens.length === 0) return [];
+
+    const results: Array<{ artifact: MemoryArtifact; score: number }> = [];
+    for (const artifact of this.memoryArtifacts.values()) {
+      if (artifact.userId !== args.userId) continue;
+      if (args.lifecycleState && artifact.lifecycleState !== args.lifecycleState) continue;
+      if (args.threadId && artifact.threadId !== args.threadId) continue;
+      if (args.memoryKind && artifact.memoryKind !== args.memoryKind) continue;
+
+      const haystack = [
+        artifact.summary ?? "",
+        artifact.snippet,
+        artifact.title ?? "",
+        artifact.tags.join(" "),
+      ].join(" ").toLowerCase();
+      let score = 0;
+      for (const token of tokens) {
+        if (haystack.includes(token)) score += 1;
+      }
+      if (score > 0) {
+        results.push({ artifact, score });
+      }
+    }
+
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, limit);
+  }
+
+  async searchMemoryArtifactsVector(_args: {
+    userId: string;
+    embedding: number[];
+    lifecycleState?: MemoryLifecycleState | null;
+    threadId?: string | null;
+    memoryKind?: MemoryKind | null;
+    limit?: number;
+    maxDistance?: number | null;
+  }): Promise<Array<{ artifact: MemoryArtifact; score: number }>> {
+    return [];
+  }
+
   async updateMemoryArtifact(args: {
     userId: string;
     memoryId: string;
     snippet?: string | null;
     tags?: string[] | null;
     moodAnchor?: string | null;
+    summary?: string | null;
   }): Promise<MemoryArtifact | null> {
     const existing = this.memoryArtifacts.get(args.memoryId);
     if (!existing || existing.userId !== args.userId) return null;
     const next: MemoryArtifact = {
       ...existing,
       snippet: args.snippet ?? existing.snippet,
+      summary: args.summary === undefined ? existing.summary ?? null : args.summary ?? null,
       tags: args.tags === undefined ? existing.tags : args.tags ?? [],
       moodAnchor: args.moodAnchor === undefined ? existing.moodAnchor ?? null : args.moodAnchor,
+      updatedAt: new Date().toISOString(),
+    };
+    this.memoryArtifacts.set(existing.id, next);
+    return next;
+  }
+
+  async setMemoryLifecycleState(args: {
+    userId: string;
+    memoryId: string;
+    lifecycleState: MemoryLifecycleState;
+  }): Promise<MemoryArtifact | null> {
+    const existing = this.memoryArtifacts.get(args.memoryId);
+    if (!existing || existing.userId !== args.userId) return null;
+    const next = {
+      ...existing,
+      lifecycleState: args.lifecycleState,
       updatedAt: new Date().toISOString(),
     };
     this.memoryArtifacts.set(existing.id, next);
@@ -936,7 +1079,7 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
 
   async recordMemoryAudit(args: {
     userId: string;
-    action: "delete" | "batch_delete" | "clear_all";
+    action: "delete" | "batch_delete" | "clear_all" | "archive";
     requestId: string;
     threadId?: string | null;
     filter?: Record<string, any> | null;

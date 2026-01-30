@@ -37,6 +37,7 @@ import { fakeModelReplyWithMeta } from "../providers/fake_model";
 import { openAIModelReplyWithMeta, OpenAIProviderError } from "../providers/openai_model";
 import { selectModel } from "../providers/provider_config";
 import { GATE_SENTINEL, type GateOutput } from "../gates/gate_interfaces";
+import * as fs from "node:fs";
 import type { ControlPlaneStore, JournalOfferRecord, TraceRun, Transmission } from "../store/control_plane_store";
 import {
   OUTPUT_ENVELOPE_META_ALLOWED_KEYS,
@@ -48,6 +49,7 @@ import {
 import type { PacketInput, ModeDecision, NotificationPolicy, ThreadContextMode } from "../contracts/chat";
 import { classifyJournalOffer, type MoodSignal } from "../memory/journal_offer_classifier";
 import { buildSSEEnvelope, buildTransmissionSubject, sseHub } from "../sse/sse_hub";
+import { computeLatticeEmbedding } from "../lattice/embedding";
 
 export type OrchestrationSource = "api" | "worker";
 export type SystemPersona = NonNullable<ModeDecision["personaLabel"]>;
@@ -115,6 +117,112 @@ export function buildOutputEnvelopeMeta(args: {
     notification_policy: args.notificationPolicy,
   };
   return { ...args.envelope, meta, notification_policy: args.notificationPolicy };
+}
+
+type PolicyCapsule = {
+  id: string;
+  title?: string;
+  snippet: string;
+  tags?: string[];
+  max_bytes?: number;
+};
+
+const POLICY_BUNDLE_CACHE = new Map<string, { mtimeMs: number; capsules: PolicyCapsule[] }>();
+
+function loadPolicyCapsules(
+  path: string,
+  log: { warn: (obj: any, msg?: string) => void }
+): { capsules: PolicyCapsule[]; warning?: string } {
+  try {
+    const stat = fs.statSync(path);
+    const cached = POLICY_BUNDLE_CACHE.get(path);
+    if (cached && cached.mtimeMs === stat.mtimeMs) {
+      return { capsules: cached.capsules };
+    }
+
+    const raw = fs.readFileSync(path, "utf8");
+    const parsed = JSON.parse(raw);
+    const capsulesRaw = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.capsules)
+        ? parsed.capsules
+        : [];
+
+    const capsules: PolicyCapsule[] = capsulesRaw
+      .filter((entry: any) => entry && typeof entry.id === "string" && typeof entry.snippet === "string")
+      .map((entry: any) => ({
+        id: String(entry.id),
+        title: typeof entry.title === "string" ? entry.title : undefined,
+        snippet: String(entry.snippet),
+        tags: Array.isArray(entry.tags)
+          ? entry.tags.filter((tag: any) => typeof tag === "string")
+          : undefined,
+        max_bytes: typeof entry.max_bytes === "number" ? entry.max_bytes : undefined,
+      }));
+
+    POLICY_BUNDLE_CACHE.set(path, { mtimeMs: stat.mtimeMs, capsules });
+    return { capsules };
+  } catch (error) {
+    log.warn({ evt: "lattice.policy_bundle_load_failed", path, error: String(error) }, "lattice.policy_bundle_load_failed");
+    return { capsules: [], warning: "policy_bundle_unavailable" };
+  }
+}
+
+function buildLatticeQueryTerms(message: string, limit = 12): string[] {
+  const tokens = message.toLowerCase().match(/[a-z0-9]{3,}/g) ?? [];
+  const unique: string[] = [];
+  for (const token of tokens) {
+    if (unique.includes(token)) continue;
+    unique.push(token);
+    if (unique.length >= limit) break;
+  }
+  return unique;
+}
+
+function shouldRetrievePolicy(args: {
+  risk: string;
+  intent: string;
+  message: string;
+}): boolean {
+  if (args.risk === "med" || args.risk === "high") return true;
+  const text = args.message.toLowerCase();
+  const keywords = [
+    "policy",
+    "safety",
+    "constraint",
+    "governance",
+    "rule",
+    "journal",
+    "consent",
+    "self-harm",
+    "suicide",
+    "violence",
+    "abuse",
+    "hate",
+    "escalate",
+    "crisis",
+    "privacy",
+    "security",
+  ];
+  if (keywords.some((keyword) => text.includes(keyword))) return true;
+  if (args.intent === "support" && text.includes("should i")) return true;
+  return false;
+}
+
+function truncateByBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    const slice = text.slice(0, mid);
+    if (Buffer.byteLength(slice, "utf8") <= maxBytes) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return text.slice(0, Math.max(0, low - 1));
 }
 
 function formatThreadMementoResponse(memento: any | null) {
@@ -802,6 +910,9 @@ function normalizeOutputEnvelopeForResponse(envelope: OutputEnvelope): OutputEnv
   }
   if (envelope.meta.librarian_gate !== undefined) {
     meta.librarian_gate = envelope.meta.librarian_gate;
+  }
+  if (envelope.meta.lattice !== undefined) {
+    meta.lattice = envelope.meta.lattice;
   }
   if (envelope.meta.journalOffer !== undefined) {
     meta.journalOffer = envelope.meta.journalOffer;
@@ -1771,6 +1882,18 @@ export async function runOrchestrationPipeline(args: {
     summary: "Retrieving context",
   });
 
+  const latticeEnabled = process.env.LATTICE_ENABLED === "1";
+  const latticeVecEnabled = process.env.LATTICE_VEC_ENABLED === "1";
+  const latticeVecQueryEnabled = process.env.LATTICE_VEC_QUERY_ENABLED === "1";
+  const latticeVecMaxDistance = process.env.LATTICE_VEC_MAX_DISTANCE
+    ? Number(process.env.LATTICE_VEC_MAX_DISTANCE)
+    : null;
+  const latticePolicyBundlePath = process.env.LATTICE_POLICY_BUNDLE_PATH ?? "";
+  const latticeWarnings: string[] = [];
+  const latticeQueryTerms = buildLatticeQueryTerms(packet.message);
+  const latticeStartNs = process.hrtime.bigint();
+  let latticeDbMs = 0;
+
   const threadContextMode = resolveThreadContextMode(packet);
   if (threadContextMode === "auto") {
     const cachedLatest = getThreadMementoLatestCached(packet.threadId);
@@ -1783,14 +1906,244 @@ export async function runOrchestrationPipeline(args: {
     }
   }
 
-  const retrievalItems = await retrieveContext({
+  const baseRetrievalItems = await retrieveContext({
     threadId: packet.threadId,
     packetType: packet.packetType,
     message: packet.message,
     threadContextMode,
   });
 
+  const MAX_MEMORIES = 6;
+  const MAX_ADR_SNIPS = 4;
+  const MAX_POLICY_CAPSULES = 4;
+  const MAX_TOTAL_BYTES = 8 * 1024;
+
+  let memoryResults: Array<{ id: string; summary: string; score: number; method: "fts5_bm25" | "vec_distance" }> = [];
+  if (!latticeEnabled) {
+    latticeWarnings.push("lattice_disabled");
+  } else if (!request.userId) {
+    latticeWarnings.push("lattice_missing_user_id");
+  } else {
+    if (latticeQueryTerms.length === 0) {
+      latticeWarnings.push("lattice_query_empty");
+    } else {
+      const dbStart = process.hrtime.bigint();
+      try {
+        const lexical = await store.searchMemoryArtifactsLexical({
+          userId: request.userId,
+          query: packet.message,
+          lifecycleState: "pinned",
+          limit: MAX_MEMORIES,
+        });
+        const dbEnd = process.hrtime.bigint();
+        latticeDbMs += Number(dbEnd - dbStart) / 1e6;
+        memoryResults = lexical.map((entry) => ({
+          id: entry.artifact.id,
+          summary: entry.artifact.summary ?? entry.artifact.snippet,
+          score: entry.score,
+          method: "fts5_bm25",
+        }));
+      } catch (error) {
+        latticeWarnings.push("memory_query_failed");
+        log.warn({ evt: "lattice.memory_query_failed", error: String(error) }, "lattice.memory_query_failed");
+      }
+    }
+
+    if (latticeVecQueryEnabled) {
+      if (!latticeVecEnabled) {
+        latticeWarnings.push("vec_disabled");
+      } else {
+        try {
+          const embedding = computeLatticeEmbedding(packet.message);
+          const vecStart = process.hrtime.bigint();
+          const vector = await store.searchMemoryArtifactsVector({
+            userId: request.userId,
+            embedding,
+            lifecycleState: "pinned",
+            limit: MAX_MEMORIES,
+            maxDistance: Number.isFinite(latticeVecMaxDistance)
+              ? (latticeVecMaxDistance as number)
+              : null,
+          });
+          const vecEnd = process.hrtime.bigint();
+          latticeDbMs += Number(vecEnd - vecStart) / 1e6;
+          if (vector.length > 0) {
+            memoryResults = vector.map((entry) => ({
+              id: entry.artifact.id,
+              summary: entry.artifact.summary ?? entry.artifact.snippet,
+              score: entry.score,
+              method: "vec_distance",
+            }));
+          }
+        } catch (error) {
+          const message = String(error ?? "");
+          const isLoadFailure = message.includes("vec_extension_not_loaded");
+          latticeWarnings.push(isLoadFailure ? "vec_load_failed" : "vec_query_failed");
+          log.warn(
+            { evt: "lattice.vec_query_failed", error: message },
+            "lattice.vec_query_failed"
+          );
+        }
+      }
+    }
+  }
+
+  let policyCapsules: PolicyCapsule[] = [];
+  if (latticeEnabled && shouldRetrievePolicy({
+    risk: gatesOutput.sentinel.risk,
+    intent: gatesOutput.intent.intent,
+    message: packet.message,
+  })) {
+    if (!latticePolicyBundlePath) {
+      latticeWarnings.push("policy_bundle_missing");
+    } else {
+      const { capsules, warning } = loadPolicyCapsules(latticePolicyBundlePath, log);
+      policyCapsules = capsules;
+      if (warning) latticeWarnings.push(warning);
+    }
+  }
+
+  const policyMatches: Array<{ capsule: PolicyCapsule; score: number }> = [];
+  if (policyCapsules.length > 0 && latticeQueryTerms.length > 0) {
+    for (const capsule of policyCapsules) {
+      const haystack = [
+        capsule.title ?? "",
+        capsule.snippet ?? "",
+        ...(capsule.tags ?? []),
+      ].join(" ").toLowerCase();
+      let score = 0;
+      for (const term of latticeQueryTerms) {
+        if (haystack.includes(term)) score += 1;
+      }
+      if (score > 0) {
+        policyMatches.push({ capsule, score });
+      }
+    }
+  }
+
+  policyMatches.sort((a, b) => b.score - a.score);
+
+  const adrCapsules: PolicyCapsule[] = [];
+  const policyOnlyCapsules: PolicyCapsule[] = [];
+  for (const match of policyMatches) {
+    if (match.capsule.id.toUpperCase().startsWith("ADR-")) {
+      adrCapsules.push(match.capsule);
+    } else {
+      policyOnlyCapsules.push(match.capsule);
+    }
+  }
+
+  const selectedAdrCapsules = adrCapsules.slice(0, MAX_ADR_SNIPS);
+  const selectedPolicyCapsules = policyOnlyCapsules.slice(0, MAX_POLICY_CAPSULES);
+  const selectedCapsules = [...selectedAdrCapsules, ...selectedPolicyCapsules];
+
+  const memoryItems = memoryResults.slice(0, MAX_MEMORIES).map((hit) => ({
+    id: hit.id,
+    kind: "memory" as const,
+    summary: hit.summary,
+  }));
+
+  const policyItems = selectedCapsules.map((capsule) => {
+    const snippet = capsule.max_bytes
+      ? truncateByBytes(capsule.snippet, capsule.max_bytes)
+      : capsule.snippet;
+    const prefix = capsule.title ? `${capsule.title}: ` : "";
+    return {
+      id: capsule.id,
+      kind: "policy" as const,
+      summary: `${prefix}${snippet}`,
+    };
+  });
+
+  const retrievalItems: typeof baseRetrievalItems = [];
+  const estimateBytes = (item: { id: string; kind: string; summary: string }) =>
+    Buffer.byteLength(`[${item.kind}:${item.id}] ${item.summary}`, "utf8");
+
+  let bytesTotal = 0;
+  let hitCap = false;
+  const addItemsWithCap = (items: Array<{ id: string; kind: string; summary: string }>) => {
+    for (const item of items) {
+      if (hitCap) break;
+      const nextBytes = bytesTotal + estimateBytes(item);
+      if (nextBytes > MAX_TOTAL_BYTES) {
+        latticeWarnings.push("lattice_bytes_capped");
+        hitCap = true;
+        break;
+      }
+      bytesTotal = nextBytes;
+      retrievalItems.push(item as any);
+    }
+  };
+
+  addItemsWithCap(memoryItems);
+  addItemsWithCap(policyItems);
+  addItemsWithCap(baseRetrievalItems);
+
   log.debug(retrievalLogShape(retrievalItems), "control_plane.retrieval");
+
+  const latticeEndNs = process.hrtime.bigint();
+  const latticeTotalMs = Number(latticeEndNs - latticeStartNs) / 1e6;
+
+  const usedMemoryIds = retrievalItems.filter((item) => item.kind === "memory").map((item) => item.id);
+  const usedPolicyIds = retrievalItems.filter((item) => item.kind === "policy").map((item) => item.id);
+  const usedMementoIds = retrievalItems
+    .filter((item) => item.kind === "memento" || item.kind === "bookmark")
+    .map((item) => item.id);
+
+  const adrHits = usedPolicyIds.filter((id) => id.toUpperCase().startsWith("ADR-")).length;
+  const policyHits = usedPolicyIds.length - adrHits;
+  const latticeWarningsUnique = Array.from(new Set(latticeWarnings));
+
+  const latticeHasHits =
+    usedMemoryIds.length + usedPolicyIds.length + usedMementoIds.length > 0;
+  const latticeStatus = latticeWarningsUnique.includes("memory_query_failed")
+    ? "fail"
+    : (latticeHasHits ? "hit" : "miss");
+
+  const memoryScoreMap = new Map<string, { method: "fts5_bm25" | "vec_distance"; value: number }>();
+  for (const hit of memoryResults) {
+    if (!Number.isFinite(hit.score)) continue;
+    memoryScoreMap.set(hit.id, { method: hit.method, value: hit.score });
+  }
+
+  const latticeScores: Record<string, { method: "fts5_bm25" | "vec_distance"; value: number }> = {};
+  for (const id of usedMemoryIds) {
+    const entry = memoryScoreMap.get(id);
+    if (entry) latticeScores[id] = entry;
+  }
+
+  const latticeMetaBase = {
+    status: latticeStatus as "hit" | "miss" | "fail",
+    retrieval_trace: {
+      memory_ids: usedMemoryIds,
+      memento_ids: usedMementoIds,
+      policy_capsule_ids: usedPolicyIds,
+    },
+    counts: {
+      memories: usedMemoryIds.length,
+      mementos: usedMementoIds.length,
+      policy_capsules: usedPolicyIds.length,
+    },
+    bytes_total: Math.round(bytesTotal),
+    ...(Object.keys(latticeScores).length > 0 ? { scores: latticeScores } : {}),
+    ...(latticeWarningsUnique.length > 0 ? { warnings: latticeWarningsUnique } : {}),
+  };
+
+  await appendTrace({
+    traceRunId: traceRun.id,
+    transmissionId: transmission.id,
+    actor: "solserver",
+    phase: "gate_lattice",
+    status: latticeWarningsUnique.includes("memory_query_failed") ? "warning" : "completed",
+    summary: "Lattice retrieval",
+    metadata: {
+      memory_hits: usedMemoryIds.length,
+      adr_hits: adrHits,
+      policy_hits: policyHits,
+      bytes_total: bytesTotal,
+      query_terms_count: latticeQueryTerms.length,
+    },
+  });
 
   await appendTrace({
     traceRunId: traceRun.id,
@@ -1799,7 +2152,12 @@ export async function runOrchestrationPipeline(args: {
     phase: "enrichment_lattice",
     status: "completed",
     summary: `Retrieved ${retrievalItems.length} context items`,
-    metadata: { itemCount: retrievalItems.length },
+    metadata: {
+      itemCount: retrievalItems.length,
+      memoryHits: usedMemoryIds.length,
+      policyHits,
+      bytesTotal: bytesTotal,
+    },
   });
 
   const evidenceDecision = resolveEvidenceProviderDecision({
@@ -2641,6 +2999,8 @@ export async function runOrchestrationPipeline(args: {
   let outputEnvelope: OutputEnvelope | null = null;
   let threadMemento: ThreadMementoLatest | null = null;
   let attemptsUsed = 0;
+  const modelStartNs = process.hrtime.bigint();
+  let modelTotalMs = 0;
 
   try {
     const attempt0 = await runModelAttempt({
@@ -3252,6 +3612,8 @@ export async function runOrchestrationPipeline(args: {
     });
   }
 
+  modelTotalMs = Number(process.hrtime.bigint() - modelStartNs) / 1e6;
+
   const mementoUpdate = await updateThreadMementoLatestFromEnvelope({
     packet,
     envelope: outputEnvelope,
@@ -3435,10 +3797,27 @@ export async function runOrchestrationPipeline(args: {
     ...evidenceSummary,
     claims: outputEnvelope?.meta?.claims?.length ?? 0,
   };
+  const latticeTimings = {
+    lattice_total: Math.round(latticeTotalMs),
+    lattice_db: Math.round(latticeDbMs),
+    model_total: Math.round(modelTotalMs),
+    request_total: Math.round(elapsedMs()),
+  };
+  outputEnvelope = {
+    ...outputEnvelope,
+    meta: {
+      ...(outputEnvelope?.meta ?? {}),
+      lattice: { ...latticeMetaBase, timings_ms: latticeTimings },
+    },
+  };
   const responseEnvelope = buildOutputEnvelopeMeta({
     envelope: outputEnvelope!,
     personaLabel,
     notificationPolicy: resolvedNotificationPolicy,
+  });
+  await store.setTransmissionOutputEnvelope({
+    transmissionId: transmission.id,
+    outputEnvelope: responseEnvelope,
   });
 
   const responseThreadMemento = formatThreadMementoResponse(threadMemento);

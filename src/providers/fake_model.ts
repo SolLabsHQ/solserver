@@ -4,6 +4,10 @@ export async function fakeModelReply(input: {
   userText: string;
   modeLabel: string;
 }): Promise<string> {
+  const nameHint = extractNameFromPrompt(input.userText);
+  const stubLine = nameHint
+    ? `Stub response: I received ${input.userText.length} chars. Your name is ${nameHint}.`
+    : `Stub response: I received ${input.userText.length} chars.`;
   const lines = [
     "shape:",
     `- Arc: ${input.modeLabel} session`,
@@ -15,7 +19,7 @@ export async function fakeModelReply(input: {
     "Release: You are not required to take external actions.",
     "Next: Tell me if you want a draft or steps.",
     "Assumption: No external actions were taken.",
-    `Stub response: I received ${input.userText.length} chars.`,
+    stubLine,
   ];
   return lines.join("\n");
 }
@@ -51,6 +55,18 @@ function lastUserLine(promptText: string): string {
 
   // Fallback: use the last non-empty line.
   return lines.at(-1) ?? "";
+}
+
+function extractNameFromPrompt(promptText: string): string | null {
+  const lines = promptText.split("\n").map((l) => l.trim());
+  for (const line of lines) {
+    if (!line.startsWith("[memory:")) continue;
+    const match = line.match(/\bname\s*(?:is|:)\s*([a-zA-Z][\w'-]*(?:\s+[a-zA-Z][\w'-]*){0,2})/i);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+  }
+  return null;
 }
 
 function proposeMementoFromPrompt(promptText: string): ThreadMementoDraft | null {

@@ -30,6 +30,24 @@ export CONTROL_PLANE_DB_PATH=./data/control_plane.db
 
 Fly uses `/data/control_plane.db` via `fly.toml` so web and worker share the same volume.
 
+## Lattice flags (v0/v0.1)
+
+Lattice is enrichment-only. Defaults are off; set explicitly when testing.
+
+```bash
+export LATTICE_ENABLED=1
+export LATTICE_VEC_ENABLED=0
+export LATTICE_VEC_QUERY_ENABLED=0
+export LATTICE_VEC_EXTENSION_PATH=/app/extensions/vec0.so
+export LATTICE_VEC_MAX_DISTANCE=
+export LATTICE_POLICY_BUNDLE_PATH=/app/policy/policy_capsules.json
+export LATTICE_BUSY_TIMEOUT_MS=200
+```
+
+Notes:
+- Vector search is behind flags; lexical remains default.
+- `/app/extensions/vec0.so` is packaged in the runtime image; override the path for local dev if needed.
+
 ## Verify worker progress
 
 ```bash

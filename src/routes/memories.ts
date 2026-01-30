@@ -3,7 +3,8 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import type { ContextMessage } from "../memory/synaptic_gate";
-import { MemoryControlPlaneStore, type ControlPlaneStore } from "../store/control_plane_store";
+import { distillMemorySpan } from "../memory/memory_distiller";
+import { MemoryControlPlaneStore, type ControlPlaneStore, type Transmission } from "../store/control_plane_store";
 
 const ConsentSchema = z.object({
   explicit_user_consent: z.literal(true),
@@ -22,6 +23,31 @@ const DistillRequestSchema = z.object({
   trigger_message_id: z.string().min(1),
   context_window: z.array(ContextMessageSchema).min(1).max(15),
   reaffirm_count: z.number().int().min(0).optional(),
+  consent: ConsentSchema,
+}).strict();
+
+const MemoryKindSchema = z.enum([
+  "preference",
+  "fact",
+  "workflow",
+  "relationship",
+  "constraint",
+  "project",
+  "other",
+]);
+
+const MemorySpanWindowSchema = z.object({
+  before: z.number().int().min(0).max(30).optional(),
+  after: z.number().int().min(0).max(30).optional(),
+}).strict();
+
+const MemorySpanSaveRequestSchema = z.object({
+  request_id: z.string().min(1),
+  thread_id: z.string().min(1),
+  anchor_message_id: z.string().min(1),
+  window: MemorySpanWindowSchema.optional(),
+  memory_kind: MemoryKindSchema.optional(),
+  tags: z.array(z.string().min(1)).optional(),
   consent: ConsentSchema,
 }).strict();
 
@@ -48,12 +74,19 @@ const MemoryCreateRequestSchema = z.object({
   consent: ConsentSchema,
 }).strict();
 
+const MemorySaveRequestSchema = z.union([
+  MemorySpanSaveRequestSchema,
+  MemoryCreateRequestSchema,
+]);
+
 const MemoryPatchRequestSchema = z.object({
   request_id: z.string().min(1),
   patch: z.object({
     snippet: z.string().min(1).optional(),
+    summary: z.string().min(1).nullable().optional(),
     tags: z.array(z.string().min(1)).optional(),
     mood_anchor: z.string().nullable().optional(),
+    memory_kind: MemoryKindSchema.optional(),
   }).strict(),
   consent: ConsentSchema,
 }).strict();
@@ -121,6 +154,166 @@ const notifyLibrarian = (req: any, payload: Record<string, any>) => {
     "librarian.reindex"
   );
 };
+
+const MAX_SPAN_MESSAGES = 30;
+const MAX_SPAN_CHARS = 12_000;
+const DEFAULT_PREFER_BEFORE = 10;
+const DEFAULT_PREFER_AFTER = 4;
+
+const resolveSpanPrefs = (window?: { before?: number; after?: number }) => ({
+  before: Math.min(window?.before ?? DEFAULT_PREFER_BEFORE, DEFAULT_PREFER_BEFORE),
+  after: Math.min(window?.after ?? DEFAULT_PREFER_AFTER, DEFAULT_PREFER_AFTER),
+});
+
+const trimMessagesToBudget = (messages: ContextMessage[], maxChars: number) => {
+  const trimmed: ContextMessage[] = [];
+  let remaining = maxChars;
+  for (const msg of messages) {
+    if (remaining <= 0) break;
+    const content = msg.content;
+    if (content.length <= remaining) {
+      trimmed.push(msg);
+      remaining -= content.length;
+    } else {
+      trimmed.push({ ...msg, content: content.slice(0, remaining) });
+      remaining = 0;
+    }
+  }
+  return {
+    messages: trimmed,
+    charCount: maxChars - remaining,
+    messageCount: trimmed.length,
+  };
+};
+
+const buildSpanSelection = async (
+  store: ControlPlaneStore,
+  transmissions: Transmission[],
+  anchorMessageId: string,
+  window?: { before?: number; after?: number }
+): Promise<{ messages: ContextMessage[]; evidenceMessageIds: string[] } | null> => {
+  const anchorIndex = transmissions.findIndex((tx) => tx.id === anchorMessageId);
+  if (anchorIndex === -1) return null;
+
+  const prefs = resolveSpanPrefs(window);
+  const beforeIndices = Array.from({ length: anchorIndex }, (_, idx) => anchorIndex - 1 - idx);
+  const afterIndices = Array.from(
+    { length: transmissions.length - anchorIndex - 1 },
+    (_, idx) => anchorIndex + 1 + idx
+  );
+  const ordered = [
+    anchorIndex,
+    ...beforeIndices.slice(0, prefs.before),
+    ...afterIndices.slice(0, prefs.after),
+    ...beforeIndices.slice(prefs.before),
+    ...afterIndices.slice(prefs.after),
+  ];
+
+  const selection = new Map<number, { messages: ContextMessage[]; charCount: number; messageCount: number }>();
+  let totalChars = 0;
+  let totalMessages = 0;
+
+  for (const idx of ordered) {
+    const tx = transmissions[idx];
+    const output = await store.getTransmissionOutputEnvelope(tx.id);
+    const assistant = output?.assistant_text?.trim();
+    const messages: ContextMessage[] = [];
+    if (tx.message?.trim()) {
+      messages.push({
+        messageId: tx.id,
+        role: "user",
+        content: tx.message.trim(),
+        createdAt: tx.createdAt,
+      });
+    }
+    if (assistant) {
+      messages.push({
+        messageId: `${tx.id}:assistant`,
+        role: "assistant",
+        content: assistant,
+        createdAt: tx.createdAt,
+      });
+    }
+    if (messages.length === 0) continue;
+
+    if (selection.size === 0) {
+      const trimmed = trimMessagesToBudget(messages, MAX_SPAN_CHARS);
+      if (trimmed.messageCount === 0) return null;
+      selection.set(idx, trimmed);
+      totalChars = trimmed.charCount;
+      totalMessages = trimmed.messageCount;
+      continue;
+    }
+
+    const messageCount = messages.length;
+    const charCount = messages.reduce((sum, msg) => sum + msg.content.length, 0);
+    if (totalMessages + messageCount > MAX_SPAN_MESSAGES) break;
+    if (totalChars + charCount > MAX_SPAN_CHARS) break;
+
+    selection.set(idx, { messages, charCount, messageCount });
+    totalChars += charCount;
+    totalMessages += messageCount;
+  }
+
+  let hasUser = false;
+  for (const entry of selection.values()) {
+    if (entry.messages.some((msg) => msg.role === "user")) {
+      hasUser = true;
+      break;
+    }
+  }
+
+  if (!hasUser) {
+    for (let offset = 1; offset < transmissions.length; offset += 1) {
+      const candidates = [anchorIndex - offset, anchorIndex + offset];
+      for (const idx of candidates) {
+        if (idx < 0 || idx >= transmissions.length) continue;
+        if (selection.has(idx)) continue;
+        const tx = transmissions[idx];
+        if (!tx.message?.trim()) continue;
+        const output = await store.getTransmissionOutputEnvelope(tx.id);
+        const assistant = output?.assistant_text?.trim();
+        const messages: ContextMessage[] = [
+          {
+            messageId: tx.id,
+            role: "user",
+            content: tx.message.trim(),
+            createdAt: tx.createdAt,
+          },
+        ];
+        if (assistant) {
+          messages.push({
+            messageId: `${tx.id}:assistant`,
+            role: "assistant",
+            content: assistant,
+            createdAt: tx.createdAt,
+          });
+        }
+        const messageCount = messages.length;
+        const charCount = messages.reduce((sum, msg) => sum + msg.content.length, 0);
+        if (totalMessages + messageCount > MAX_SPAN_MESSAGES) continue;
+        if (totalChars + charCount > MAX_SPAN_CHARS) continue;
+        selection.set(idx, { messages, charCount, messageCount });
+        totalChars += charCount;
+        totalMessages += messageCount;
+        hasUser = true;
+        break;
+      }
+      if (hasUser) break;
+    }
+  }
+
+  if (selection.size === 0) return null;
+
+  const orderedIndices = Array.from(selection.keys()).sort((a, b) => a - b);
+  const evidenceMessageIds = orderedIndices.map((idx) => transmissions[idx].id);
+  const messages = orderedIndices.flatMap((idx) => selection.get(idx)?.messages ?? []);
+
+  return { messages, evidenceMessageIds };
+};
+
+const isSafeAutoAcceptKind = (kind: z.infer<typeof MemoryKindSchema>): boolean =>
+  kind === "preference" || kind === "workflow" || kind === "project";
 
 export async function memoryRoutes(
   app: FastifyInstance,
@@ -279,7 +472,7 @@ export async function memoryRoutes(
   });
 
   app.post("/memories", async (req, reply) => {
-    const parsed = MemoryCreateRequestSchema.safeParse(req.body);
+    const parsed = MemorySaveRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       const unrecognizedKeys = extractUnrecognizedKeys(parsed.error);
       if (unrecognizedKeys.length > 0) {
@@ -299,30 +492,107 @@ export async function memoryRoutes(
     const userId = requireUserId(req, reply);
     if (!userId) return;
 
+    if ("memory" in data) {
+      const existing = await store.getMemoryArtifactByRequestId({
+        userId,
+        requestId: data.request_id,
+      });
+
+      if (existing) {
+        const requestedTags = (data.memory.tags ?? []).slice().sort();
+        const existingTags = [...existing.tags].sort();
+        const tagsMatch =
+          requestedTags.length === existingTags.length
+          && requestedTags.every((tag, index) => tag === existingTags[index]);
+
+        const requestedRigor = data.memory.rigor_level ?? "normal";
+        const requestedMoodAnchor = data.memory.mood_anchor ?? null;
+        const requestedImportance = data.memory.importance ?? null;
+
+        const matches =
+          existing.domain === data.memory.domain
+          && (existing.title ?? null) === (data.memory.title ?? null)
+          && existing.snippet === data.memory.content
+          && (existing.moodAnchor ?? null) === requestedMoodAnchor
+          && (existing.importance ?? null) === requestedImportance
+          && existing.rigorLevel === requestedRigor
+          && tagsMatch;
+
+        if (!matches) {
+          return reply.code(409).send({
+            error: "idempotency_conflict",
+            request_id: data.request_id,
+            memory_id: existing.id,
+          });
+        }
+
+        return reply.code(200).send({
+          request_id: data.request_id,
+          memory: {
+            memory_id: existing.id,
+            created_at: existing.createdAt,
+            updated_at: existing.updatedAt,
+            domain: existing.domain ?? null,
+            title: existing.title ?? null,
+            summary: existing.summary ?? null,
+            tags: existing.tags,
+            rigor_level: existing.rigorLevel,
+            lifecycle_state: existing.lifecycleState,
+            memory_kind: existing.memoryKind,
+            is_safe_for_auto_accept: isSafeAutoAcceptKind(existing.memoryKind),
+          },
+        });
+      }
+
+      const artifact = await store.createMemoryArtifact({
+        userId,
+        transmissionId: null,
+        threadId: data.source?.thread_id ?? null,
+        triggerMessageId: data.source?.message_id ?? null,
+        type: "memory",
+        domain: data.memory.domain,
+        title: data.memory.title ?? null,
+        summary: null,
+        snippet: data.memory.content,
+        moodAnchor: data.memory.mood_anchor ?? null,
+        rigorLevel: data.memory.rigor_level ?? "normal",
+        tags: data.memory.tags ?? [],
+        importance: data.memory.importance ?? null,
+        fidelity: "direct",
+        transitionToHazyAt: null,
+        memoryKind: "other",
+        lifecycleState: "pinned",
+        requestId: data.request_id,
+      });
+
+      return reply.code(200).send({
+        request_id: data.request_id,
+        memory: {
+          memory_id: artifact.id,
+          created_at: artifact.createdAt,
+          updated_at: artifact.updatedAt,
+          domain: artifact.domain ?? null,
+          title: artifact.title ?? null,
+          summary: artifact.summary ?? null,
+          tags: artifact.tags,
+          rigor_level: artifact.rigorLevel,
+          lifecycle_state: artifact.lifecycleState,
+          memory_kind: artifact.memoryKind,
+          is_safe_for_auto_accept: isSafeAutoAcceptKind(artifact.memoryKind),
+        },
+      });
+    }
+
     const existing = await store.getMemoryArtifactByRequestId({
       userId,
       requestId: data.request_id,
     });
 
     if (existing) {
-      const requestedTags = (data.memory.tags ?? []).slice().sort();
-      const existingTags = [...existing.tags].sort();
-      const tagsMatch =
-        requestedTags.length === existingTags.length
-        && requestedTags.every((tag, index) => tag === existingTags[index]);
-
-      const requestedRigor = data.memory.rigor_level ?? "normal";
-      const requestedMoodAnchor = data.memory.mood_anchor ?? null;
-      const requestedImportance = data.memory.importance ?? null;
-
       const matches =
-        existing.domain === data.memory.domain
-        && (existing.title ?? null) === (data.memory.title ?? null)
-        && existing.snippet === data.memory.content
-        && (existing.moodAnchor ?? null) === requestedMoodAnchor
-        && (existing.importance ?? null) === requestedImportance
-        && existing.rigorLevel === requestedRigor
-        && tagsMatch;
+        existing.threadId === data.thread_id
+        && existing.triggerMessageId === data.anchor_message_id
+        && existing.memoryKind === (data.memory_kind ?? "other");
 
       if (!matches) {
         return reply.code(409).send({
@@ -338,30 +608,78 @@ export async function memoryRoutes(
           memory_id: existing.id,
           created_at: existing.createdAt,
           updated_at: existing.updatedAt,
-          domain: existing.domain ?? null,
-          title: existing.title ?? null,
-          summary: null,
-          tags: existing.tags,
-          rigor_level: existing.rigorLevel,
+          snippet: existing.snippet,
+          summary: existing.summary ?? null,
+          evidence_message_ids: existing.evidenceMessageIds ?? [],
+          lifecycle_state: existing.lifecycleState,
+          memory_kind: existing.memoryKind,
+          is_safe_for_auto_accept: isSafeAutoAcceptKind(existing.memoryKind),
         },
       });
     }
 
+    const transmissions = await store.listTransmissionsByThread({ threadId: data.thread_id });
+    const span = await buildSpanSelection(store, transmissions, data.anchor_message_id, data.window);
+
+    if (!span) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: "anchor_message_id must reference server transmission ids for this thread",
+      });
+    }
+
+    if (span.evidenceMessageIds.length < 2) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: "span must include at least two messages",
+      });
+    }
+
+    if (span.messages.length === 0) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: "span resolved to empty messages",
+      });
+    }
+
+    let distill;
+    try {
+      distill = await distillMemorySpan({
+        messages: span.messages,
+        memoryKindHint: data.memory_kind ?? null,
+        requestId: data.request_id,
+        threadId: data.thread_id,
+        logger: req.log,
+      });
+    } catch (error) {
+      req.log.warn({ evt: "memory_distill_failed", error: String(error) }, "memory_distill_failed");
+      return reply.code(502).send({
+        error: "distillation_failed",
+        message: "Unable to distill memory snippet and summary",
+      });
+    }
+
+    const memoryKind = data.memory_kind ?? distill.memoryKind;
+
     const artifact = await store.createMemoryArtifact({
       userId,
       transmissionId: null,
-      threadId: data.source?.thread_id ?? null,
-      triggerMessageId: data.source?.message_id ?? null,
+      threadId: data.thread_id,
+      triggerMessageId: data.anchor_message_id,
       type: "memory",
-      domain: data.memory.domain,
-      title: data.memory.title ?? null,
-      snippet: data.memory.content,
-      moodAnchor: data.memory.mood_anchor ?? null,
-      rigorLevel: data.memory.rigor_level ?? "normal",
-      tags: data.memory.tags ?? [],
-      importance: data.memory.importance ?? null,
+      snippet: distill.snippet,
+      summary: distill.summary,
+      moodAnchor: null,
+      rigorLevel: "normal",
+      tags: data.tags ?? [],
+      importance: null,
       fidelity: "direct",
       transitionToHazyAt: null,
+      lifecycleState: "pinned",
+      memoryKind,
+      evidenceMessageIds: span.evidenceMessageIds,
+      distillModel: distill.modelUsed,
+      distillAttempts: distill.distillAttempts,
       requestId: data.request_id,
     });
 
@@ -371,17 +689,24 @@ export async function memoryRoutes(
         memory_id: artifact.id,
         created_at: artifact.createdAt,
         updated_at: artifact.updatedAt,
-        domain: artifact.domain ?? null,
-        title: artifact.title ?? null,
-        summary: null,
-        tags: artifact.tags,
-        rigor_level: artifact.rigorLevel,
+        snippet: artifact.snippet,
+        summary: artifact.summary ?? null,
+        evidence_message_ids: artifact.evidenceMessageIds ?? [],
+        lifecycle_state: artifact.lifecycleState,
+        memory_kind: artifact.memoryKind,
+        is_safe_for_auto_accept: isSafeAutoAcceptKind(artifact.memoryKind),
       },
     });
   });
 
   app.get("/memories", async (req, reply) => {
     const query = req.query as Record<string, string | string[] | undefined>;
+    const scope = typeof query.scope === "string" ? query.scope : null;
+    const threadId = typeof query.thread_id === "string" ? query.thread_id : null;
+    const lifecycleStateRaw = typeof query.lifecycle_state === "string"
+      ? query.lifecycle_state
+      : null;
+    const memoryKindRaw = typeof query.memory_kind === "string" ? query.memory_kind : null;
     const domain = typeof query.domain === "string" ? query.domain : null;
     const tagsAnyRaw = query.tags_any;
     const tagsAny = Array.isArray(tagsAnyRaw)
@@ -399,12 +724,54 @@ export async function memoryRoutes(
       });
     }
 
+    if (scope && scope !== "user" && scope !== "thread") {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: "scope must be user or thread",
+      });
+    }
+
+    if (scope === "thread" && !threadId) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: "thread_id is required when scope=thread",
+      });
+    }
+
+    const lifecycleState =
+      lifecycleStateRaw === "archived" || lifecycleStateRaw === "pinned"
+        ? lifecycleStateRaw
+        : lifecycleStateRaw === null || lifecycleStateRaw === ""
+          ? "pinned"
+          : null;
+    if (lifecycleStateRaw && !lifecycleState) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: "lifecycle_state must be pinned or archived",
+      });
+    }
+
+    const memoryKind = memoryKindRaw
+      ? MemoryKindSchema.safeParse(memoryKindRaw).success
+        ? (memoryKindRaw as z.infer<typeof MemoryKindSchema>)
+        : null
+      : null;
+    if (memoryKindRaw && !memoryKind) {
+      return reply.code(400).send({
+        error: "invalid_request",
+        message: "memory_kind is invalid",
+      });
+    }
+
     const userId = requireUserId(req, reply);
     if (!userId) return;
     const result = await store.listMemoryArtifacts({
       userId,
       domain,
       tagsAny: tagsAny.length > 0 ? tagsAny : null,
+      lifecycleState,
+      threadId: scope === "thread" ? threadId : null,
+      memoryKind,
       before: cursor,
       limit,
     });
@@ -415,6 +782,46 @@ export async function memoryRoutes(
         memory_id: artifact.id,
         type: artifact.type,
         snippet: artifact.snippet,
+        summary: artifact.summary ?? null,
+        thread_id: artifact.threadId ?? null,
+        trigger_message_id: artifact.triggerMessageId ?? null,
+        domain: artifact.domain ?? null,
+        title: artifact.title ?? null,
+        tags: artifact.tags,
+        mood_anchor: artifact.moodAnchor ?? null,
+        rigor_level: artifact.rigorLevel,
+        fidelity: artifact.fidelity ?? null,
+        transition_to_hazy_at: artifact.transitionToHazyAt ?? null,
+        lifecycle_state: artifact.lifecycleState,
+        memory_kind: artifact.memoryKind,
+        is_safe_for_auto_accept: isSafeAutoAcceptKind(artifact.memoryKind),
+        created_at: artifact.createdAt,
+        updated_at: artifact.updatedAt,
+      })),
+      next_cursor: result.nextCursor,
+    });
+  });
+
+  app.get("/memories/:memory_id", async (req, reply) => {
+    const memoryId = (req.params as any).memory_id as string;
+    const userId = requireUserId(req, reply);
+    if (!userId) return;
+
+    const artifact = await store.getMemoryArtifact({ userId, memoryId });
+    if (!artifact) {
+      return reply.code(404).send({ error: "not_found" });
+    }
+
+    return reply.code(200).send({
+      request_id: randomUUID(),
+      memory: {
+        memory_id: artifact.id,
+        snippet: artifact.snippet,
+        summary: artifact.summary ?? null,
+        evidence_message_ids: artifact.evidenceMessageIds ?? [],
+        lifecycle_state: artifact.lifecycleState,
+        memory_kind: artifact.memoryKind,
+        is_safe_for_auto_accept: isSafeAutoAcceptKind(artifact.memoryKind),
         thread_id: artifact.threadId ?? null,
         trigger_message_id: artifact.triggerMessageId ?? null,
         domain: artifact.domain ?? null,
@@ -426,8 +833,8 @@ export async function memoryRoutes(
         transition_to_hazy_at: artifact.transitionToHazyAt ?? null,
         created_at: artifact.createdAt,
         updated_at: artifact.updatedAt,
-      })),
-      next_cursor: result.nextCursor,
+        supersedes_memory_id: artifact.supersedesMemoryId ?? null,
+      },
     });
   });
 
@@ -455,8 +862,10 @@ export async function memoryRoutes(
 
     if (
       data.patch.snippet === undefined
+      && data.patch.summary === undefined
       && data.patch.tags === undefined
       && data.patch.mood_anchor === undefined
+      && data.patch.memory_kind === undefined
     ) {
       return reply.code(400).send({
         error: "invalid_request",
@@ -464,23 +873,62 @@ export async function memoryRoutes(
       });
     }
 
-    const updated = await store.updateMemoryArtifact({
+    const existingByRequest = await store.getMemoryArtifactByRequestId({
       userId,
-      memoryId,
-      snippet: data.patch.snippet,
-      tags: data.patch.tags,
-      moodAnchor: data.patch.mood_anchor,
+      requestId: data.request_id,
     });
+    if (existingByRequest) {
+      return reply.code(200).send({
+        request_id: data.request_id,
+        memory: {
+          memory_id: existingByRequest.id,
+          updated_at: existingByRequest.updatedAt,
+          supersedes_memory_id: existingByRequest.supersedesMemoryId ?? null,
+        },
+      });
+    }
 
-    if (!updated) {
+    const existing = await store.getMemoryArtifact({ userId, memoryId });
+    if (!existing) {
       return reply.code(404).send({ error: "not_found" });
     }
+
+    const updated = await store.createMemoryArtifact({
+      userId,
+      transmissionId: existing.transmissionId ?? null,
+      threadId: existing.threadId ?? null,
+      triggerMessageId: existing.triggerMessageId ?? null,
+      type: existing.type,
+      domain: existing.domain ?? null,
+      title: existing.title ?? null,
+      summary: data.patch.summary === undefined ? existing.summary ?? null : data.patch.summary,
+      snippet: data.patch.snippet ?? existing.snippet,
+      moodAnchor: data.patch.mood_anchor === undefined ? existing.moodAnchor ?? null : data.patch.mood_anchor,
+      rigorLevel: existing.rigorLevel,
+      rigorReason: existing.rigorReason ?? null,
+      tags: data.patch.tags === undefined ? existing.tags : data.patch.tags ?? [],
+      importance: existing.importance ?? null,
+      fidelity: existing.fidelity,
+      transitionToHazyAt: existing.transitionToHazyAt ?? null,
+      lifecycleState: existing.lifecycleState,
+      memoryKind: data.patch.memory_kind ?? existing.memoryKind,
+      supersedesMemoryId: existing.id,
+      evidenceMessageIds: existing.evidenceMessageIds ?? null,
+      requestId: data.request_id,
+    });
+
+    await store.setMemoryLifecycleState({
+      userId,
+      memoryId: existing.id,
+      lifecycleState: "archived",
+    });
 
     return reply.code(200).send({
       request_id: data.request_id,
       memory: {
         memory_id: updated.id,
         updated_at: updated.updatedAt,
+        supersedes_memory_id: updated.supersedesMemoryId ?? null,
       },
     });
   });
@@ -503,10 +951,14 @@ export async function memoryRoutes(
       });
     }
 
-    await store.deleteMemoryArtifact({ userId, memoryId });
+    await store.setMemoryLifecycleState({
+      userId,
+      memoryId,
+      lifecycleState: "archived",
+    });
     await store.recordMemoryAudit({
       userId,
-      action: "delete",
+      action: "archive",
       requestId: randomUUID(),
       threadId: existing.threadId ?? null,
       filter: { memory_id: memoryId },
@@ -516,7 +968,7 @@ export async function memoryRoutes(
       userId,
       memoryId,
       threadId: existing.threadId ?? null,
-      action: "delete",
+      action: "archive",
     });
     return reply.code(204).send();
   });

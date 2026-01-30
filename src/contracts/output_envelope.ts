@@ -102,6 +102,35 @@ const LibrarianGateSchema = z.object({
   verdict: z.enum(["pass", "prune", "flag"]),
 }).strict();
 
+const LatticeMetaSchema = z.object({
+  status: z.enum(["hit", "miss", "fail"]),
+  retrieval_trace: z.object({
+    memory_ids: z.array(z.string().min(1)).optional(),
+    memento_ids: z.array(z.string().min(1)).optional(),
+    policy_capsule_ids: z.array(z.string().min(1)).optional(),
+  }).strict().optional(),
+  scores: z.record(
+    z.string().min(1),
+    z.object({
+      method: z.enum(["fts5_bm25", "vec_distance"]),
+      value: z.number(),
+    }).strict()
+  ).optional(),
+  counts: z.object({
+    memories: z.number().int().min(0),
+    mementos: z.number().int().min(0),
+    policy_capsules: z.number().int().min(0),
+  }).strict(),
+  bytes_total: z.number().int().min(0),
+  timings_ms: z.object({
+    lattice_total: z.number().min(0).optional(),
+    lattice_db: z.number().min(0).optional(),
+    model_total: z.number().min(0).optional(),
+    request_total: z.number().min(0).optional(),
+  }).strict().optional(),
+  warnings: z.array(z.string().min(1)).optional(),
+}).strict();
+
 const OutputEnvelopeMetaKeys = [
   "meta_version",
   "trace_run_id",
@@ -124,6 +153,7 @@ const OutputEnvelopeMetaKeys = [
   "journal_offer",
   "journalOffer",
   "librarian_gate",
+  "lattice",
 ] as const;
 
 export const OUTPUT_ENVELOPE_META_ALLOWED_KEYS = new Set<string>(OutputEnvelopeMetaKeys);
@@ -150,6 +180,7 @@ const OutputEnvelopeMetaSchema = z.object({
   journalOffer: JournalOfferSchema.optional(),
   journal_offer: JournalOfferSchema.optional(),
   librarian_gate: LibrarianGateSchema.optional(),
+  lattice: LatticeMetaSchema.optional(),
 })
   .strip()
   .superRefine((value, ctx) => {
