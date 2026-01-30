@@ -15,7 +15,7 @@ export type PromptRole = "system" | "user";
 
 export type PromptSectionId = "law" | "correction" | "retrieval" | "evidence_pack" | "user_message";
 
-export type RetrievalItemKind = "memento" | "bookmark" | "memory";
+export type RetrievalItemKind = "memento" | "bookmark" | "memory" | "policy";
 
 export type RetrievalItem = {
   id: string;
@@ -81,11 +81,36 @@ function formatRetrievalSection(items: RetrievalItem[]): { content: string; used
   }
 
   const usedIds: string[] = [];
-  const lines: string[] = [];
-
   for (const item of items) {
     usedIds.push(item.id);
-    lines.push(`[${item.kind}:${item.id}] ${item.summary}`);
+  }
+
+  const lines: string[] = [];
+  const threadItems = items.filter((item) => item.kind === "memento" || item.kind === "bookmark");
+  const memoryItems = items.filter((item) => item.kind === "memory");
+  const policyItems = items.filter((item) => item.kind === "policy");
+
+  if (threadItems.length > 0) {
+    lines.push("Thread context:");
+    for (const item of threadItems) {
+      lines.push(`[${item.kind}:${item.id}] ${item.summary}`);
+    }
+  }
+
+  if (memoryItems.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push("Memory:");
+    for (const item of memoryItems) {
+      lines.push(`[${item.kind}:${item.id}] ${item.summary}`);
+    }
+  }
+
+  if (policyItems.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push("Governance:");
+    for (const item of policyItems) {
+      lines.push(`[${item.kind}:${item.id}] ${item.summary}`);
+    }
   }
 
   return { content: lines.join("\n"), usedIds };

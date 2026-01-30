@@ -84,3 +84,16 @@ jobs:
           SOL_MODEL_PROD: ${{ vars.SOL_MODEL_PROD }}
           SOL_ALLOW_MODEL_OVERRIDE: ${{ vars.SOL_ALLOW_MODEL_OVERRIDE || '0' }}
         run: pnpm test
+
+      - name: Build docker image (sqlite-vec smoke)
+        run: |
+          docker build \
+            --build-arg SQLITE_VEC_ARCH=linux-x64 \
+            --build-arg SQLITE_VEC_VERSION=0.1.7-alpha.2 \
+            -t solserver:vec-smoke \
+            .
+
+      - name: Smoke test sqlite-vec load
+        run: |
+          docker run --rm solserver:vec-smoke \
+            node -e "const Database=require('better-sqlite3'); const db=new Database(':memory:'); db.loadExtension('/app/extensions/vec0.so'); console.log('sqlite-vec load ok');"

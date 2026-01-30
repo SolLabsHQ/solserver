@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
 import pino from "pino";
-
+import { computeLatticeEmbedding, serializeEmbedding, LATTICE_EMBED_DIM } from "../lattice/embedding";
 import type {
   ControlPlaneStore,
   Transmission,
@@ -123,6 +123,7 @@ export function validateTopology(dbPath: string, log: TopologyLogger): void {
 export class SqliteControlPlaneStore implements ControlPlaneStore {
   private db: Database.Database;
   private log: TopologyLogger;
+  private vecExtensionLoaded = false;
 
   constructor(
     dbPath: string = "./data/control_plane.db",
@@ -136,7 +137,15 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     this.db = new Database(dbPath);
     validateTopology(dbPath, this.log);
     this.db.pragma("foreign_keys = ON");
+    const busyTimeoutRaw = process.env.LATTICE_BUSY_TIMEOUT_MS;
+    const busyTimeoutMs = busyTimeoutRaw === undefined || busyTimeoutRaw === ""
+      ? 200
+      : Number(busyTimeoutRaw);
+    if (Number.isFinite(busyTimeoutMs) && busyTimeoutMs >= 0) {
+      this.db.pragma(`busy_timeout = ${Math.floor(busyTimeoutMs)}`);
+    }
     this.initSchema();
+    this.maybeLoadVecExtension();
   }
 
   private initSchema() {
@@ -337,6 +346,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         type TEXT NOT NULL,
         domain TEXT,
         title TEXT,
+        summary TEXT,
         snippet TEXT NOT NULL,
         mood_anchor TEXT,
         rigor_level TEXT NOT NULL,
@@ -345,6 +355,10 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         importance TEXT,
         fidelity TEXT NOT NULL,
         transition_to_hazy_at TEXT,
+        lifecycle_state TEXT NOT NULL DEFAULT 'pinned',
+        memory_kind TEXT NOT NULL DEFAULT 'other',
+        supersedes_memory_id TEXT,
+        evidence_message_ids_json TEXT,
         request_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -356,6 +370,19 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         ON memory_artifacts(thread_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_artifacts_request
         ON memory_artifacts(user_id, request_id) WHERE request_id IS NOT NULL;
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS memory_artifacts_fts
+        USING fts5(
+          memory_id UNINDEXED,
+          user_id UNINDEXED,
+          thread_id UNINDEXED,
+          lifecycle_state UNINDEXED,
+          memory_kind UNINDEXED,
+          snippet,
+          summary,
+          title,
+          tags
+        );
 
       CREATE TABLE IF NOT EXISTS memory_audit_log (
         id TEXT PRIMARY KEY,
@@ -455,8 +482,79 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       this.db.exec("ALTER TABLE memory_artifacts ADD COLUMN rigor_reason TEXT");
     } catch {}
     try {
+      this.db.exec("ALTER TABLE memory_artifacts ADD COLUMN summary TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE memory_artifacts ADD COLUMN lifecycle_state TEXT DEFAULT 'pinned'");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE memory_artifacts ADD COLUMN memory_kind TEXT DEFAULT 'other'");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE memory_artifacts ADD COLUMN supersedes_memory_id TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE memory_artifacts ADD COLUMN evidence_message_ids_json TEXT");
+    } catch {}
+    try {
       this.db.exec("ALTER TABLE delivery_attempts ADD COLUMN journal_offer_json TEXT");
     } catch {}
+
+    try {
+      this.db.exec("UPDATE memory_artifacts SET lifecycle_state = 'pinned' WHERE lifecycle_state IS NULL");
+    } catch {}
+    try {
+      this.db.exec("UPDATE memory_artifacts SET memory_kind = 'other' WHERE memory_kind IS NULL");
+    } catch {}
+    try {
+      this.db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_memory_artifacts_state ON memory_artifacts(user_id, lifecycle_state, created_at DESC)"
+      );
+    } catch {}
+    try {
+      this.db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_memory_artifacts_kind ON memory_artifacts(user_id, memory_kind, created_at DESC)"
+      );
+    } catch {}
+  }
+
+  private maybeLoadVecExtension() {
+    if (process.env.LATTICE_VEC_ENABLED !== "1") return;
+    const extensionPath = process.env.LATTICE_VEC_EXTENSION_PATH ?? "/app/extensions/vec0.so";
+    try {
+      this.db.loadExtension(extensionPath);
+      this.vecExtensionLoaded = true;
+      this.log.info({ evt: "sqlite.vec.load.ok", extensionPath }, "sqlite.vec.load.ok");
+      this.ensureVecSchema();
+    } catch (error) {
+      this.vecExtensionLoaded = false;
+      this.log.warn(
+        { evt: "sqlite.vec.load.failed", extensionPath, error: String(error) },
+        "sqlite.vec.load.failed"
+      );
+    }
+  }
+
+  private ensureVecSchema() {
+    if (!this.vecExtensionLoaded) return;
+    try {
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS memory_embeddings
+        USING vec0(
+          embedding float[${LATTICE_EMBED_DIM}],
+          memory_id TEXT,
+          user_id TEXT,
+          lifecycle_state TEXT,
+          memory_kind TEXT
+        );
+      `);
+    } catch (error) {
+      this.vecExtensionLoaded = false;
+      this.log.warn(
+        { evt: "sqlite.vec.schema_failed", error: String(error) },
+        "sqlite.vec.schema_failed"
+      );
+    }
   }
 
   readTopologyKey(): TopologyMeta | null {
@@ -1463,6 +1561,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     type: MemoryArtifact["type"];
     domain?: string | null;
     title?: string | null;
+    summary?: string | null;
     snippet: string;
     moodAnchor?: string | null;
     rigorLevel: MemoryArtifact["rigorLevel"];
@@ -1471,6 +1570,10 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     importance?: string | null;
     fidelity: MemoryArtifact["fidelity"];
     transitionToHazyAt?: string | null;
+    lifecycleState?: MemoryArtifact["lifecycleState"];
+    memoryKind?: MemoryArtifact["memoryKind"];
+    supersedesMemoryId?: string | null;
+    evidenceMessageIds?: string[] | null;
     requestId?: string | null;
   }): Promise<MemoryArtifact> {
     if (args.requestId) {
@@ -1493,6 +1596,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         type,
         domain,
         title,
+        summary,
         snippet,
         mood_anchor,
         rigor_level,
@@ -1501,11 +1605,15 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         importance,
         fidelity,
         transition_to_hazy_at,
+        lifecycle_state,
+        memory_kind,
+        supersedes_memory_id,
+        evidence_message_ids_json,
         request_id,
         created_at,
         updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -1517,6 +1625,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       args.type,
       args.domain ?? null,
       args.title ?? null,
+      args.summary ?? null,
       args.snippet,
       args.moodAnchor ?? null,
       args.rigorLevel,
@@ -1525,10 +1634,33 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       args.importance ?? null,
       args.fidelity,
       args.transitionToHazyAt ?? null,
+      args.lifecycleState ?? "pinned",
+      args.memoryKind ?? "other",
+      args.supersedesMemoryId ?? null,
+      args.evidenceMessageIds ? this.serializeStringArray(args.evidenceMessageIds) : null,
       args.requestId ?? null,
       now,
       now
     );
+
+    this.upsertMemoryFts({
+      memoryId: id,
+      userId: args.userId,
+      threadId: args.threadId ?? null,
+      lifecycleState: args.lifecycleState ?? "pinned",
+      memoryKind: args.memoryKind ?? "other",
+      snippet: args.snippet,
+      summary: args.summary ?? null,
+      title: args.title ?? null,
+      tags: args.tags,
+    });
+    this.upsertMemoryEmbedding({
+      memoryId: id,
+      userId: args.userId,
+      lifecycleState: args.lifecycleState ?? "pinned",
+      memoryKind: args.memoryKind ?? "other",
+      text: args.summary ?? args.snippet,
+    });
 
     return {
       id,
@@ -1539,6 +1671,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       type: args.type,
       domain: args.domain ?? null,
       title: args.title ?? null,
+      summary: args.summary ?? null,
       snippet: args.snippet,
       moodAnchor: args.moodAnchor ?? null,
       rigorLevel: args.rigorLevel,
@@ -1547,6 +1680,10 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       importance: args.importance ?? null,
       fidelity: args.fidelity,
       transitionToHazyAt: args.transitionToHazyAt ?? null,
+      lifecycleState: args.lifecycleState ?? "pinned",
+      memoryKind: args.memoryKind ?? "other",
+      supersedesMemoryId: args.supersedesMemoryId ?? null,
+      evidenceMessageIds: args.evidenceMessageIds ? [...args.evidenceMessageIds] : null,
       requestId: args.requestId ?? null,
       createdAt: now,
       updatedAt: now,
@@ -1581,6 +1718,9 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     userId: string;
     domain?: string | null;
     tagsAny?: string[] | null;
+    lifecycleState?: MemoryArtifact["lifecycleState"] | null;
+    threadId?: string | null;
+    memoryKind?: MemoryArtifact["memoryKind"] | null;
     before?: string | null;
     limit?: number;
   }): Promise<{ items: MemoryArtifact[]; nextCursor: string | null }> {
@@ -1591,6 +1731,21 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     if (args.domain) {
       where.push("domain = ?");
       params.push(args.domain);
+    }
+
+    if (args.lifecycleState) {
+      where.push("lifecycle_state = ?");
+      params.push(args.lifecycleState);
+    }
+
+    if (args.threadId) {
+      where.push("thread_id = ?");
+      params.push(args.threadId);
+    }
+
+    if (args.memoryKind) {
+      where.push("memory_kind = ?");
+      params.push(args.memoryKind);
     }
 
     if (args.before) {
@@ -1624,6 +1779,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     snippet?: string | null;
     tags?: string[] | null;
     moodAnchor?: string | null;
+    summary?: string | null;
   }): Promise<MemoryArtifact | null> {
     const existing = await this.getMemoryArtifact({
       userId: args.userId,
@@ -1635,32 +1791,213 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     const nextTags = args.tags === undefined ? existing.tags : args.tags ?? [];
     const nextMoodAnchor =
       args.moodAnchor === undefined ? existing.moodAnchor ?? null : args.moodAnchor;
+    const nextSummary = args.summary === undefined ? existing.summary ?? null : args.summary ?? null;
 
     const stmt = this.db.prepare(`
       UPDATE memory_artifacts
       SET snippet = ?,
+        summary = ?,
         tags_json = ?,
         mood_anchor = ?,
         updated_at = ?
       WHERE id = ? AND user_id = ?
     `);
 
+    const now = new Date().toISOString();
     stmt.run(
       nextSnippet,
+      nextSummary,
       this.serializeTags(nextTags),
       nextMoodAnchor,
-      new Date().toISOString(),
+      now,
       args.memoryId,
       args.userId
     );
 
+    this.upsertMemoryFts({
+      memoryId: existing.id,
+      userId: existing.userId,
+      threadId: existing.threadId ?? null,
+      lifecycleState: existing.lifecycleState,
+      memoryKind: existing.memoryKind,
+      snippet: nextSnippet,
+      summary: nextSummary,
+      title: existing.title ?? null,
+      tags: nextTags,
+    });
+    this.upsertMemoryEmbedding({
+      memoryId: existing.id,
+      userId: existing.userId,
+      lifecycleState: existing.lifecycleState,
+      memoryKind: existing.memoryKind,
+      text: nextSummary ?? nextSnippet,
+    });
+
     return {
       ...existing,
       snippet: nextSnippet,
+      summary: nextSummary,
       tags: nextTags,
       moodAnchor: nextMoodAnchor,
-      updatedAt: new Date().toISOString(),
+      updatedAt: now,
     };
+  }
+
+  async setMemoryLifecycleState(args: {
+    userId: string;
+    memoryId: string;
+    lifecycleState: MemoryArtifact["lifecycleState"];
+  }): Promise<MemoryArtifact | null> {
+    const existing = await this.getMemoryArtifact({
+      userId: args.userId,
+      memoryId: args.memoryId,
+    });
+    if (!existing) return null;
+
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE memory_artifacts
+      SET lifecycle_state = ?, updated_at = ?
+      WHERE id = ? AND user_id = ?
+    `).run(args.lifecycleState, now, args.memoryId, args.userId);
+
+    const updated = {
+      ...existing,
+      lifecycleState: args.lifecycleState,
+      updatedAt: now,
+    };
+
+    this.upsertMemoryFts({
+      memoryId: updated.id,
+      userId: updated.userId,
+      threadId: updated.threadId ?? null,
+      lifecycleState: updated.lifecycleState,
+      memoryKind: updated.memoryKind,
+      snippet: updated.snippet,
+      summary: updated.summary ?? null,
+      title: updated.title ?? null,
+      tags: updated.tags,
+    });
+    this.upsertMemoryEmbedding({
+      memoryId: updated.id,
+      userId: updated.userId,
+      lifecycleState: updated.lifecycleState,
+      memoryKind: updated.memoryKind,
+      text: updated.summary ?? updated.snippet,
+    });
+
+    return updated;
+  }
+
+  async searchMemoryArtifactsLexical(args: {
+    userId: string;
+    query: string;
+    lifecycleState?: MemoryArtifact["lifecycleState"] | null;
+    threadId?: string | null;
+    memoryKind?: MemoryArtifact["memoryKind"] | null;
+    limit?: number;
+  }): Promise<Array<{ artifact: MemoryArtifact; score: number }>> {
+    const limit = args.limit ?? 10;
+    const tokens = args.query
+      .toLowerCase()
+      .match(/[a-z0-9]{3,}/g)
+      ?.slice(0, 12) ?? [];
+    if (tokens.length === 0) return [];
+
+    const ftsQuery = tokens.map((token) => `${token}*`).join(" OR ");
+    const params: Array<string | number> = [ftsQuery, args.userId];
+    const where: string[] = [
+      "memory_artifacts_fts MATCH ?",
+      "memory_artifacts_fts.user_id = ?",
+    ];
+
+    if (args.lifecycleState) {
+      where.push("m.lifecycle_state = ?");
+      params.push(args.lifecycleState);
+    }
+    if (args.threadId) {
+      where.push("m.thread_id = ?");
+      params.push(args.threadId);
+    }
+    if (args.memoryKind) {
+      where.push("m.memory_kind = ?");
+      params.push(args.memoryKind);
+    }
+
+    params.push(limit);
+
+    const rows = this.db.prepare(`
+      SELECT m.*, bm25(memory_artifacts_fts) AS score
+      FROM memory_artifacts_fts
+      JOIN memory_artifacts m ON m.id = memory_artifacts_fts.memory_id
+      WHERE ${where.join(" AND ")}
+      ORDER BY score ASC, m.created_at DESC
+      LIMIT ?
+    `).all(...params) as Array<{ score: number } & Record<string, any>>;
+
+    return rows.map((row) => ({
+      artifact: this.rowToMemoryArtifact(row),
+      score: typeof row.score === "number" ? row.score : 0,
+    }));
+  }
+
+  async searchMemoryArtifactsVector(_args: {
+    userId: string;
+    embedding: number[];
+    lifecycleState?: MemoryArtifact["lifecycleState"] | null;
+    threadId?: string | null;
+    memoryKind?: MemoryArtifact["memoryKind"] | null;
+    limit?: number;
+    maxDistance?: number | null;
+  }): Promise<Array<{ artifact: MemoryArtifact; score: number }>> {
+    const args = _args;
+    if (!this.vecExtensionLoaded) {
+      throw new Error("vec_extension_not_loaded");
+    }
+
+    const limit = args.limit ?? 10;
+    const params: Array<string | number> = [serializeEmbedding(args.embedding), limit];
+    const where: string[] = [
+      "memory_embeddings.embedding MATCH ?",
+      "memory_embeddings.k = ?",
+    ];
+
+    if (args.userId) {
+      where.push("memory_embeddings.user_id = ?");
+      params.push(args.userId);
+    }
+    if (args.lifecycleState) {
+      where.push("m.lifecycle_state = ?");
+      params.push(args.lifecycleState);
+    }
+    if (args.threadId) {
+      where.push("m.thread_id = ?");
+      params.push(args.threadId);
+    }
+    if (args.memoryKind) {
+      where.push("m.memory_kind = ?");
+      params.push(args.memoryKind);
+    }
+    if (args.maxDistance !== undefined && args.maxDistance !== null) {
+      where.push("memory_embeddings.distance <= ?");
+      params.push(args.maxDistance);
+    }
+
+    params.push(limit);
+
+    const rows = this.db.prepare(`
+      SELECT m.*, memory_embeddings.distance AS score
+      FROM memory_embeddings
+      JOIN memory_artifacts m ON m.id = memory_embeddings.memory_id
+      WHERE ${where.join(" AND ")}
+      ORDER BY memory_embeddings.distance ASC
+      LIMIT ?
+    `).all(...params) as Array<{ score: number } & Record<string, any>>;
+
+    return rows.map((row) => ({
+      artifact: this.rowToMemoryArtifact(row),
+      score: typeof row.score === "number" ? row.score : 0,
+    }));
   }
 
   async deleteMemoryArtifact(args: {
@@ -1677,6 +2014,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       DELETE FROM memory_artifacts WHERE id = ? AND user_id = ?
     `);
     stmt.run(args.memoryId, args.userId);
+    this.deleteMemoryFts(args.memoryId);
+    this.deleteMemoryEmbedding(args.memoryId);
     return { deleted: true, artifact: existing };
   }
 
@@ -1725,6 +2064,10 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       DELETE FROM memory_artifacts WHERE id IN (${placeholders})
     `);
     delStmt.run(...idParams);
+    for (const id of idParams) {
+      this.deleteMemoryFts(id);
+      this.deleteMemoryEmbedding(id);
+    }
     return ids.length;
   }
 
@@ -1733,12 +2076,18 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       DELETE FROM memory_artifacts WHERE user_id = ?
     `);
     const result = stmt.run(args.userId);
+    try {
+      this.db.prepare("DELETE FROM memory_artifacts_fts WHERE user_id = ?").run(args.userId);
+    } catch {}
+    try {
+      this.db.prepare("DELETE FROM memory_embeddings WHERE user_id = ?").run(args.userId);
+    } catch {}
     return result.changes ?? 0;
   }
 
   async recordMemoryAudit(args: {
     userId: string;
-    action: "delete" | "batch_delete" | "clear_all";
+    action: "delete" | "batch_delete" | "clear_all" | "archive";
     requestId: string;
     threadId?: string | null;
     filter?: Record<string, any> | null;
@@ -2028,6 +2377,10 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     return JSON.stringify(tags ?? []);
   }
 
+  private serializeStringArray(values: string[]): string {
+    return JSON.stringify(values ?? []);
+  }
+
   private parseTags(tagsJson: string | null | undefined): string[] {
     if (!tagsJson) return [];
     try {
@@ -2035,6 +2388,124 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       return Array.isArray(parsed) ? parsed.filter((tag) => typeof tag === "string") : [];
     } catch {
       return [];
+    }
+  }
+
+  private parseStringArray(valuesJson: string | null | undefined): string[] | null {
+    if (!valuesJson) return null;
+    try {
+      const parsed = JSON.parse(valuesJson);
+      if (!Array.isArray(parsed)) return null;
+      const filtered = parsed.filter((value) => typeof value === "string");
+      return filtered.length > 0 ? filtered : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private upsertMemoryFts(args: {
+    memoryId: string;
+    userId: string;
+    threadId: string | null;
+    lifecycleState: string;
+    memoryKind: string;
+    snippet: string;
+    summary: string | null;
+    title: string | null;
+    tags: string[];
+  }) {
+    const tagsText = args.tags.join(" ");
+    try {
+      this.db.prepare("DELETE FROM memory_artifacts_fts WHERE memory_id = ?").run(args.memoryId);
+      this.db.prepare(`
+        INSERT INTO memory_artifacts_fts (
+          memory_id,
+          user_id,
+          thread_id,
+          lifecycle_state,
+          memory_kind,
+          snippet,
+          summary,
+          title,
+          tags
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        args.memoryId,
+        args.userId,
+        args.threadId,
+        args.lifecycleState,
+        args.memoryKind,
+        args.snippet,
+        args.summary ?? "",
+        args.title ?? "",
+        tagsText
+      );
+    } catch (error) {
+      this.log.warn(
+        { evt: "memory_fts.upsert_failed", memoryId: args.memoryId, error: String(error) },
+        "memory_fts.upsert_failed"
+      );
+    }
+  }
+
+  private deleteMemoryFts(memoryId: string) {
+    try {
+      this.db.prepare("DELETE FROM memory_artifacts_fts WHERE memory_id = ?").run(memoryId);
+    } catch (error) {
+      this.log.warn(
+        { evt: "memory_fts.delete_failed", memoryId, error: String(error) },
+        "memory_fts.delete_failed"
+      );
+    }
+  }
+
+  private upsertMemoryEmbedding(args: {
+    memoryId: string;
+    userId: string;
+    lifecycleState: string;
+    memoryKind: string;
+    text: string;
+  }) {
+    if (!this.vecExtensionLoaded) return;
+    try {
+      const embedding = computeLatticeEmbedding(args.text);
+      const stmtDelete = this.db.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?");
+      stmtDelete.run(args.memoryId);
+      const stmtInsert = this.db.prepare(`
+        INSERT INTO memory_embeddings (
+          embedding,
+          memory_id,
+          user_id,
+          lifecycle_state,
+          memory_kind
+        )
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      stmtInsert.run(
+        serializeEmbedding(embedding),
+        args.memoryId,
+        args.userId,
+        args.lifecycleState,
+        args.memoryKind
+      );
+    } catch (error) {
+      this.log.warn(
+        { evt: "memory_vec.upsert_failed", memoryId: args.memoryId, error: String(error) },
+        "memory_vec.upsert_failed"
+      );
+    }
+  }
+
+  private deleteMemoryEmbedding(memoryId: string) {
+    if (!this.vecExtensionLoaded) return;
+    try {
+      this.db.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?").run(memoryId);
+    } catch (error) {
+      this.log.warn(
+        { evt: "memory_vec.delete_failed", memoryId, error: String(error) },
+        "memory_vec.delete_failed"
+      );
     }
   }
 
@@ -2048,6 +2519,7 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       type: row.type,
       domain: row.domain ?? null,
       title: row.title ?? null,
+      summary: row.summary ?? null,
       snippet: row.snippet,
       moodAnchor: row.mood_anchor ?? null,
       rigorLevel: row.rigor_level,
@@ -2056,6 +2528,10 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       importance: row.importance ?? null,
       fidelity: row.fidelity,
       transitionToHazyAt: row.transition_to_hazy_at ?? null,
+      lifecycleState: row.lifecycle_state ?? "pinned",
+      memoryKind: row.memory_kind ?? "other",
+      supersedesMemoryId: row.supersedes_memory_id ?? null,
+      evidenceMessageIds: this.parseStringArray(row.evidence_message_ids_json),
       requestId: row.request_id ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

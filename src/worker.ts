@@ -217,6 +217,7 @@ async function processMemoryDistillTransmission(transmission: Transmission) {
         threadId: request.threadId,
         triggerMessageId: request.triggerMessageId,
         type: "memory",
+        summary: fact,
         snippet: fact,
         moodAnchor: distillResult.moodAnchor,
         rigorLevel: distillResult.rigorLevel,
@@ -224,6 +225,8 @@ async function processMemoryDistillTransmission(transmission: Transmission) {
         tags: [],
         fidelity: "direct",
         transitionToHazyAt: null,
+        memoryKind: "fact",
+        lifecycleState: "pinned",
         requestId: request.requestId,
       });
       memoryId = artifact.id;
