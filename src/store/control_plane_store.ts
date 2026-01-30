@@ -102,6 +102,8 @@ export type MemoryArtifact = {
   memoryKind: MemoryKind;
   supersedesMemoryId?: string | null;
   evidenceMessageIds?: string[] | null;
+  distillModel?: string | null;
+  distillAttempts?: number | null;
   requestId?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -391,6 +393,8 @@ export interface ControlPlaneStore {
     memoryKind?: MemoryKind;
     supersedesMemoryId?: string | null;
     evidenceMessageIds?: string[] | null;
+    distillModel?: string | null;
+    distillAttempts?: number | null;
     requestId?: string | null;
   }): Promise<MemoryArtifact>;
 
@@ -826,6 +830,8 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
     memoryKind?: MemoryKind;
     supersedesMemoryId?: string | null;
     evidenceMessageIds?: string[] | null;
+    distillModel?: string | null;
+    distillAttempts?: number | null;
     requestId?: string | null;
   }): Promise<MemoryArtifact> {
     if (args.requestId) {
@@ -859,6 +865,8 @@ export class MemoryControlPlaneStore implements ControlPlaneStore {
       memoryKind: args.memoryKind ?? "other",
       supersedesMemoryId: args.supersedesMemoryId ?? null,
       evidenceMessageIds: args.evidenceMessageIds ? [...args.evidenceMessageIds] : null,
+      distillModel: args.distillModel ?? null,
+      distillAttempts: args.distillAttempts ?? null,
       requestId: args.requestId ?? null,
       createdAt: now,
       updatedAt: now,

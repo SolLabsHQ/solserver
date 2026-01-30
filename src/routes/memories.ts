@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import type { ContextMessage } from "../memory/synaptic_gate";
+import { distillMemorySpan } from "../memory/memory_distiller";
 import { MemoryControlPlaneStore, type ControlPlaneStore, type Transmission } from "../store/control_plane_store";
 
 const ConsentSchema = z.object({
@@ -36,8 +37,8 @@ const MemoryKindSchema = z.enum([
 ]);
 
 const MemorySpanWindowSchema = z.object({
-  before: z.number().int().min(0).max(8).optional(),
-  after: z.number().int().min(0).max(8).optional(),
+  before: z.number().int().min(0).max(30).optional(),
+  after: z.number().int().min(0).max(30).optional(),
 }).strict();
 
 const MemorySpanSaveRequestSchema = z.object({
@@ -154,44 +155,161 @@ const notifyLibrarian = (req: any, payload: Record<string, any>) => {
   );
 };
 
-const DEFAULT_SPAN_WINDOW = { before: 1, after: 1 };
-const MAX_SPAN_MESSAGES = 12;
-const MAX_SNIPPET_CHARS = 1200;
-const MAX_SUMMARY_CHARS = 200;
+const MAX_SPAN_MESSAGES = 30;
+const MAX_SPAN_CHARS = 12_000;
+const DEFAULT_PREFER_BEFORE = 10;
+const DEFAULT_PREFER_AFTER = 4;
 
-const resolveSpanWindow = (window?: { before?: number; after?: number }) => ({
-  before: window?.before ?? DEFAULT_SPAN_WINDOW.before,
-  after: window?.after ?? DEFAULT_SPAN_WINDOW.after,
+const resolveSpanPrefs = (window?: { before?: number; after?: number }) => ({
+  before: Math.min(window?.before ?? DEFAULT_PREFER_BEFORE, DEFAULT_PREFER_BEFORE),
+  after: Math.min(window?.after ?? DEFAULT_PREFER_AFTER, DEFAULT_PREFER_AFTER),
 });
 
-const resolveSpanTransmissions = (
+const trimMessagesToBudget = (messages: ContextMessage[], maxChars: number) => {
+  const trimmed: ContextMessage[] = [];
+  let remaining = maxChars;
+  for (const msg of messages) {
+    if (remaining <= 0) break;
+    const content = msg.content;
+    if (content.length <= remaining) {
+      trimmed.push(msg);
+      remaining -= content.length;
+    } else {
+      trimmed.push({ ...msg, content: content.slice(0, remaining) });
+      remaining = 0;
+    }
+  }
+  return {
+    messages: trimmed,
+    charCount: maxChars - remaining,
+    messageCount: trimmed.length,
+  };
+};
+
+const buildSpanSelection = async (
+  store: ControlPlaneStore,
   transmissions: Transmission[],
   anchorMessageId: string,
-  window: { before: number; after: number }
-) => {
+  window?: { before?: number; after?: number }
+): Promise<{ messages: ContextMessage[]; evidenceMessageIds: string[] } | null> => {
   const anchorIndex = transmissions.findIndex((tx) => tx.id === anchorMessageId);
   if (anchorIndex === -1) return null;
-  const start = Math.max(0, anchorIndex - window.before);
-  const end = Math.min(transmissions.length - 1, anchorIndex + window.after);
-  return transmissions.slice(start, end + 1);
-};
 
-const truncateText = (text: string, maxChars: number) => {
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, Math.max(0, maxChars - 3))}...`;
-};
+  const prefs = resolveSpanPrefs(window);
+  const beforeIndices = Array.from({ length: anchorIndex }, (_, idx) => anchorIndex - 1 - idx);
+  const afterIndices = Array.from(
+    { length: transmissions.length - anchorIndex - 1 },
+    (_, idx) => anchorIndex + 1 + idx
+  );
+  const ordered = [
+    anchorIndex,
+    ...beforeIndices.slice(0, prefs.before),
+    ...afterIndices.slice(0, prefs.after),
+    ...beforeIndices.slice(prefs.before),
+    ...afterIndices.slice(prefs.after),
+  ];
 
-const buildSpanText = (messages: Array<{ role: string; content: string }>) => {
-  const lines: string[] = [];
-  for (const msg of messages) {
-    const roleLabel = msg.role === "assistant"
-      ? "Assistant"
-      : msg.role === "system"
-        ? "System"
-        : "User";
-    lines.push(`${roleLabel}: ${msg.content}`);
+  const selection = new Map<number, { messages: ContextMessage[]; charCount: number; messageCount: number }>();
+  let totalChars = 0;
+  let totalMessages = 0;
+
+  for (const idx of ordered) {
+    const tx = transmissions[idx];
+    const output = await store.getTransmissionOutputEnvelope(tx.id);
+    const assistant = output?.assistant_text?.trim();
+    const messages: ContextMessage[] = [];
+    if (tx.message?.trim()) {
+      messages.push({
+        messageId: tx.id,
+        role: "user",
+        content: tx.message.trim(),
+        createdAt: tx.createdAt,
+      });
+    }
+    if (assistant) {
+      messages.push({
+        messageId: `${tx.id}:assistant`,
+        role: "assistant",
+        content: assistant,
+        createdAt: tx.createdAt,
+      });
+    }
+    if (messages.length === 0) continue;
+
+    if (selection.size === 0) {
+      const trimmed = trimMessagesToBudget(messages, MAX_SPAN_CHARS);
+      if (trimmed.messageCount === 0) return null;
+      selection.set(idx, trimmed);
+      totalChars = trimmed.charCount;
+      totalMessages = trimmed.messageCount;
+      continue;
+    }
+
+    const messageCount = messages.length;
+    const charCount = messages.reduce((sum, msg) => sum + msg.content.length, 0);
+    if (totalMessages + messageCount > MAX_SPAN_MESSAGES) break;
+    if (totalChars + charCount > MAX_SPAN_CHARS) break;
+
+    selection.set(idx, { messages, charCount, messageCount });
+    totalChars += charCount;
+    totalMessages += messageCount;
   }
-  return lines.join("\n\n");
+
+  let hasUser = false;
+  for (const entry of selection.values()) {
+    if (entry.messages.some((msg) => msg.role === "user")) {
+      hasUser = true;
+      break;
+    }
+  }
+
+  if (!hasUser) {
+    for (let offset = 1; offset < transmissions.length; offset += 1) {
+      const candidates = [anchorIndex - offset, anchorIndex + offset];
+      for (const idx of candidates) {
+        if (idx < 0 || idx >= transmissions.length) continue;
+        if (selection.has(idx)) continue;
+        const tx = transmissions[idx];
+        if (!tx.message?.trim()) continue;
+        const output = await store.getTransmissionOutputEnvelope(tx.id);
+        const assistant = output?.assistant_text?.trim();
+        const messages: ContextMessage[] = [
+          {
+            messageId: tx.id,
+            role: "user",
+            content: tx.message.trim(),
+            createdAt: tx.createdAt,
+          },
+        ];
+        if (assistant) {
+          messages.push({
+            messageId: `${tx.id}:assistant`,
+            role: "assistant",
+            content: assistant,
+            createdAt: tx.createdAt,
+          });
+        }
+        const messageCount = messages.length;
+        const charCount = messages.reduce((sum, msg) => sum + msg.content.length, 0);
+        if (totalMessages + messageCount > MAX_SPAN_MESSAGES) continue;
+        if (totalChars + charCount > MAX_SPAN_CHARS) continue;
+        selection.set(idx, { messages, charCount, messageCount });
+        totalChars += charCount;
+        totalMessages += messageCount;
+        hasUser = true;
+        break;
+      }
+      if (hasUser) break;
+    }
+  }
+
+  if (selection.size === 0) return null;
+
+  const orderedIndices = Array.from(selection.keys()).sort((a, b) => a - b);
+  const evidenceMessageIds = orderedIndices.map((idx) => transmissions[idx].id);
+  const messages = orderedIndices.flatMap((idx) => selection.get(idx)?.messages ?? []);
+
+  return { messages, evidenceMessageIds };
 };
 
 const isSafeAutoAcceptKind = (kind: z.infer<typeof MemoryKindSchema>): boolean =>
@@ -501,56 +619,47 @@ export async function memoryRoutes(
     }
 
     const transmissions = await store.listTransmissionsByThread({ threadId: data.thread_id });
-    const window = resolveSpanWindow(data.window);
-    const spanTransmissions = resolveSpanTransmissions(transmissions, data.anchor_message_id, window);
+    const span = await buildSpanSelection(store, transmissions, data.anchor_message_id, data.window);
 
-    if (!spanTransmissions || spanTransmissions.length === 0) {
+    if (!span) {
       return reply.code(400).send({
         error: "invalid_request",
         message: "anchor_message_id must reference server transmission ids for this thread",
       });
     }
 
-    if (spanTransmissions.length < 2) {
+    if (span.evidenceMessageIds.length < 2) {
       return reply.code(400).send({
         error: "invalid_request",
         message: "span must include at least two messages",
       });
     }
 
-    if (spanTransmissions.length > MAX_SPAN_MESSAGES) {
-      return reply.code(400).send({
-        error: "invalid_request",
-        message: `span exceeds max of ${MAX_SPAN_MESSAGES} messages`,
-      });
-    }
-
-    const outputs = await Promise.all(
-      spanTransmissions.map((tx) => store.getTransmissionOutputEnvelope(tx.id))
-    );
-    const spanMessages: Array<{ role: string; content: string }> = [];
-    spanTransmissions.forEach((tx, idx) => {
-      if (tx.message && tx.message.trim().length > 0) {
-        spanMessages.push({ role: "user", content: tx.message });
-      }
-      const assistant = outputs[idx]?.assistant_text;
-      if (assistant && assistant.trim().length > 0) {
-        spanMessages.push({ role: "assistant", content: assistant });
-      }
-    });
-
-    if (spanMessages.length === 0) {
+    if (span.messages.length === 0) {
       return reply.code(400).send({
         error: "invalid_request",
         message: "span resolved to empty messages",
       });
     }
 
-    const spanText = buildSpanText(spanMessages);
-    const summaryBase = spanText.replace(/\s+/g, " ").trim();
-    const summary = truncateText(summaryBase, MAX_SUMMARY_CHARS);
-    const snippet = truncateText(spanText.trim(), MAX_SNIPPET_CHARS);
-    const evidenceMessageIds = spanTransmissions.map((tx) => tx.id);
+    let distill;
+    try {
+      distill = await distillMemorySpan({
+        messages: span.messages,
+        memoryKindHint: data.memory_kind ?? null,
+        requestId: data.request_id,
+        threadId: data.thread_id,
+        logger: req.log,
+      });
+    } catch (error) {
+      req.log.warn({ evt: "memory_distill_failed", error: String(error) }, "memory_distill_failed");
+      return reply.code(502).send({
+        error: "distillation_failed",
+        message: "Unable to distill memory snippet and summary",
+      });
+    }
+
+    const memoryKind = data.memory_kind ?? distill.memoryKind;
 
     const artifact = await store.createMemoryArtifact({
       userId,
@@ -558,8 +667,8 @@ export async function memoryRoutes(
       threadId: data.thread_id,
       triggerMessageId: data.anchor_message_id,
       type: "memory",
-      snippet,
-      summary,
+      snippet: distill.snippet,
+      summary: distill.summary,
       moodAnchor: null,
       rigorLevel: "normal",
       tags: data.tags ?? [],
@@ -567,8 +676,10 @@ export async function memoryRoutes(
       fidelity: "direct",
       transitionToHazyAt: null,
       lifecycleState: "pinned",
-      memoryKind: data.memory_kind ?? "other",
-      evidenceMessageIds,
+      memoryKind,
+      evidenceMessageIds: span.evidenceMessageIds,
+      distillModel: distill.modelUsed,
+      distillAttempts: distill.distillAttempts,
       requestId: data.request_id,
     });
 

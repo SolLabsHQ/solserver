@@ -359,6 +359,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         memory_kind TEXT NOT NULL DEFAULT 'other',
         supersedes_memory_id TEXT,
         evidence_message_ids_json TEXT,
+        distill_model TEXT,
+        distill_attempts INTEGER,
         request_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -495,6 +497,12 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     } catch {}
     try {
       this.db.exec("ALTER TABLE memory_artifacts ADD COLUMN evidence_message_ids_json TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE memory_artifacts ADD COLUMN distill_model TEXT");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE memory_artifacts ADD COLUMN distill_attempts INTEGER");
     } catch {}
     try {
       this.db.exec("ALTER TABLE delivery_attempts ADD COLUMN journal_offer_json TEXT");
@@ -1574,6 +1582,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
     memoryKind?: MemoryArtifact["memoryKind"];
     supersedesMemoryId?: string | null;
     evidenceMessageIds?: string[] | null;
+    distillModel?: string | null;
+    distillAttempts?: number | null;
     requestId?: string | null;
   }): Promise<MemoryArtifact> {
     if (args.requestId) {
@@ -1609,11 +1619,13 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
         memory_kind,
         supersedes_memory_id,
         evidence_message_ids_json,
+        distill_model,
+        distill_attempts,
         request_id,
         created_at,
         updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -1638,6 +1650,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       args.memoryKind ?? "other",
       args.supersedesMemoryId ?? null,
       args.evidenceMessageIds ? this.serializeStringArray(args.evidenceMessageIds) : null,
+      args.distillModel ?? null,
+      args.distillAttempts ?? null,
       args.requestId ?? null,
       now,
       now
@@ -2532,6 +2546,8 @@ export class SqliteControlPlaneStore implements ControlPlaneStore {
       memoryKind: row.memory_kind ?? "other",
       supersedesMemoryId: row.supersedes_memory_id ?? null,
       evidenceMessageIds: this.parseStringArray(row.evidence_message_ids_json),
+      distillModel: row.distill_model ?? null,
+      distillAttempts: row.distill_attempts ?? null,
       requestId: row.request_id ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
