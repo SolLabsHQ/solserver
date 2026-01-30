@@ -256,6 +256,35 @@ describe("lattice retrieval", () => {
     expect(typeof scores[pinned.id].value).toBe("number");
   });
 
+  it("marks lattice hit when mementos are present", async () => {
+    process.env.LATTICE_ENABLED = "0";
+    const threadId = "thread-lattice-memento-1";
+
+    const first = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      payload: {
+        threadId,
+        message: "Seed memento context",
+      },
+    });
+    expect(first.statusCode).toBe(200);
+
+    const second = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      payload: {
+        threadId,
+        message: "Follow-up for memento hit",
+      },
+    });
+    expect(second.statusCode).toBe(200);
+    const lattice = second.json().outputEnvelope.meta.lattice;
+    expect(lattice.status).toBe("hit");
+    expect(lattice.retrieval_trace.memento_ids?.length ?? 0).toBeGreaterThan(0);
+    expect(lattice.retrieval_trace.memory_ids ?? []).toHaveLength(0);
+  });
+
   it("retrieves policy capsules only when triggered", async () => {
     process.env.LATTICE_ENABLED = "1";
     process.env.LATTICE_POLICY_BUNDLE_PATH = path.join(

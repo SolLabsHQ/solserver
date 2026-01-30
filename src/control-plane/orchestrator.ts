@@ -2060,12 +2060,15 @@ export async function runOrchestrationPipeline(args: {
     Buffer.byteLength(`[${item.kind}:${item.id}] ${item.summary}`, "utf8");
 
   let bytesTotal = 0;
+  let hitCap = false;
   const addItemsWithCap = (items: Array<{ id: string; kind: string; summary: string }>) => {
     for (const item of items) {
+      if (hitCap) break;
       const nextBytes = bytesTotal + estimateBytes(item);
       if (nextBytes > MAX_TOTAL_BYTES) {
         latticeWarnings.push("lattice_bytes_capped");
-        continue;
+        hitCap = true;
+        break;
       }
       bytesTotal = nextBytes;
       retrievalItems.push(item as any);
@@ -2091,9 +2094,11 @@ export async function runOrchestrationPipeline(args: {
   const policyHits = usedPolicyIds.length - adrHits;
   const latticeWarningsUnique = Array.from(new Set(latticeWarnings));
 
+  const latticeHasHits =
+    usedMemoryIds.length + usedPolicyIds.length + usedMementoIds.length > 0;
   const latticeStatus = latticeWarningsUnique.includes("memory_query_failed")
     ? "fail"
-    : (usedMemoryIds.length + usedPolicyIds.length > 0 ? "hit" : "miss");
+    : (latticeHasHits ? "hit" : "miss");
 
   const memoryScoreMap = new Map<string, { method: "fts5_bm25" | "vec_distance"; value: number }>();
   for (const hit of memoryResults) {
@@ -2136,7 +2141,7 @@ export async function runOrchestrationPipeline(args: {
       adr_hits: adrHits,
       policy_hits: policyHits,
       bytes_total: bytesTotal,
-      query_terms: latticeQueryTerms.slice(0, 10),
+      query_terms_count: latticeQueryTerms.length,
     },
   });
 

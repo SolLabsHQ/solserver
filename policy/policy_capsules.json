@@ -1,0 +1,14 @@
+[
+  {
+    "id": "ADR-030#D6",
+    "title": "Safety rules",
+    "snippet": "Follow safety rules for high-risk requests.",
+    "tags": ["policy", "safety", "risk"]
+  },
+  {
+    "id": "POLICY-001",
+    "title": "Governance",
+    "snippet": "Respect governance constraints and consent requirements.",
+    "tags": ["policy", "governance", "consent"]
+  }
+]

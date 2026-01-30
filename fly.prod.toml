@@ -9,6 +9,7 @@ primary_region = "sjc"
   # Keep strict topology validation on for production deployments.
   TOPOLOGY_GUARD_STRICT = "true"
   SOL_INTERNAL_API_BASE = "http://solserver-prod.internal:3333"
+  LATTICE_POLICY_BUNDLE_PATH = "/app/policy/policy_capsules.json"
 
 [http_service]
   internal_port = 3333

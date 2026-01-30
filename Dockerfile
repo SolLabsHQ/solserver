@@ -39,6 +39,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/extensions ./extensions
+COPY --from=build /app/policy ./policy
 
 # Fly sets PORT; your app already respects process.env.PORT ?? 3333
 EXPOSE 3333

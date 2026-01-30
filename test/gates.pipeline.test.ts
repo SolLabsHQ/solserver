@@ -436,7 +436,9 @@ describe("Gates Pipeline", () => {
     expect(lattice!.metadata).toMatchObject({
       memory_hits: expect.any(Number),
       bytes_total: expect.any(Number),
+      query_terms_count: expect.any(Number),
     });
+    expect(lattice!.metadata).not.toHaveProperty("query_terms");
   });
 
   it("should not include raw evidence content in trace events", async () => {
