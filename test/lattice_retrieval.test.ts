@@ -131,6 +131,71 @@ describe("lattice retrieval", () => {
     expect(lattice.retrieval_trace.memory_ids).toContain(memoryId);
   });
 
+  it("uses a saved name memory on the next turn", async () => {
+    process.env.LATTICE_ENABLED = "1";
+    const userId = "user-lattice-name-1";
+    const threadId = "thread-lattice-name-1";
+
+    const first = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: { "x-sol-user-id": userId },
+      payload: {
+        threadId,
+        message: "My name is Jassen",
+      },
+    });
+    expect(first.statusCode).toBe(200);
+    const firstBody = first.json();
+    const anchorId = (firstBody.transmissionId ?? firstBody.transmission_id) as string;
+    expect(anchorId).toBeTruthy();
+
+    const second = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: { "x-sol-user-id": userId },
+      payload: {
+        threadId,
+        message: "Nice to meet you.",
+      },
+    });
+    expect(second.statusCode).toBe(200);
+
+    const save = await app.inject({
+      method: "POST",
+      url: "/v1/memories",
+      headers: { "x-sol-user-id": userId },
+      payload: {
+        request_id: "mem-name-1",
+        thread_id: threadId,
+        anchor_message_id: anchorId,
+        window: { before: 0, after: 1 },
+        memory_kind: "fact",
+        consent: { explicit_user_consent: true },
+      },
+    });
+    expect(save.statusCode).toBe(200);
+    const saveBody = save.json();
+    const memoryId = saveBody.memory?.memory_id as string;
+    expect(memoryId).toBeTruthy();
+
+    const recall = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: { "x-sol-user-id": userId },
+      payload: {
+        threadId,
+        message: "What's my name?",
+      },
+    });
+    expect(recall.statusCode).toBe(200);
+    const recallBody = recall.json();
+    const lattice = recallBody.outputEnvelope.meta.lattice;
+    expect(lattice.status).toBe("hit");
+    expect(lattice.retrieval_trace.memory_ids).toContain(memoryId);
+    expect(String(recallBody.assistant ?? "")).toContain("Jassen");
+  });
+
   it("retrieves pinned memories only", async () => {
     process.env.LATTICE_ENABLED = "1";
     process.env.LATTICE_VEC_ENABLED = "0";

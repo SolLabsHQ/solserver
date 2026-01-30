@@ -15,12 +15,20 @@ const makeApp = () => {
 
 describe("/v1/memories routes", () => {
   const { app, store } = makeApp();
+  const originalEnv: Record<string, string | undefined> = {};
 
   beforeAll(async () => {
+    originalEnv.LLM_PROVIDER = process.env.LLM_PROVIDER;
+    process.env.LLM_PROVIDER = "fake";
     await app.ready();
   });
 
   afterAll(async () => {
+    if (originalEnv.LLM_PROVIDER === undefined) {
+      delete process.env.LLM_PROVIDER;
+    } else {
+      process.env.LLM_PROVIDER = originalEnv.LLM_PROVIDER;
+    }
     await app.close();
   });
 
@@ -179,8 +187,10 @@ describe("/v1/memories routes", () => {
     expect(body.memory.evidence_message_ids.length).toBeGreaterThan(1);
     expect(body.memory.evidence_message_ids).toContain(firstTx);
     expect(body.memory.evidence_message_ids).toContain(secondTx);
-    expect(body.memory.snippet).toContain("User:");
-    expect(body.memory.snippet).toContain("Assistant:");
+    expect(body.memory.snippet.length).toBeGreaterThan(0);
+    expect(body.memory.snippet.length).toBeLessThanOrEqual(200);
+    expect(body.memory.snippet).not.toMatch(/\b(User|Assistant|System):/);
+    expect(body.memory.summary?.split(/\r?\n/).filter(Boolean).length ?? 0).toBeLessThanOrEqual(3);
   });
 
   it("filters memory list by lifecycle_state and returns archived by id", async () => {

@@ -2072,9 +2072,9 @@ export async function runOrchestrationPipeline(args: {
     }
   };
 
-  addItemsWithCap(baseRetrievalItems);
   addItemsWithCap(memoryItems);
   addItemsWithCap(policyItems);
+  addItemsWithCap(baseRetrievalItems);
 
   log.debug(retrievalLogShape(retrievalItems), "control_plane.retrieval");
 
