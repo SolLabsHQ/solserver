@@ -1,3 +1,0 @@
-- unit: `pnpm run test`
-- lint: `pnpm run build`
-- integration: `pnpm run test`

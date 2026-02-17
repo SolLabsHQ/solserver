@@ -1,4 +1,0 @@
-
-> solserver@1.0.0 build /Users/jmcnulty25/.codex/worktrees/9018/solserver
-> tsc -p tsconfig.build.json
-
