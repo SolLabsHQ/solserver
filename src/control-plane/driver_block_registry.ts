@@ -44,12 +44,9 @@ Validators:
     version: "1.0",
     title: "DecisionClosure",
     scope: "global",
-    definition: `- When user wants closure or is ruminating: end with a Closure block of 3-6 labeled lines.
-- Closure must include: acknowledgment line, framing/release line, next-step line.
-Validators:
-- Must-have-any: "Receipt:" / "Summary:" / "Noted:" / "What I hear:" / "What I heard:"
-- Must-have-any: "Release:" / "Frame:" / "Why it matters:" / "So what:" / "Reframe:"
-- Must-have-any: "Next:" / "Try:" / "Action:" / "Plan:" / "Step:"`,
+    definition: `- Use labeled closure blocks (Receipt/Release/Next) only when explicitly requested or when structured closure is clearly needed.
+- Otherwise keep assistant_text natural and avoid labeled scaffolding.
+- If a closure block is used, keep it brief (3–6 lines).`,
     source: "system_shipped",
     approvedAt: "2026-01-11T00:00:00Z",
   },
@@ -79,14 +76,7 @@ Required behavior (in order):
 3) Ask the smallest set of questions needed to proceed.
 4) Do not fabricate missing facts.
 
-Validators:
-- Must-have: a "provisional marker" line that clearly signals uncertainty, using ANY of these patterns:
-  - contains one of: "assume" | "assuming" | "provisional" | "tentative" | "working" | "defaulting" | "if that's not true"
-  - OR a bracket tag: "[assumption]" | "[provisional]" | "[default]"
-- Must-have: an explicit missing-info statement (detectable by phrases like):
-  - "I don't have" | "missing" | "need to know" | "to answer, I need" | "depends on"
-- Must-have: at least one question mark "?" OR an interrogative starter ("Which/What/When/Where/Who/How") asking for the missing critical input(s).
-- Must-not: introduce specific facts/numbers/decisions as if known when they were not provided.`,
+If facts are sufficient, do NOT add missing-facts scaffolding.`,
   source: "system_shipped",
   approvedAt: "2026-01-25T00:00:00Z",
 },

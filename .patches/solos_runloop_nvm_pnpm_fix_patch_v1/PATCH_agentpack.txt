@@ -1,0 +1,9 @@
+Apply to docs/pr/PR-042/AGENTPACK.md
+
+Change gate commands to pnpm (since Fly uses pnpm and pnpm-lock.yaml exists):
+
+- unit: pnpm run test
+- lint: pnpm run build
+- integration: pnpm run test
+
+Avoid npm here to prevent node_modules layout drift.

@@ -1,0 +1,4 @@
+
+> solserver@1.0.0 build /Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver
+> tsc -p tsconfig.build.json
+

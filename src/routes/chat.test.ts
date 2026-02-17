@@ -109,7 +109,7 @@ describe("Step 6 - retrieval seam", () => {
   it("retrieveContext includes pinned memento (draft is ignored)", async () => {
     const draft = putThreadMemento({
       threadId: "t1",
-      arc: "SolServer v0 build",
+      arc: "Sol v0 build",
       active: ["Wire ThreadMemento"],
       parked: ["UI polish"],
       decisions: ["Option 1"],
@@ -151,7 +151,7 @@ describe("Step 6 - retrieval seam", () => {
   it("decline discards draft and retrieval remains empty", async () => {
     const draft = putThreadMemento({
       threadId: "t1",
-      arc: "SolServer v0 build",
+      arc: "Sol v0 build",
       active: ["Draft only"],
       parked: [],
       decisions: [],
@@ -179,7 +179,7 @@ describe("Step 6 - retrieval seam", () => {
   it("accept requires mementoId to match the latest draft", async () => {
     const draft = putThreadMemento({
       threadId: "t1",
-      arc: "SolServer v0 build",
+      arc: "Sol v0 build",
       active: ["Draft"],
       parked: [],
       decisions: [],
@@ -203,7 +203,7 @@ describe("Step 6 - retrieval seam", () => {
   it("revoke removes accepted memento and retrieval returns empty", async () => {
     const draft = putThreadMemento({
       threadId: "t1",
-      arc: "SolServer v0 build",
+      arc: "Sol v0 build",
       active: ["Revoke me"],
       parked: [],
       decisions: [],

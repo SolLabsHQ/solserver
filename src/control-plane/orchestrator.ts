@@ -528,6 +528,14 @@ function getForcedTestProviderOutput(req: any, attempt: 0 | 1): string | undefin
   return fallback ? JSON.stringify({ assistant_text: fallback }) : undefined;
 }
 
+function isDeterministicTestRetryEnabled(req: any): boolean {
+  if (process.env.NODE_ENV !== "test") return false;
+  const headers = req?.headers ?? {};
+  const attempt0 = String(headers["x-sol-test-output-attempt-0"] ?? "").trim();
+  const attempt1 = String(headers["x-sol-test-output-attempt-1"] ?? "").trim();
+  return Boolean(attempt0 && attempt1);
+}
+
 type PostLinterMetadata = {
   kind: "post_linter";
   attempt: 0 | 1;
@@ -1086,6 +1094,9 @@ export async function runOrchestrationPipeline(args: {
 
   const traceLevel = packet.traceConfig?.level ?? "info";
   const enforcementMode = resolveDriverBlockEnforcementMode();
+  const postOutputLinterMode: "strict" | "warn" | "off" = isDeterministicTestRetryEnabled(req)
+    ? "strict"
+    : enforcementMode;
 
   let traceSeq = 0;
   const appendTrace = async (event: Parameters<typeof store.appendTraceEvent>[0]) => {
@@ -2531,7 +2542,7 @@ export async function runOrchestrationPipeline(args: {
             modeDecision,
             content: assistant0,
             driverBlocks: promptPack.driverBlocks,
-            enforcementMode,
+            enforcementMode: postOutputLinterMode,
           });
 
           const lintTrace0 = buildPostLinterTrace(lint0, envelopeAttempt);
@@ -2808,7 +2819,7 @@ export async function runOrchestrationPipeline(args: {
             modeDecision,
             content: assistant1,
             driverBlocks: promptPack.driverBlocks,
-            enforcementMode,
+            enforcementMode: postOutputLinterMode,
           });
 
           const lintTrace1 = buildPostLinterTrace(lint1, 1);
@@ -3202,7 +3213,7 @@ export async function runOrchestrationPipeline(args: {
       modeDecision,
       content: assistant0,
       driverBlocks: promptPack.driverBlocks,
-      enforcementMode,
+      enforcementMode: postOutputLinterMode,
     });
 
     const lintTrace0 = buildPostLinterTrace(lint0, envelopeAttempt);
@@ -3447,7 +3458,7 @@ export async function runOrchestrationPipeline(args: {
         modeDecision,
         content: assistant1,
         driverBlocks: promptPack.driverBlocks,
-        enforcementMode,
+        enforcementMode: postOutputLinterMode,
       });
 
       const lintTrace1 = buildPostLinterTrace(lint1, 1);

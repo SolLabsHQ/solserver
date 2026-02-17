@@ -50,7 +50,7 @@ const SYSTEM_DEFAULT_BLOCKS: Record<string, { id: string; version: string; title
     id: "DB-003",
     version: "1.0",
     title: "DecisionClosure",
-    definition: "When the user makes a decision, provide a Receipt (summary + rationale) and Release (next action). Do not revisit unless explicitly asked.",
+    definition: "Use labeled closure blocks (Receipt/Release/Next) only when explicitly requested or when structured closure is clearly needed. Otherwise keep assistant_text natural.",
   },
   "DB-004": {
     id: "DB-004",
@@ -62,7 +62,7 @@ const SYSTEM_DEFAULT_BLOCKS: Record<string, { id: string; version: string; title
     id: "DB-005",
     version: "1.0",
     title: "MissingFactsStopAsk",
-    definition: "If critical facts are missing, stop and ask rather than guessing or hallucinating.",
+    definition: "If critical facts are missing, stop and ask rather than guessing or hallucinating. Do not add missing-facts scaffolding when facts are sufficient.",
   },
 };
 
