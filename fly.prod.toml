@@ -1,6 +1,9 @@
 app = "solserver-prod"
 primary_region = "sjc"
 
+[processes]
+  app = "bash scripts/run-web-worker.sh"
+
 [env]
   SOL_ENV = "prod"
   LLM_PROVIDER = "openai"
@@ -34,5 +37,5 @@ primary_region = "sjc"
     timeout = "2s"
 
 [[mounts]]
-  source = "solserver_prod_data"
+  source = "solserver_data"
   destination = "/data"

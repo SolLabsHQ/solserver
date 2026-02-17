@@ -8,13 +8,17 @@ def update_checklist_evidence(checklist_path: str, updates: Dict[str, Dict[str,s
     lines = text.splitlines()
     out = []
     for line in lines:
-        m = re.match(r"(\s*-\s*\[\s*[xX ]\s*\]\s*)(unit|lint|integration)\s*\(AUTO\)\s*—\s*Evidence:\s*(.*)$", line)
+        m = re.match(
+            r"(\s*)-\s*\[[xX ]\]\s*(unit|lint|integration)\s*\(AUTO\)\s*—\s*Evidence:\s*(.*)$",
+            line,
+        )
         if m:
-            prefix, gate = m.group(1), m.group(2)
+            indent, gate = m.group(1), m.group(2)
             if gate in updates:
                 u = updates[gate]
+                mark = "x" if u["result"].startswith("PASS") else " "
                 ev = f'Command: `{u["cmd"]}` | Result: {u["result"]} | Log: `{u["log"]}`'
-                out.append(f"{prefix}{gate} (AUTO) — Evidence: {ev}")
+                out.append(f"{indent}- [{mark}] {gate} (AUTO) — Evidence: {ev}")
                 continue
         out.append(line)
     p.write_text("\n".join(out) + "\n", encoding="utf-8")

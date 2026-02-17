@@ -1,143 +1,129 @@
 
-> solserver@1.0.0 test /Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver
+> solserver@1.0.0 test /Users/jmcnulty25/.codex/worktrees/9018/solserver
 > vitest run --no-file-parallelism --testTimeout 20000
 
 
- RUN  v4.0.16 /Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver
+ RUN  v4.0.16 /Users/jmcnulty25/.codex/worktrees/9018/solserver
 
 stdout | test/output_envelope.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: 👥 sync secrets across teammates & machines: https://dotenvx.com/ops
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
 
- ✓ test/output_envelope.test.ts (10 tests) 948ms
+ ✓ test/output_envelope.test.ts (10 tests) 942ms
      ✓ persists output_contract_failed in async completion  905ms
 stdout | test/gates.pipeline.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: ⚙️  enable debug logging with { debug: true }
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 📡 add observability to secrets: https://dotenvx.com/ops
 
-{"level":40,"time":1771312259177,"pid":82965,"hostname":"MacBookPro","dbPath":"./data/test_gates_pipeline.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
-{"level":30,"time":1771312259177,"pid":82965,"hostname":"MacBookPro","dbPath":"./data/test_gates_pipeline.db","msg":"topology.guard: validation passed"}
- ✓ test/gates.pipeline.test.ts (15 tests) 388ms
-{"level":40,"time":1771312259749,"pid":82973,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_internal_topology.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
-{"level":40,"time":1771312259798,"pid":82973,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_internal_topology.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
-{"level":40,"time":1771312259828,"pid":82973,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_internal_topology.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
-{"level":40,"time":1771312259855,"pid":82973,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_internal_topology.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
-{"level":40,"time":1771312259884,"pid":82973,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_internal_topology.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
-{"level":40,"time":1771312259912,"pid":82973,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_internal_topology.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
- ✓ test/internal_topology.test.ts (6 tests) 197ms
-{"level":30,"time":1771312259750,"pid":82973,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_internal_topology.db","msg":"topology.guard: validation passed"}
-{"level":30,"time":1771312259781,"pid":82973,"hostname":"MacBookPro","evt":"topology.guard.api_primary_key_created","createdAtMs":1771312259780,"createdBy":"api","msg":"topology.guard.api_primary_key_created"}
-{"level":30,"time":1771312259798,"pid":82973,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_internal_topology.db","msg":"topology.guard: validation passed"}
-{"level":30,"time":1771312259824,"pid":82973,"hostname":"MacBookPro","evt":"topology.guard.api_primary_key_created","createdAtMs":1771312259823,"createdBy":"api","msg":"topology.guard.api_primary_key_created"}
-{"level":30,"time":1771312259855,"pid":82973,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_internal_topology.db","msg":"topology.guard: validation passed"}
-{"level":30,"time":1771312259881,"pid":82973,"hostname":"MacBookPro","evt":"topology.guard.api_primary_key_created","createdAtMs":1771312259880,"createdBy":"api","msg":"topology.guard.api_primary_key_created"}
-{"level":30,"time":1771312259828,"pid":82973,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_internal_topology.db","msg":"topology.guard: validation passed"}
-{"level":30,"time":1771312259852,"pid":82973,"hostname":"MacBookPro","evt":"topology.guard.api_primary_key_created","createdAtMs":1771312259851,"createdBy":"api","msg":"topology.guard.api_primary_key_created"}
-{"level":30,"time":1771312259884,"pid":82973,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_internal_topology.db","msg":"topology.guard: validation passed"}
-{"level":30,"time":1771312259910,"pid":82973,"hostname":"MacBookPro","evt":"topology.guard.api_primary_key_created","createdAtMs":1771312259909,"createdBy":"api","msg":"topology.guard.api_primary_key_created"}
-{"level":30,"time":1771312259912,"pid":82973,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_internal_topology.db","msg":"topology.guard: validation passed"}
-{"level":30,"time":1771312259939,"pid":82973,"hostname":"MacBookPro","evt":"topology.guard.api_primary_key_created","createdAtMs":1771312259938,"createdBy":"api","msg":"topology.guard.api_primary_key_created"}
+ ✓ test/gates.pipeline.test.ts (15 tests) 278ms
+{"level":40,"time":1771346503817,"pid":80188,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/.codex/worktrees/9018/solserver/data/test_internal_topology.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
+{"level":40,"time":1771346503851,"pid":80188,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/.codex/worktrees/9018/solserver/data/test_internal_topology.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
+{"level":40,"time":1771346503875,"pid":80188,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/.codex/worktrees/9018/solserver/data/test_internal_topology.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
+{"level":40,"time":1771346503899,"pid":80188,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/.codex/worktrees/9018/solserver/data/test_internal_topology.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
+{"level":40,"time":1771346503921,"pid":80188,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/.codex/worktrees/9018/solserver/data/test_internal_topology.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
+{"level":40,"time":1771346503948,"pid":80188,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/.codex/worktrees/9018/solserver/data/test_internal_topology.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
+ ✓ test/internal_topology.test.ts (6 tests) 179ms
+{"level":30,"time":1771346503817,"pid":80188,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/.codex/worktrees/9018/solserver/data/test_internal_topology.db","msg":"topology.guard: validation passed"}
+{"level":30,"time":1771346503837,"pid":80188,"hostname":"MacBookPro","evt":"topology.guard.api_primary_key_created","createdAtMs":1771346503837,"createdBy":"api","msg":"topology.guard.api_primary_key_created"}
+{"level":30,"time":1771346503851,"pid":80188,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/.codex/worktrees/9018/solserver/data/test_internal_topology.db","msg":"topology.guard: validation passed"}
+{"level":30,"time":1771346503872,"pid":80188,"hostname":"MacBookPro","evt":"topology.guard.api_primary_key_created","createdAtMs":1771346503872,"createdBy":"api","msg":"topology.guard.api_primary_key_created"}
+{"level":30,"time":1771346503875,"pid":80188,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/.codex/worktrees/9018/solserver/data/test_internal_topology.db","msg":"topology.guard: validation passed"}
+{"level":30,"time":1771346503896,"pid":80188,"hostname":"MacBookPro","evt":"topology.guard.api_primary_key_created","createdAtMs":1771346503895,"createdBy":"api","msg":"topology.guard.api_primary_key_created"}
+{"level":30,"time":1771346503899,"pid":80188,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/.codex/worktrees/9018/solserver/data/test_internal_topology.db","msg":"topology.guard: validation passed"}
+{"level":30,"time":1771346503918,"pid":80188,"hostname":"MacBookPro","evt":"topology.guard.api_primary_key_created","createdAtMs":1771346503918,"createdBy":"api","msg":"topology.guard.api_primary_key_created"}
+{"level":30,"time":1771346503921,"pid":80188,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/.codex/worktrees/9018/solserver/data/test_internal_topology.db","msg":"topology.guard: validation passed"}
+{"level":30,"time":1771346503945,"pid":80188,"hostname":"MacBookPro","evt":"topology.guard.api_primary_key_created","createdAtMs":1771346503945,"createdBy":"api","msg":"topology.guard.api_primary_key_created"}
+{"level":30,"time":1771346503948,"pid":80188,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/.codex/worktrees/9018/solserver/data/test_internal_topology.db","msg":"topology.guard: validation passed"}
+{"level":30,"time":1771346503989,"pid":80188,"hostname":"MacBookPro","evt":"topology.guard.api_primary_key_created","createdAtMs":1771346503989,"createdBy":"api","msg":"topology.guard.api_primary_key_created"}
 stdout | test/trace.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: ⚙️  override existing env vars with { override: true }
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 🔄 add secrets lifecycle management: https://dotenvx.com/ops
 
-{"level":40,"time":1771312260226,"pid":82981,"hostname":"MacBookPro","dbPath":"/var/folders/wy/brtlgpps1v307_7gk5gyz7s40000gp/T/solserver-trace-05ldgg/trace-5490d8e1-0664-46dc-94a0-e11047db417b.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
-{"level":40,"time":1771312260257,"pid":82981,"hostname":"MacBookPro","dbPath":"/var/folders/wy/brtlgpps1v307_7gk5gyz7s40000gp/T/solserver-trace-schema-QE37rm/trace-b637a724-4793-4103-b2fe-d9b1f1805721.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
-{"level":40,"time":1771312260277,"pid":82981,"hostname":"MacBookPro","dbPath":"/var/folders/wy/brtlgpps1v307_7gk5gyz7s40000gp/T/solserver-trace-schema-QE37rm/trace-b637a724-4793-4103-b2fe-d9b1f1805721.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
-{"level":30,"time":1771312260226,"pid":82981,"hostname":"MacBookPro","dbPath":"/var/folders/wy/brtlgpps1v307_7gk5gyz7s40000gp/T/solserver-trace-05ldgg/trace-5490d8e1-0664-46dc-94a0-e11047db417b.db","msg":"topology.guard: validation passed"}
-{"level":30,"time":1771312260257,"pid":82981,"hostname":"MacBookPro","dbPath":"/var/folders/wy/brtlgpps1v307_7gk5gyz7s40000gp/T/solserver-trace-schema-QE37rm/trace-b637a724-4793-4103-b2fe-d9b1f1805721.db","msg":"topology.guard: validation passed"}
-{"level":30,"time":1771312260277,"pid":82981,"hostname":"MacBookPro","dbPath":"/var/folders/wy/brtlgpps1v307_7gk5gyz7s40000gp/T/solserver-trace-schema-QE37rm/trace-b637a724-4793-4103-b2fe-d9b1f1805721.db","msg":"topology.guard: validation passed"}
- ✓ test/trace.test.ts (12 tests) 147ms
- ✓ test/lease_claims.test.ts (2 tests) 98ms
+ ✓ test/trace.test.ts (12 tests) 121ms
+ ✓ test/lease_claims.test.ts (2 tests) 83ms
 stdout | test/restart_continuity.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: ⚙️  enable debug logging with { debug: true }
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 🔐 prevent building .env in docker: https://dotenvx.com/prebuild
 
-{"level":40,"time":1771312260782,"pid":82984,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_restart.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
-{"level":40,"time":1771312260866,"pid":82984,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_restart.db","expectedVolumePrefix":"/data/","msg":"topology.guard: database not on Fly.io volume (may not be shared across instances)"}
-{"level":30,"time":1771312260782,"pid":82984,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_restart.db","msg":"topology.guard: validation passed"}
-{"level":30,"time":1771312260866,"pid":82984,"hostname":"MacBookPro","dbPath":"/Users/jmcnulty25/Documents/workspace/projects/SolLabsHQ/solserver/data/test_restart.db","msg":"topology.guard: validation passed"}
- ✓ test/restart_continuity.test.ts (1 test) 96ms
-stdout | test/thread_memento_latest.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
-
- ✓ test/thread_memento_latest.test.ts (5 tests) 57ms
+ ✓ test/restart_continuity.test.ts (1 test) 71ms
 stdout | test/lattice_retrieval.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: 🗂️ backup and recover secrets: https://dotenvx.com/ops
+[dotenv@17.2.3] injecting env (0) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
 
-{"level":40,"time":1771312261466,"pid":82997,"hostname":"MacBookPro","dbPath":":memory:","msg":"topology.guard: in-memory database detected (acceptable for tests)"}
-{"level":40,"time":1771312261468,"pid":82997,"hostname":"MacBookPro","evt":"sqlite.vec.load.failed","extensionPath":"/tmp/missing-vec0.so","error":"SqliteError: dlopen(/tmp/missing-vec0.so.dylib, 0x000A): tried: '/tmp/missing-vec0.so.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/tmp/missing-vec0.so.dylib' (no such file), '/tmp/missing-vec0.so.dylib' (no such file), '/private/tmp/missing-vec0.so.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/priva","msg":"sqlite.vec.load.failed"}
- ✓ test/lattice_retrieval.test.ts (7 tests) 56ms
-stdout | test/driver_blocks.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: ⚙️  write to custom object with { processEnv: myObject }
+ ✓ test/lattice_retrieval.test.ts (7 tests) 49ms
+stdout | test/thread_memento_latest.test.ts
+[dotenv@17.2.3] injecting env (0) from .env -- tip: ⚙️  enable debug logging with { debug: true }
 
- ✓ test/driver_blocks.test.ts (22 tests) 44ms
+ ✓ test/thread_memento_latest.test.ts (5 tests) 48ms
 stdout | test/memory_routes.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
 
- ✓ test/memory_routes.test.ts (9 tests) 55ms
+ ✓ test/memory_routes.test.ts (9 tests) 38ms
+stdout | test/driver_blocks.test.ts
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 🔐 encrypt with Dotenvx: https://dotenvx.com
+
+ ✓ test/driver_blocks.test.ts (22 tests) 39ms
 stdout | test/evidence.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 📡 add observability to secrets: https://dotenvx.com/ops
 
- ✓ test/evidence.test.ts (12 tests) 42ms
+ ✓ test/evidence.test.ts (12 tests) 37ms
 stdout | src/routes/chat.idempotency.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: ⚙️  specify custom .env file path with { path: '/custom/path/.env' }
+[dotenv@17.2.3] injecting env (0) from .env -- tip: ⚙️  write to custom object with { processEnv: myObject }
 
- ✓ src/routes/chat.idempotency.test.ts (5 tests) 33ms
- ✓ test/topology_key.test.ts (1 test) 38ms
- ✓ test/topology_guard.test.ts (7 tests) 40ms
+ ✓ src/routes/chat.idempotency.test.ts (5 tests) 31ms
 stdout | test/librarian_gate.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: ⚙️  write to custom object with { processEnv: myObject }
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 🔐 encrypt with Dotenvx: https://dotenvx.com
 
- ✓ test/librarian_gate.test.ts (2 tests) 84ms
+ ✓ test/librarian_gate.test.ts (2 tests) 28ms
+ ✓ test/topology_guard.test.ts (7 tests) 27ms
+ ✓ test/topology_key.test.ts (1 test) 33ms
 stdout | src/routes/transmissions.journal_offer.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: 🗂️ backup and recover secrets: https://dotenvx.com/ops
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 🔑 add access controls to secrets: https://dotenvx.com/ops
 
- ✓ src/routes/transmissions.journal_offer.test.ts (2 tests) 29ms
+ ✓ src/routes/transmissions.journal_offer.test.ts (2 tests) 27ms
  ✓ test/evidence_store.test.ts (16 tests) 23ms
- ✓ test/journal_routes.test.ts (2 tests) 20ms
- ✓ test/trace_events_routes.test.ts (2 tests) 18ms
+ ✓ test/journal_routes.test.ts (2 tests) 19ms
+ ✓ test/trace_events_routes.test.ts (2 tests) 16ms
+ ✓ src/routes/chat.test.ts (9 tests) 6ms
  ✓ test/output_envelope_schema.test.ts (13 tests) 6ms
  ✓ test/evidence_intake.test.ts (12 tests) 6ms
- ✓ src/routes/chat.test.ts (9 tests) 6ms
- ✓ src/contracts/chat.canon-fixture.test.ts (4 tests) 5ms
- ✓ test/thread_memento_affect.test.ts (1 test) 4ms
+ ✓ src/contracts/chat.canon-fixture.test.ts (4 tests) 4ms
+ ✓ test/timestamp_validation.test.ts (7 tests) 3ms
 stdout | test/memory_distill.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: 🔐 prevent committing .env to code: https://dotenvx.com/precommit
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 🔐 prevent building .env in docker: https://dotenvx.com/prebuild
 
- ✓ test/memory_distill.test.ts (4 tests) 4ms
- ✓ test/timestamp_validation.test.ts (7 tests) 4ms
- ✓ test/topology_handshake.test.ts (5 tests) 4ms
- ✓ test/url_warnings.test.ts (9 tests) 4ms
- ✓ test/url_extraction.test.ts (14 tests) 4ms
- ✓ test/post_linter.test.ts (9 tests) 2ms
- ✓ src/control-plane/router.test.ts (3 tests) 3ms
- ✓ test/prompt_pack.test.ts (3 tests) 2ms
- ✓ test/journal_offer_classifier.test.ts (7 tests) 4ms
+ ✓ test/memory_distill.test.ts (4 tests) 3ms
+ ✓ test/thread_memento_affect.test.ts (1 test) 3ms
+ ✓ test/url_warnings.test.ts (9 tests) 3ms
+ ✓ test/url_extraction.test.ts (14 tests) 3ms
+ ✓ test/topology_handshake.test.ts (5 tests) 3ms
+ ✓ src/control-plane/router.test.ts (3 tests) 2ms
+ ✓ test/post_linter.test.ts (9 tests) 3ms
 stdout | test/provider_config.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: 🔐 encrypt with Dotenvx: https://dotenvx.com
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 🔐 prevent committing .env to code: https://dotenvx.com/precommit
 
  ✓ test/provider_config.test.ts (4 tests) 2ms
+ ✓ test/journal_offer_classifier.test.ts (7 tests) 2ms
+ ✓ test/prompt_pack.test.ts (3 tests) 2ms
+stdout | test/orchestrator.forced_persona.test.ts
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 🔑 add access controls to secrets: https://dotenvx.com/ops
+
+ ✓ test/orchestrator.forced_persona.test.ts (1 test) 1ms
 stdout | test/orchestrator.safety_urgent.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: 🔐 encrypt with Dotenvx: https://dotenvx.com
+[dotenv@17.2.3] injecting env (0) from .env -- tip: ⚙️  write to custom object with { processEnv: myObject }
 
  ✓ test/orchestrator.safety_urgent.test.ts (2 tests) 2ms
- ✓ test/personas.test.ts (1 test) 2ms
-stdout | test/orchestrator.forced_persona.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
+stdout | test/orchestrator.policy_resolution.test.ts
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 🔄 add secrets lifecycle management: https://dotenvx.com/ops
 
- ✓ test/orchestrator.forced_persona.test.ts (1 test) 2ms
+ ✓ test/orchestrator.policy_resolution.test.ts (4 tests) 1ms
+ ✓ test/personas.test.ts (1 test) 1ms
 stdout | test/output_envelope_meta.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: 🔐 prevent building .env in docker: https://dotenvx.com/prebuild
+[dotenv@17.2.3] injecting env (0) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
 
  ✓ test/output_envelope_meta.test.ts (1 test) 1ms
-stdout | test/orchestrator.policy_resolution.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: 🔄 add secrets lifecycle management: https://dotenvx.com/ops
-
- ✓ test/orchestrator.policy_resolution.test.ts (4 tests) 2ms
 stdout | test/openai_integration.test.ts
-[dotenv@17.2.3] injecting env (28) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
+[dotenv@17.2.3] injecting env (0) from .env -- tip: ✅ audit secrets and track compliance: https://dotenvx.com/ops
 
  ↓ test/openai_integration.test.ts (1 test | 1 skipped)
 
  Test Files  39 passed | 1 skipped (40)
       Tests  251 passed | 1 skipped (252)
-   Start at  23:10:57
-   Duration  9.29s (transform 527ms, setup 125ms, import 3.24s, tests 2.48s, environment 3ms)
+   Start at  08:41:41
+   Duration  7.98s (transform 443ms, setup 104ms, import 2.70s, tests 2.14s, environment 3ms)
 

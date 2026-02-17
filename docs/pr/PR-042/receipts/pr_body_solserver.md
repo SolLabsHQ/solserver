@@ -44,6 +44,6 @@ TBD
 - TBD
 
 #### Gate receipts (from checklist)
-- [ ] unit (AUTO) — Evidence: Command: `pnpm run test` | Result: PASS | Log: `docs/pr/PR-042/receipts/unit.log`
-- [ ] lint (AUTO) — Evidence: Command: `pnpm run build` | Result: PASS | Log: `docs/pr/PR-042/receipts/lint.log`
-- [ ] integration (AUTO) — Evidence: Command: `pnpm run test` | Result: PASS | Log: `docs/pr/PR-042/receipts/integration.log`
+- [x] unit (AUTO) — Evidence: Command: `pnpm run test` | Result: PASS | Log: `docs/pr/PR-042/receipts/unit.log`
+- [x] lint (AUTO) — Evidence: Command: `pnpm run build` | Result: PASS | Log: `docs/pr/PR-042/receipts/lint.log`
+- [x] integration (AUTO) — Evidence: Command: `pnpm run test` | Result: PASS | Log: `docs/pr/PR-042/receipts/integration.log`

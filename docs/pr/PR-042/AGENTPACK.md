@@ -16,7 +16,7 @@
 
 ## Connected PRs
 infra-docs: TBD
-solserver:  TBD
+solserver:  https://github.com/SolLabsHQ/solserver/pull/43
 solmobile:  TBD
 
 ## Facts (locked)
