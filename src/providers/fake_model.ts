@@ -8,7 +8,20 @@ export async function fakeModelReply(input: {
   const stubLine = nameHint
     ? `Stub response: I received ${input.userText.length} chars. Your name is ${nameHint}.`
     : `Stub response: I received ${input.userText.length} chars.`;
-  return stubLine;
+  const lines = [
+    "shape:",
+    `- Arc: ${input.modeLabel} session`,
+    "- Active: Provide a concise response.",
+    "- Parked: None.",
+    "- Decisions: None.",
+    "- Next: Ask for the next request.",
+    "Receipt: Acknowledged.",
+    "Release: You are not required to take external actions.",
+    "Next: Tell me if you want a draft or steps.",
+    "Assumption: No external actions were taken.",
+    stubLine,
+  ];
+  return lines.join("\n");
 }
 
 // ThreadMemento draft is navigation-only metadata (NOT durable knowledge).
