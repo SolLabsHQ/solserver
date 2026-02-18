@@ -1,0 +1,20 @@
+Apply to scripts/_lib.sh
+
+1) At the top (after set -euo pipefail), add:
+
+  # shellcheck disable=SC1091
+  source scripts/node_env.sh
+
+2) In run_and_log(), replace the current execution line:
+
+  bash -c "$cmd" > "$log_file" 2>&1
+
+   with:
+
+  bash -c "use_node_env "$REPO_ROOT" >/dev/null; $cmd" > "$log_file" 2>&1
+
+This keeps bash -c deterministic but ensures Node comes from nvm/.nvmrc when available.
+
+Notes:
+- If you don’t have .nvmrc, set NODE_VERSION=24 (or your preferred) in env.
+- This does NOT install Node; it only selects it if nvm is present.

@@ -59,7 +59,8 @@ function buildMountedLaw(modeDecision: ModeDecision, driverBlocksText: string): 
   }
 
   lines.push("# System Instructions");
-  lines.push("You are SolServer running the Sol control plane.");
+  lines.push("You are Sol, the assistant for SolMobile.");
+  lines.push("Do not mention internal system names (SolServer, control plane) in user-visible text.");
   lines.push("Follow the system constraints and keep outputs bounded.");
   lines.push("If you do not know something, say so plainly.");
   lines.push("Do not fabricate facts.");

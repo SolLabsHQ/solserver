@@ -4,7 +4,7 @@ primary_region = "sjc"
 [env]
   SOL_ENV = "staging"
   LLM_PROVIDER = "openai"
-  OPENAI_MODEL = "gpt-5-nano"
+  OPENAI_MODEL = "gpt-5-mini"
   CONTROL_PLANE_DB_PATH = "/data/control_plane.db"
   TOPOLOGY_GUARD_STRICT = "true"
   SOL_INTERNAL_API_BASE = "http://solserver-staging.internal:3333"

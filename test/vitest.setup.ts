@@ -1,7 +1,19 @@
-if (!process.env.NODE_ENV) {
-  process.env.NODE_ENV = "test";
-}
+process.env.NODE_ENV = "test";
+process.env.VITEST = "1";
+process.env.SOL_INLINE_PROCESSING = "1";
+process.env.SOL_ENV = process.env.SOL_ENV ?? "local";
 
-if (!process.env.SOL_ENV) {
-  process.env.SOL_ENV = "local";
-}
+process.env.LLM_PROVIDER = process.env.LLM_PROVIDER ?? "fake";
+process.env.WORKER_POLL_INTERVAL_MS = process.env.WORKER_POLL_INTERVAL_MS ?? "0";
+process.env.WORKER_LEASE_SECONDS = process.env.WORKER_LEASE_SECONDS ?? "1";
+process.env.WORKER_HEARTBEAT_EVERY = process.env.WORKER_HEARTBEAT_EVERY ?? "1";
+process.env.WORKER_SUPPRESS_IDLE_LOGS = process.env.WORKER_SUPPRESS_IDLE_LOGS ?? "1";
+process.env.WORKER_LEASE_ATTEMPTS = process.env.WORKER_LEASE_ATTEMPTS ?? "1";
+process.env.WORKER_EMPTY_SCANS = process.env.WORKER_EMPTY_SCANS ?? "1";
+process.env.WORKER_LEASE_JITTER_MIN_MS = process.env.WORKER_LEASE_JITTER_MIN_MS ?? "0";
+process.env.WORKER_LEASE_JITTER_MAX_MS = process.env.WORKER_LEASE_JITTER_MAX_MS ?? "0";
+process.env.WORKER_HEARTBEAT_LOG = process.env.WORKER_HEARTBEAT_LOG ?? "off";
+process.env.WORKER_NONE_LOG = process.env.WORKER_NONE_LOG ?? "on";
+process.env.LATTICE_ENABLED = process.env.LATTICE_ENABLED ?? "0";
+process.env.LATTICE_VEC_ENABLED = process.env.LATTICE_VEC_ENABLED ?? "0";
+process.env.TOPOLOGY_GUARD_STRICT = process.env.TOPOLOGY_GUARD_STRICT ?? "0";

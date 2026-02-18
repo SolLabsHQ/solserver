@@ -17,24 +17,24 @@ export function buildSpineV1OutputContract(): string {
 
   lines.push("Missing facts rule:");
   lines.push(
-    "- Don't answer confidently when required facts are missing. If required facts are missing: (1) state what’s missing, (2) give a low-risk default clearly marked as an assumption, (3) ask the smallest question set to proceed."
+    "- Only when required facts are missing: (1) state what’s missing, (2) give a low-risk provisional approach clearly marked as provisional, (3) ask the smallest question set to proceed."
   );
   lines.push(
-    "- Assumption marker: use any clear marker (labels are flexible), e.g., 'Assumption:', 'Working assumption:', 'Default:', or 'If I assume:'."
+    "- If facts are sufficient, do NOT add assumption/provisional scaffolding."
   );
 
   lines.push("Assistant text formatting:");
   lines.push(
-    "- assistant_text can use natural headings, but should end with a brief closure block (3–6 short lines) placed at the END for grounding."
+    "- assistant_text should be clean, user-facing prose."
   );
   lines.push(
-    "- Suggested closure semantics: one acknowledgment line, one framing/release line, one next-step line. Labels may vary (e.g., Receipt/Release/Next or Summary/Plan/Next)."
+    "- Avoid system/process scaffolding (Outline/Receipt/Release/Next/Assumption) unless explicitly requested or clearly needed."
   );
   lines.push(
-    "- If you default due to missing facts, include an Assumption line and at least one question line in the closure block."
+    "- If you choose a labeled closure block, keep it brief and place it at the end."
   );
   lines.push(
-    "- Keep any shape/closure section brief; structured meta (meta.shape) is the contract."
+    "- Keep any headings brief; structured meta (meta.shape) is the contract."
   );
 
   lines.push("Evidence (when provided):");
@@ -65,12 +65,12 @@ export function buildSpineV1OutputContract(): string {
 
   lines.push("Example OutputEnvelope (with evidence):");
   lines.push(
-    '{"assistant_text":"Receipt: ...\\nRelease: ...\\nNext: ...\\nAssumption: ...\\nQuestion: ...?","meta":{"shape":{"arc":"...","active":["..."],"parked":["..."],"decisions":["..."],"next":["..."]},"affect_signal":{"label":"insight","intensity":0.82,"confidence":0.76},"claims":[{"claim_id":"cl-1","claim_text":"...","evidence_refs":[{"evidence_id":"ev-001","span_id":"sp-001"}]}]}}'
+    '{"assistant_text":"Here’s a concise response tailored to the user’s request.","meta":{"shape":{"arc":"...","active":["..."],"parked":["..."],"decisions":["..."],"next":["..."]},"affect_signal":{"label":"insight","intensity":0.82,"confidence":0.76},"claims":[{"claim_id":"cl-1","claim_text":"...","evidence_refs":[{"evidence_id":"ev-001","span_id":"sp-001"}]}]}}'
   );
 
   lines.push("Example OutputEnvelope (no evidence):");
   lines.push(
-    '{"assistant_text":"Receipt: ...\\nRelease: ...\\nNext: ...\\nAssumption: ...\\nQuestion: ...?","meta":{"shape":{"arc":"...","active":["..."],"parked":["..."],"decisions":["..."],"next":["..."]},"affect_signal":{"label":"neutral","intensity":0.2,"confidence":0.4}}}'
+    '{"assistant_text":"Here’s a concise response tailored to the user’s request.","meta":{"shape":{"arc":"...","active":["..."],"parked":["..."],"decisions":["..."],"next":["..."]},"affect_signal":{"label":"neutral","intensity":0.2,"confidence":0.4}}}'
   );
 
   return lines.join("\n");

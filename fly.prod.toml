@@ -1,10 +1,13 @@
 app = "solserver-prod"
 primary_region = "sjc"
 
+[processes]
+  app = "bash scripts/run-web-worker.sh"
+
 [env]
   SOL_ENV = "prod"
   LLM_PROVIDER = "openai"
-  OPENAI_MODEL = "gpt-5-nano"
+  OPENAI_MODEL = "gpt-5-mini"
   CONTROL_PLANE_DB_PATH = "/data/control_plane.db"
   # Keep strict topology validation on for production deployments.
   TOPOLOGY_GUARD_STRICT = "true"
@@ -34,5 +37,5 @@ primary_region = "sjc"
     timeout = "2s"
 
 [[mounts]]
-  source = "solserver_prod_data"
+  source = "solserver_data"
   destination = "/data"

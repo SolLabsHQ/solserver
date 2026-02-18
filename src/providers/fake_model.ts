@@ -77,7 +77,7 @@ function proposeMementoFromPrompt(promptText: string): ThreadMementoDraft | null
 
   const arc =
     userLower.includes("solserver") || userLower.includes("control plane")
-      ? "SolServer v0 build"
+      ? "Sol v0 build"
       : "General chat";
 
   const active = user ? [user] : [];
