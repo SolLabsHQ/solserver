@@ -23,3 +23,7 @@ docs/pr/**/receipts/
 
 # SQLite database
 data/
+
+# python
+__pycache__/
+*.pyc

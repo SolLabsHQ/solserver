@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "epic": "SOLM-EPIC-042",
+  "generated_at": "2026-02-19T21:35:10Z",
+  "infra_repo": "SolLabsHQ/infra-docs",
+  "infra_sha": "dae793fa4a9f601abc4d9fea1fd3a1f5e35504f9",
+  "canonical_files": [
+    {
+      "path": "decisions/ADR-031-threadmemento-v0.2-breakpointengine-context-thread-memento-peak-guardrail.md",
+      "sha256": "02c366500278f7202aba8a70a8ac8517d30cb308e7b0e145e5f44637b1a0384b"
+    },
+    {
+      "path": "decisions/ADR-032-assistant-markdown-textual-final-only-fence-safety-image-stripping.md",
+      "sha256": "b811e9902e047d2a26dc586ed88c2c0d84f7d94313020d27aa6b0faf8804d63e"
+    },
+    {
+      "path": "schema/v0/thread_memento.schema.json",
+      "sha256": "42f56d18691a30ae13d26dce650c9332b122e616844a12b48ba59b86c791c799"
+    },
+    {
+      "path": "schema/v0/api-contracts.md",
+      "sha256": "31602d3c99f81c699e5b917d15938a76ab69ba8da069cb4526cbe1205ea0507a"
+    },
+    {
+      "path": "architecture/solserver/message-processing-gates-v0.md",
+      "sha256": "436ab1a7233f3332d1bc97fad07b2baafe5adcdb9f1b6ca5362ef673f162e505"
+    },
+    {
+      "path": "architecture/diagrams/solmobile/transmission.md",
+      "sha256": "7202b49e3970c8ab423adfbbca6faabd17b819b209342a6f39c10c1677ffdbfc"
+    }
+  ],
+  "generator": {
+    "name": "scaffold_pr_packets.py",
+    "version": "dae793f"
+  }
+}
