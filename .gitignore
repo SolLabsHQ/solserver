@@ -27,3 +27,8 @@ data/
 # python
 __pycache__/
 *.pyc
+
+# local workspace artifacts
+.codex/
+.cursor/
+.vscode/
