@@ -443,6 +443,7 @@ export async function retrieveContext(args: {
   packetType: string;
   message: string;
   threadContextMode?: "off" | "auto";
+  requestThreadMemento?: ThreadMementoLatestInternal | null;
 }): Promise<RetrievalItem[]> {
   // v0.1: packetType/message are not used, but we keep them in the signature
   // so retrieval can evolve without touching callers.
@@ -460,7 +461,7 @@ export async function retrieveContext(args: {
   }
 
   if (args.threadContextMode !== "off") {
-    const latest = getThreadMementoLatestCached(args.threadId);
+    const latest = args.requestThreadMemento ?? getThreadMementoLatestCached(args.threadId);
     if (latest) {
       items.push({
         id: latest.mementoId,

@@ -16,6 +16,12 @@ import {
   type ThreadMementoLatestInternal,
   type ThreadMementoLatest,
 } from "./retrieval";
+import {
+  decideBreakpointAction,
+  shouldFreezeSummaryAtPeak,
+  type BreakpointSignalKind,
+  type BreakpointDecision,
+} from "./breakpoint_engine";
 import { postOutputLinter, type PostLinterViolation, type PostLinterBlockResult, type DriverBlockEnforcementMode } from "../gates/post_linter";
 import { runEvidenceIntake } from "../gates/evidence_intake";
 import { EvidenceValidationError } from "../gates/evidence_validation_error";
@@ -46,7 +52,13 @@ import {
   OutputEnvelopeV0MinSchema,
   type OutputEnvelope,
 } from "../contracts/output_envelope";
-import type { PacketInput, ModeDecision, NotificationPolicy, ThreadContextMode } from "../contracts/chat";
+import type {
+  PacketInput,
+  ModeDecision,
+  NotificationPolicy,
+  ThreadContextMode,
+  ThreadMementoV02,
+} from "../contracts/chat";
 import { classifyJournalOffer, type MoodSignal } from "../memory/journal_offer_classifier";
 import { buildSSEEnvelope, buildTransmissionSubject, sseHub } from "../sse/sse_hub";
 import { computeLatticeEmbedding } from "../lattice/embedding";
@@ -234,6 +246,59 @@ function formatThreadMementoResponse(memento: any | null) {
     ...(mementoId ? { id: mementoId } : {}),
     ...(createdAt ? { createdAt } : {}),
   };
+}
+
+function toInternalLatestFromRequestMemento(
+  memento: ThreadMementoV02
+): ThreadMementoLatestInternal {
+  const nowIso = new Date().toISOString();
+  const safeUpdatedAt = memento.affect?.rollup?.updatedAt ?? nowIso;
+  const safePoints = (memento.affect?.points ?? []).slice(-5).map((point) => ({
+    endMessageId: point.endMessageId,
+    label: point.label,
+    intensity: point.intensity,
+    confidence: point.confidence,
+    source: point.source === "sentinel" ? "server" : point.source,
+    ts: safeUpdatedAt,
+  }));
+
+  return {
+    mementoId: memento.mementoId,
+    threadId: memento.threadId,
+    createdTs: memento.createdTs,
+    updatedAt: safeUpdatedAt,
+    // Keep internal storage compatibility; request contract still validates v0.2 at ingress.
+    version: "memento-v0.1",
+    arc: memento.arc,
+    active: [...memento.active],
+    parked: [...memento.parked],
+    decisions: [...memento.decisions],
+    next: [...memento.next],
+    affect: {
+      points: safePoints,
+      rollup: {
+        phase: memento.affect.rollup.phase,
+        intensityBucket: memento.affect.rollup.intensityBucket,
+        updatedAt: safeUpdatedAt,
+      },
+    },
+  };
+}
+
+function resolveRequestThreadMemento(packet: PacketInput): ThreadMementoLatestInternal | null {
+  const requestMemento = packet.context?.thread_memento;
+  if (!requestMemento) return null;
+  if (requestMemento.threadId !== packet.threadId) return null;
+  return toInternalLatestFromRequestMemento(requestMemento);
+}
+
+function extractBreakpointSignalKinds(packet: PacketInput): BreakpointSignalKind[] {
+  const items = packet.context?.thread_memento?.signals?.items ?? [];
+  const kinds: BreakpointSignalKind[] = [];
+  for (const item of items) {
+    kinds.push(item.kind);
+  }
+  return kinds;
 }
 
 export function resolveSafetyIsUrgent(args: {
@@ -429,6 +494,8 @@ async function updateThreadMementoLatestFromEnvelope(args: {
   transmission: Transmission;
   store: ControlPlaneStore;
   threadContextMode: ThreadContextMode;
+  requestThreadMemento?: ThreadMementoLatestInternal | null;
+  breakpointDecision: BreakpointDecision;
 }): Promise<{
   latest: ThreadMementoLatestInternal | null;
   affectSignal: NormalizedAffectSignal | null;
@@ -443,7 +510,7 @@ async function updateThreadMementoLatestFromEnvelope(args: {
 
   const nowIso = new Date().toISOString();
   const shape = parseShape(args.envelope.meta?.shape);
-  const previous = getThreadMementoLatestCached(args.packet.threadId);
+  const previous = args.requestThreadMemento ?? getThreadMementoLatestCached(args.packet.threadId);
   const baseAffect = previous?.affect ?? {
     points: [],
     rollup: {
@@ -453,7 +520,13 @@ async function updateThreadMementoLatestFromEnvelope(args: {
     },
   };
 
-  const nextShape = shape
+  const freezeSummary = shouldFreezeSummaryAtPeak({
+    phase: previous?.affect?.rollup?.phase,
+    intensityBucket: previous?.affect?.rollup?.intensityBucket,
+    decision: args.breakpointDecision,
+  });
+
+  const nextShape = shape && !freezeSummary
     ? {
         arc: shape.arc,
         active: [...shape.active],
@@ -1906,9 +1979,10 @@ export async function runOrchestrationPipeline(args: {
   let latticeDbMs = 0;
 
   const threadContextMode = resolveThreadContextMode(packet);
+  const requestThreadMemento = resolveRequestThreadMemento(packet);
   if (threadContextMode === "auto") {
     const cachedLatest = getThreadMementoLatestCached(packet.threadId);
-    if (!cachedLatest) {
+    if (!cachedLatest && !requestThreadMemento) {
       const persisted = await store.getThreadMementoLatest({ threadId: packet.threadId });
       if (persisted) {
         setThreadMementoLatestCached(persisted as ThreadMementoLatestInternal);
@@ -1917,11 +1991,38 @@ export async function runOrchestrationPipeline(args: {
     }
   }
 
+  const baselineThreadMemento = requestThreadMemento ?? getThreadMementoLatestCached(packet.threadId);
+  const breakpointDecision = decideBreakpointAction({
+    message: packet.message,
+    signalKinds: extractBreakpointSignalKinds(packet),
+  });
+  const peakGuardrailActive = shouldFreezeSummaryAtPeak({
+    phase: baselineThreadMemento?.affect?.rollup?.phase,
+    intensityBucket: baselineThreadMemento?.affect?.rollup?.intensityBucket,
+    decision: breakpointDecision,
+  });
+
+  await appendTrace({
+    traceRunId: traceRun.id,
+    transmissionId: transmission.id,
+    actor: "solserver",
+    phase: "breakpoint",
+    status: "completed",
+    summary: `Breakpoint decision: ${breakpointDecision.toUpperCase()}`,
+    metadata: {
+      kind: "breakpoint_engine",
+      decision: breakpointDecision,
+      peakGuardrailActive,
+      source: requestThreadMemento ? "request_context.thread_memento" : "stored_latest",
+    },
+  });
+
   const baseRetrievalItems = await retrieveContext({
     threadId: packet.threadId,
     packetType: packet.packetType,
     message: packet.message,
     threadContextMode,
+    requestThreadMemento,
   });
 
   const MAX_MEMORIES = 6;
@@ -2592,6 +2693,8 @@ export async function runOrchestrationPipeline(args: {
               transmission,
               store,
               threadContextMode,
+              requestThreadMemento,
+              breakpointDecision,
             });
 
             await store.appendDeliveryAttempt({
@@ -2869,6 +2972,8 @@ export async function runOrchestrationPipeline(args: {
               transmission,
               store,
               threadContextMode,
+              requestThreadMemento,
+              breakpointDecision,
             });
 
             await store.appendDeliveryAttempt({
@@ -3631,6 +3736,8 @@ export async function runOrchestrationPipeline(args: {
     transmission,
     store,
     threadContextMode,
+    requestThreadMemento,
+    breakpointDecision,
   });
   threadMemento = mementoUpdate.latest ? sanitizeThreadMementoLatest(mementoUpdate.latest) : null;
 
