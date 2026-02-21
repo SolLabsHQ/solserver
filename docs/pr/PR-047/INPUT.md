@@ -1,6 +1,17 @@
-# INPUT — PR-042 — v0 Production Launch & TestFlight (v0.5)
+# INPUT — PR-047 — EPIC-042 thread_memento + BreakpointEngine guardrails (v0.5)
 
 Use this packet with `AGENTPACK.md` for runloop execution and receipts collection.
+
+## Why
+- Bring solserver into SOLM-EPIC-042 contract compliance for request-scoped `context.thread_memento` handling.
+- Add breakpoint-based guardrails so peak/high threads preserve summary stability unless a `must` breakpoint is reached.
+- Maintain assistant markdown safety expectations with fence linter checks aligned to ADR-032.
+
+## What changed
+- `/v1/chat` request contract accepts `context.thread_memento` (v0.2) and applies request-over-stored precedence.
+- BreakpointEngine behavior (`must|should|skip`) is integrated into orchestration and trace output.
+- Peak guardrail behavior freezes summary fields unless breakpoint decision is `must`.
+- Fence linter coverage is part of packet verification evidence.
 
 <!-- BEGIN GENERATED: canonical-spec-anchor -->
 ## Canonical Spec Anchor (infra-docs)

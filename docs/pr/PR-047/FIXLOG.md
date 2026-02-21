@@ -144,3 +144,51 @@ Final gate results:
 - verify unit rc: 0
 - verify lint rc: 0
 - verify integration rc: 0
+### 2026-02-20 16:53 — Builder gates run
+
+- unit: ``pnpm run test``
+- lint: ``pnpm run build``
+- integration: ``pnpm run test``
+
+Results:
+- unit rc: 127
+- lint rc: 127
+- integration rc: 127
+
+Receipts:
+- `receipts/unit.log`
+- `receipts/lint.log`
+- `receipts/integration.log`
+
+### 2026-02-20 16:54 — Builder gates run
+
+- unit: `pnpm run test`
+- lint: `pnpm run build`
+- integration: `pnpm run test`
+
+Results:
+- unit rc: 0
+- lint rc: 0
+- integration rc: 0
+
+Receipts:
+- `receipts/unit.log`
+- `receipts/lint.log`
+- `receipts/integration.log`
+
+## Verifier Report (2026-02-20 16:55)
+- Status: PASS
+- Commands run:
+- unit: `pnpm run test`
+- lint: `pnpm run build`
+- integration: `pnpm run test`
+
+- Results:
+- verify unit rc: 0
+- verify lint rc: 0
+- verify integration rc: 0
+
+- Checklist gaps / notes:
+No gaps detected.
+
+
