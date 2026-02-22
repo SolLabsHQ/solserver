@@ -139,6 +139,37 @@ describe("OutputEnvelope v0-min", () => {
     expect(body.outputEnvelope).toBeUndefined();
   });
 
+  it("accepts ghostType/metaVersion and normalizes ghost metadata", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": JSON.stringify({
+          assistant_text: "Ghost memory draft",
+          meta: {
+            display_hint: "ghost_card",
+            ghostType: "memory",
+            metaVersion: "v1",
+            memory_id: "mem-1",
+            rigor_level: "normal",
+            snippet: "Some memory snippet",
+            fact_null: false,
+          },
+        }),
+      },
+      payload: {
+        packetType: "chat",
+        threadId: "thread-output-envelope-ghost-002",
+        message: "Test message",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.outputEnvelope).toBeDefined();
+    expect(body.outputEnvelope.meta.meta_version).toBe("v1");
+  });
+
   it("drops unknown meta keys from the response payload", async () => {
     const response = await app.inject({
       method: "POST",
