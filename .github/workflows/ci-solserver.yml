@@ -24,6 +24,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Verify PR packet spec lock (if present)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/verify_spec_lock.sh
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:

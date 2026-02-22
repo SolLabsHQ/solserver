@@ -23,3 +23,12 @@ docs/pr/**/receipts/
 
 # SQLite database
 data/
+
+# python
+__pycache__/
+*.pyc
+
+# local workspace artifacts
+.codex/
+.cursor/
+.vscode/

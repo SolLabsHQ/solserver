@@ -24,6 +24,67 @@ export const ThreadContextMode = z.enum(["off", "auto"]);
 
 export type ThreadContextMode = z.infer<typeof ThreadContextMode>;
 
+const ThreadMementoSignalKind = z.enum([
+  "decision_made",
+  "scope_changed",
+  "pivot",
+  "answer_provided",
+  "ack_only",
+  "open_loop_created",
+  "open_loop_resolved",
+  "risk_or_conflict",
+]);
+
+const ThreadMementoSignalItem = z.object({
+  endMessageId: z.string().min(1),
+  kind: ThreadMementoSignalKind,
+  confidence: z.enum(["low", "med", "high"]),
+  source: z.enum(["server", "model"]),
+  summary: z.string().max(180).optional(),
+}).strict();
+
+const ThreadMementoSignals = z.object({
+  updatedAt: z.string().datetime(),
+  items: z.array(ThreadMementoSignalItem).max(8).default([]),
+}).strict();
+
+const ThreadMementoAffectPoint = z.object({
+  endMessageId: z.string().min(1),
+  label: z.string().min(1).max(64),
+  intensity: z.number().min(0).max(1),
+  confidence: z.enum(["low", "med", "high"]),
+  source: z.enum(["sentinel", "device_hint", "server", "model"]),
+}).strict();
+
+const ThreadMementoAffect = z.object({
+  points: z.array(ThreadMementoAffectPoint).max(5),
+  rollup: z.object({
+    phase: z.enum(["rising", "peak", "downshift", "settled"]),
+    intensityBucket: z.enum(["low", "med", "high"]),
+    updatedAt: z.string().datetime(),
+  }).strict(),
+}).strict();
+
+export const ThreadMementoV02 = z.object({
+  mementoId: z.string().min(1),
+  threadId: z.string().min(1),
+  createdTs: z.string().datetime(),
+  version: z.literal("memento-v0.2"),
+  arc: z.string().min(1).max(200),
+  active: z.array(z.string().min(1).max(200)),
+  parked: z.array(z.string().min(1).max(200)),
+  decisions: z.array(z.string().min(1).max(200)),
+  next: z.array(z.string().min(1).max(200)),
+  affect: ThreadMementoAffect,
+  signals: ThreadMementoSignals.optional(),
+}).strict();
+
+export type ThreadMementoV02 = z.infer<typeof ThreadMementoV02>;
+
+const PacketContext = z.object({
+  thread_memento: ThreadMementoV02.optional(),
+}).strict();
+
 // Driver Block reference (for system defaults)
 export const DriverBlockRef = z.object({
   id: z.string().min(1),
@@ -122,6 +183,7 @@ export const PacketInput = z.object({
   // Evidence (v0) - typed validation
   evidence: Evidence.optional(),
   thread_context_mode: ThreadContextMode.optional(),
+  context: PacketContext.optional(),
   meta: z.record(z.string(), z.any()).optional(),
 }).strict();
 
