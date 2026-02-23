@@ -5,13 +5,16 @@ export function buildSpineV1OutputContract(): string {
   lines.push("- Return ONLY a JSON object matching OutputEnvelope.");
   lines.push("- Required field: assistant_text (string).");
   lines.push(
-    "- meta.shape (optional but preferred): provide arc/active/parked/decisions/next. If uncertain, provide best-effort values rather than omitting."
+    "- meta.shape (required for context carry): provide arc/active/parked/decisions/next. If uncertain, provide best-effort values rather than omitting."
   );
   lines.push(
     "- meta.affect_signal (required): single-message affect for the CURRENT user message only (label, intensity 0..1, confidence)."
   );
   lines.push(
     "- meta.affect_signal.label must be one of: neutral | insight | decision | gratitude | overwhelm. If none fit, use neutral.  If confidence is low, prefer neutral."
+  );
+  lines.push(
+    "- When the user asks to decide/lock, ensure meta.shape.decisions and meta.shape.next are non-empty best-effort."
   );
   lines.push("- Do NOT invent message IDs, spans, or cross-thread state.");
 

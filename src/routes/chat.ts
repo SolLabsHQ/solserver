@@ -15,10 +15,12 @@ import {
 import { buildSSEEnvelope, buildTransmissionSubject, sseHub } from "../sse/sse_hub";
 import {
   getLatestThreadMemento,
+  getThreadMementoLatestCached,
   putThreadMemento,
   acceptThreadMemento,
   declineThreadMemento,
   revokeThreadMemento,
+  setThreadMementoLatestCached,
   sanitizeThreadMementoLatest,
 } from "../control-plane/retrieval";
 import type { ControlPlaneStore } from "../store/control_plane_store";
@@ -41,8 +43,16 @@ export async function chatRoutes(
   };
 
   const loadThreadMementoLatest = async (threadId: string) => {
+    const cached = getThreadMementoLatestCached(threadId);
+    if (cached) {
+      return formatThreadMementoResponse(cached);
+    }
+
     const record = await store.getThreadMementoLatest({ threadId });
-    const latest = record ? sanitizeThreadMementoLatest(record as any) : null;
+    if (!record) return null;
+
+    const latest = sanitizeThreadMementoLatest(record as any);
+    setThreadMementoLatestCached(latest as any);
     return formatThreadMementoResponse(latest);
   };
 
@@ -424,7 +434,10 @@ export async function chatRoutes(
     const includeDraftRaw = String((req.query as any)?.includeDraft ?? "").toLowerCase();
     const includeDraft = includeDraftRaw === "1" || includeDraftRaw === "true";
 
-    const memento = getLatestThreadMemento(threadId, { includeDraft });
+    let memento = await loadThreadMementoLatest(threadId);
+    if (!memento && includeDraft) {
+      memento = formatThreadMementoResponse(getLatestThreadMemento(threadId, { includeDraft: true }));
+    }
 
     req.log.debug(
       {
