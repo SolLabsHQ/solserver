@@ -285,11 +285,40 @@ function toInternalLatestFromRequestMemento(
   };
 }
 
-function resolveRequestThreadMemento(packet: PacketInput): ThreadMementoLatestInternal | null {
+type RequestThreadMementoSource =
+  | "request_context.thread_memento_ref"
+  | "request_context.thread_memento"
+  | null;
+
+function resolveRequestThreadMemento(packet: PacketInput, args?: {
+  cachedLatest?: ThreadMementoLatestInternal | null;
+}): {
+  memento: ThreadMementoLatestInternal | null;
+  source: RequestThreadMementoSource;
+} {
+  const requestRef = packet.context?.thread_memento_ref;
+  if (requestRef) {
+    const targetThreadId = requestRef.threadId ?? packet.threadId;
+    const latest = args?.cachedLatest ?? getThreadMementoLatestCached(packet.threadId);
+    if (targetThreadId === packet.threadId && latest && latest.mementoId === requestRef.mementoId) {
+      return {
+        memento: latest,
+        source: "request_context.thread_memento_ref",
+      };
+    }
+  }
+
   const requestMemento = packet.context?.thread_memento;
-  if (!requestMemento) return null;
-  if (requestMemento.threadId !== packet.threadId) return null;
-  return toInternalLatestFromRequestMemento(requestMemento);
+  if (!requestMemento) {
+    return { memento: null, source: null };
+  }
+  if (requestMemento.threadId !== packet.threadId) {
+    return { memento: null, source: null };
+  }
+  return {
+    memento: toInternalLatestFromRequestMemento(requestMemento),
+    source: "request_context.thread_memento",
+  };
 }
 
 function extractBreakpointSignalKinds(packet: PacketInput): BreakpointSignalKind[] {
@@ -1939,7 +1968,7 @@ export async function runOrchestrationPipeline(args: {
         affect_signal_confidence: args.qualityAfter.affectSignalConfidence,
         shape_source: args.shapeSource,
         resolved_by: args.resolvedBy,
-        request_memento_source: requestThreadMemento ? "request_context.thread_memento" : "stored_latest",
+        request_memento_source: requestThreadMementoSource ?? "stored_latest",
         effective_decisions_count: args.effectiveDecisionsCount,
         issues_before: args.qualityBefore.issues,
         issues_after: args.qualityAfter.issues,
@@ -1964,7 +1993,7 @@ export async function runOrchestrationPipeline(args: {
         affect_signal_confidence: args.qualityAfter.affectSignalConfidence,
         shape_source: args.shapeSource,
         resolved_by: args.resolvedBy,
-        request_memento_source: requestThreadMemento ? "request_context.thread_memento" : "stored_latest",
+        request_memento_source: requestThreadMementoSource ?? "stored_latest",
         issues_before: args.qualityBefore.issues,
         issues_after: args.qualityAfter.issues,
         effective_decisions_count: args.effectiveDecisionsCount,
@@ -2289,10 +2318,9 @@ export async function runOrchestrationPipeline(args: {
   let latticeDbMs = 0;
 
   const threadContextMode = resolveThreadContextMode(packet);
-  const requestThreadMemento = resolveRequestThreadMemento(packet);
   if (threadContextMode === "auto") {
     const cachedLatest = getThreadMementoLatestCached(packet.threadId);
-    if (!cachedLatest && !requestThreadMemento) {
+    if (!cachedLatest) {
       const persisted = await store.getThreadMementoLatest({ threadId: packet.threadId });
       if (persisted) {
         setThreadMementoLatestCached(persisted as ThreadMementoLatestInternal);
@@ -2300,6 +2328,10 @@ export async function runOrchestrationPipeline(args: {
       }
     }
   }
+  const { memento: requestThreadMemento, source: requestThreadMementoSource } = resolveRequestThreadMemento(
+    packet,
+    { cachedLatest: getThreadMementoLatestCached(packet.threadId) }
+  );
 
   const baselineThreadMemento = requestThreadMemento ?? getThreadMementoLatestCached(packet.threadId);
   const breakpointDecision = decideBreakpointAction({
@@ -2323,7 +2355,7 @@ export async function runOrchestrationPipeline(args: {
       kind: "breakpoint_engine",
       decision: breakpointDecision,
       peakGuardrailActive,
-      source: requestThreadMemento ? "request_context.thread_memento" : "stored_latest",
+      source: requestThreadMementoSource ?? "stored_latest",
     },
   });
 

@@ -79,6 +79,18 @@ function makeRequestThreadMementoV02(args: {
   };
 }
 
+function makeRequestThreadMementoRef(args: {
+  mementoId: string;
+  threadId?: string;
+  createdTs?: string;
+}) {
+  return {
+    mementoId: args.mementoId,
+    ...(args.threadId ? { threadId: args.threadId } : {}),
+    ...(args.createdTs ? { createdTs: args.createdTs } : {}),
+  };
+}
+
 describe("ThreadMementoLatest", () => {
   let app: any;
   let store: MemoryControlPlaneStore;
@@ -164,6 +176,114 @@ describe("ThreadMementoLatest", () => {
     });
 
     expect(response.statusCode).toBe(200);
+  });
+
+  it("accepts context.thread_memento_ref on /v1/chat and resolves carry from latest", async () => {
+    const now = new Date().toISOString();
+    await store.upsertThreadMementoLatest({
+      memento: {
+        mementoId: "stored-ref-accept",
+        threadId: "t-context-ref-accept",
+        createdTs: now,
+        updatedAt: now,
+        version: "memento-v0.1",
+        arc: "Stored Arc",
+        active: ["Stored Active"],
+        parked: [],
+        decisions: ["Stored Decision"],
+        next: ["Stored Next"],
+        affect: {
+          points: [],
+          rollup: {
+            phase: "settled",
+            intensityBucket: "low",
+            updatedAt: now,
+          },
+        },
+      },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": JSON.stringify({
+          assistant_text: ASSISTANT_TEXT,
+        }),
+      },
+      payload: {
+        threadId: "t-context-ref-accept",
+        message: "Use reference carry.",
+        context: {
+          thread_memento_ref: makeRequestThreadMementoRef({
+            mementoId: "stored-ref-accept",
+            threadId: "t-context-ref-accept",
+            createdTs: now,
+          }),
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.threadMemento.id).toBe("stored-ref-accept");
+    expect(body.threadMemento.arc).toBe("Stored Arc");
+  });
+
+  it("prefers context.thread_memento_ref over context.thread_memento", async () => {
+    const now = new Date().toISOString();
+    await store.upsertThreadMementoLatest({
+      memento: {
+        mementoId: "stored-ref-precedence",
+        threadId: "t-context-ref-precedence",
+        createdTs: now,
+        updatedAt: now,
+        version: "memento-v0.1",
+        arc: "Stored Arc Ref",
+        active: ["Stored Active"],
+        parked: [],
+        decisions: ["Stored Decision"],
+        next: ["Stored Next"],
+        affect: {
+          points: [],
+          rollup: {
+            phase: "settled",
+            intensityBucket: "low",
+            updatedAt: now,
+          },
+        },
+      },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": JSON.stringify({
+          assistant_text: ASSISTANT_TEXT,
+        }),
+      },
+      payload: {
+        threadId: "t-context-ref-precedence",
+        message: "Prefer memento ref over legacy object.",
+        context: {
+          thread_memento_ref: makeRequestThreadMementoRef({
+            mementoId: "stored-ref-precedence",
+            threadId: "t-context-ref-precedence",
+            createdTs: now,
+          }),
+          thread_memento: makeRequestThreadMementoV02({
+            threadId: "t-context-ref-precedence",
+            arc: "Legacy Arc",
+          }),
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.threadMemento.arc).toBe("Stored Arc Ref");
+    expect(body.threadMemento.arc).not.toBe("Legacy Arc");
   });
 
   it("uses request context.thread_memento over stored latest", async () => {
@@ -450,6 +570,49 @@ describe("ThreadMementoLatest", () => {
     }
 
     expect(persistSpy.mock.calls.length).toBe(1);
+  });
+
+  it("/v1/memento latest aligns with /v1/chat carry source", async () => {
+    const chatResponse = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": buildEnvelope({
+          shape: {
+            arc: "Aligned Arc",
+            active: ["Aligned Active"],
+            parked: [],
+            decisions: ["Aligned Decision"],
+            next: ["Aligned Next"],
+          },
+          affect_signal: {
+            label: "insight",
+            intensity: 0.6,
+            confidence: 0.8,
+          },
+        }),
+      },
+      payload: {
+        threadId: "t-route-alignment",
+        message: "capture latest",
+        thread_context_mode: "auto",
+      },
+    });
+
+    expect(chatResponse.statusCode).toBe(200);
+    const chatBody = chatResponse.json();
+    const latestId = chatBody.threadMemento.id as string;
+    expect(typeof latestId).toBe("string");
+
+    const mementoResponse = await app.inject({
+      method: "GET",
+      url: "/v1/memento?threadId=t-route-alignment",
+    });
+
+    expect(mementoResponse.statusCode).toBe(200);
+    const mementoBody = mementoResponse.json();
+    expect(mementoBody.memento).toBeTruthy();
+    expect(mementoBody.memento.id).toBe(latestId);
   });
 
   it("emits memento_quality trace metadata on debug success", async () => {

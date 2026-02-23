@@ -50,3 +50,67 @@ Receipts:
 No gaps detected.
 
 
+### 2026-02-22 23:19 — Builder gates run
+
+- unit: `pnpm test -- test/thread_memento_latest.test.ts test/breakpoint_engine.test.ts test/restart_continuity.test.ts`
+- lint: `pnpm build`
+- integration: `pnpm test -- test/thread_memento_latest.test.ts test/breakpoint_engine.test.ts test/restart_continuity.test.ts`
+
+Results:
+- unit rc: 0
+- lint rc: 0
+- integration rc: 0
+
+Receipts:
+- `receipts/unit.log`
+- `receipts/lint.log`
+- `receipts/integration.log`
+
+## Verifier Report (2026-02-22 23:20)
+- Status: PASS
+- Commands run:
+- unit: `pnpm test -- test/thread_memento_latest.test.ts test/breakpoint_engine.test.ts test/restart_continuity.test.ts`
+- lint: `pnpm build`
+- integration: `pnpm test -- test/thread_memento_latest.test.ts test/breakpoint_engine.test.ts test/restart_continuity.test.ts`
+
+- Results:
+- verify unit rc: 0
+- verify lint rc: 0
+- verify integration rc: 0
+
+- Checklist gaps / notes:
+No gaps detected.
+
+
+### 2026-02-22 23:21 — Builder gates run
+
+- unit: `pnpm test -- test/thread_memento_latest.test.ts test/breakpoint_engine.test.ts test/restart_continuity.test.ts`
+- lint: `pnpm build`
+- integration: `pnpm test -- test/thread_memento_latest.test.ts test/breakpoint_engine.test.ts test/restart_continuity.test.ts`
+
+Results:
+- unit rc: 0
+- lint rc: 0
+- integration rc: 0
+
+Receipts:
+- `receipts/unit.log`
+- `receipts/lint.log`
+- `receipts/integration.log`
+
+## Verifier Report (2026-02-22 23:21)
+- Status: PASS
+- Commands run:
+- unit: `pnpm test -- test/thread_memento_latest.test.ts test/breakpoint_engine.test.ts test/restart_continuity.test.ts`
+- lint: `pnpm build`
+- integration: `pnpm test -- test/thread_memento_latest.test.ts test/breakpoint_engine.test.ts test/restart_continuity.test.ts`
+
+- Results:
+- verify unit rc: 0
+- verify lint rc: 0
+- verify integration rc: 0
+
+- Checklist gaps / notes:
+No gaps detected.
+
+

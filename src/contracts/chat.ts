@@ -81,7 +81,16 @@ export const ThreadMementoV02 = z.object({
 
 export type ThreadMementoV02 = z.infer<typeof ThreadMementoV02>;
 
+export const ThreadMementoRef = z.object({
+  mementoId: z.string().min(1),
+  threadId: z.string().min(1).optional(),
+  createdTs: z.string().datetime().optional(),
+}).strict();
+
+export type ThreadMementoRef = z.infer<typeof ThreadMementoRef>;
+
 const PacketContext = z.object({
+  thread_memento_ref: ThreadMementoRef.optional(),
   thread_memento: ThreadMementoV02.optional(),
 }).strict();
 
