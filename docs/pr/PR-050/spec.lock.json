@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "epic": "SOLM-EPIC-044",
+  "generated_at": "2026-02-23T06:29:54Z",
+  "infra_repo": "SolLabsHQ/infra-docs",
+  "infra_sha": "99fd8ada2542b57e2f02731492b8b16961a45148",
+  "canonical_files": [
+    {
+      "path": "decisions/ADR-031-threadmemento-v0.2-breakpointengine-context-thread-memento-peak-guardrail.md",
+      "sha256": "0a3651a9fd94f14ef57fec603f87ac95f8dc18781a6fe607cee6aeaa1fe647cb"
+    }
+  ],
+  "generator": {
+    "name": "scaffold_pr_packets.py",
+    "version": "99fd8ad"
+  }
+}
