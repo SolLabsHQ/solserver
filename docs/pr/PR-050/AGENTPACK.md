@@ -4,10 +4,10 @@
 ## Canonical Spec Anchor (infra-docs)
 - Epic: SOLM-EPIC-044
 - Canonical repo: SolLabsHQ/infra-docs
-- Canonical commit: 99fd8ada2542b57e2f02731492b8b16961a45148
+- Canonical commit: 5e79a954b240c2a27b03710119d7bf96e1842cf2
 - Canonical epic path: codex/epics/SOLM-EPIC-044/
 - Canonical files:
-  - decisions/ADR-031-threadmemento-v0.2-breakpointengine-context-thread-memento-peak-guardrail.md (https://github.com/SolLabsHQ/infra-docs/blob/99fd8ada2542b57e2f02731492b8b16961a45148/decisions/ADR-031-threadmemento-v0.2-breakpointengine-context-thread-memento-peak-guardrail.md)
+  - decisions/ADR-031-threadmemento-v0.2-breakpointengine-context-thread-memento-peak-guardrail.md (https://github.com/SolLabsHQ/infra-docs/blob/5e79a954b240c2a27b03710119d7bf96e1842cf2/decisions/ADR-031-threadmemento-v0.2-breakpointengine-context-thread-memento-peak-guardrail.md)
 Notes:
 - If you have a local checkout, set INFRA_DOCS_ROOT to verify locally.
 - Otherwise CI will verify via GitHub at the pinned commit.

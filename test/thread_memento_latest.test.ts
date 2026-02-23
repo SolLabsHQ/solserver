@@ -451,4 +451,254 @@ describe("ThreadMementoLatest", () => {
 
     expect(persistSpy.mock.calls.length).toBe(1);
   });
+
+  it("emits memento_quality trace metadata on debug success", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": buildEnvelope({
+          shape: {
+            arc: "Arc",
+            active: ["Active"],
+            parked: [],
+            decisions: [],
+            next: ["Next"],
+          },
+          affect_signal: {
+            label: "insight",
+            intensity: 0.7,
+            confidence: "high",
+          },
+        }),
+      },
+      payload: {
+        threadId: "t-quality-trace",
+        message: "Please help me decide.",
+        traceConfig: { level: "debug" },
+        thread_context_mode: "auto",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    const event = (body.trace?.events ?? []).find((evt: any) => evt.phase === "memento_quality");
+    expect(event).toBeTruthy();
+    expect(event.metadata?.shape_present).toBe(true);
+    expect(event.metadata?.shape_decisions_empty).toBe(true);
+    expect(event.metadata?.affect_signal_present).toBe(true);
+    expect(event.metadata?.affect_signal_label).toBe("insight");
+    expect(event.metadata?.request_memento_source).toBe("stored_latest");
+  });
+
+  it("repairs weak memento output with one-shot retry", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope-attempt-0": JSON.stringify({
+          assistant_text: "I can help with that decision.",
+        }),
+        "x-sol-test-output-envelope-attempt-1": buildEnvelope({
+          shape: {
+            arc: "Retry Arc",
+            active: ["Hotel choice"],
+            parked: [],
+            decisions: ["Stay near Kyoto Station"],
+            next: ["Lock the decision"],
+          },
+          affect_signal: {
+            label: "decision",
+            intensity: 0.92,
+            confidence: "high",
+          },
+        }),
+      },
+      payload: {
+        threadId: "t-quality-retry",
+        message: "Make a decision now: should I stay in Gion or near Kyoto Station?",
+        traceConfig: { level: "debug" },
+        thread_context_mode: "auto",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.threadMemento.arc).toBe("Retry Arc");
+    expect(body.threadMemento.decisions).toContain("Stay near Kyoto Station");
+    const event = (body.trace?.events ?? []).find((evt: any) => evt.phase === "memento_quality");
+    expect(event?.metadata?.resolved_by).toBe("retry");
+  });
+
+  it("falls back to deterministic decision extraction when retry remains weak", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope-attempt-0": JSON.stringify({
+          assistant_text: "Recommendation: stay near Kyoto Station for transit convenience.",
+        }),
+        "x-sol-test-output-envelope-attempt-1": JSON.stringify({
+          assistant_text: "Recommendation: stay near Kyoto Station for transit convenience.",
+        }),
+      },
+      payload: {
+        threadId: "t-quality-fallback",
+        message: "Lock that decision and list what is still undecided.",
+        traceConfig: { level: "debug" },
+        thread_context_mode: "auto",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.threadMemento.decisions.length).toBeGreaterThan(0);
+    const event = (body.trace?.events ?? []).find((evt: any) => evt.phase === "memento_quality");
+    expect(event?.metadata?.shape_source).toBe("fallback");
+    expect(event?.metadata?.resolved_by).toBe("fallback");
+  });
+
+  it("falls back when model shape exists but decisions are empty", async () => {
+    const weakShapeEnvelope = {
+      assistant_text: "Recommendation: stay near Kyoto Station for transit convenience.",
+      meta: {
+        shape: {
+          arc: "support",
+          active: [],
+          parked: [],
+          decisions: [],
+          next: [],
+        },
+      },
+    };
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope-attempt-0": JSON.stringify(weakShapeEnvelope),
+        "x-sol-test-output-envelope-attempt-1": JSON.stringify(weakShapeEnvelope),
+      },
+      payload: {
+        threadId: "t-quality-fallback-shape-empty",
+        message: "Make a decision now: should I stay in Gion or near Kyoto Station?",
+        traceConfig: { level: "debug" },
+        thread_context_mode: "auto",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.threadMemento.decisions).toContain("stay near Kyoto Station for transit convenience");
+    const event = (body.trace?.events ?? []).find((evt: any) => evt.phase === "memento_quality");
+    expect(event?.metadata?.shape_source).toBe("fallback");
+    expect(event?.metadata?.resolved_by).toBe("fallback");
+  });
+
+  it("preserves prior decisions when fallback extraction finds nothing", async () => {
+    const now = new Date().toISOString();
+    await store.upsertThreadMementoLatest({
+      memento: {
+        mementoId: "stored-t-preserve",
+        threadId: "t-preserve",
+        createdTs: now,
+        updatedAt: now,
+        version: "memento-v0.1",
+        arc: "Trip planning",
+        active: ["Hotels"],
+        parked: [],
+        decisions: ["Stay near Kyoto Station"],
+        next: ["Book by Friday"],
+        affect: {
+          points: [],
+          rollup: {
+            phase: "settled",
+            intensityBucket: "low",
+            updatedAt: now,
+          },
+        },
+      },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope-attempt-0": JSON.stringify({
+          assistant_text: "Thanks, noted.",
+        }),
+        "x-sol-test-output-envelope-attempt-1": JSON.stringify({
+          assistant_text: "Thanks, noted.",
+        }),
+      },
+      payload: {
+        threadId: "t-preserve",
+        message: "ok",
+        traceConfig: { level: "debug" },
+        thread_context_mode: "auto",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.threadMemento.decisions).toContain("Stay near Kyoto Station");
+  });
+
+  it("preserves prior decisions when model shape provides empty decisions", async () => {
+    const now = new Date().toISOString();
+    await store.upsertThreadMementoLatest({
+      memento: {
+        mementoId: "stored-t-preserve-empty-shape",
+        threadId: "t-preserve-empty-shape",
+        createdTs: now,
+        updatedAt: now,
+        version: "memento-v0.1",
+        arc: "Trip planning",
+        active: ["Hotels"],
+        parked: [],
+        decisions: ["Stay near Kyoto Station"],
+        next: ["Book by Friday"],
+        affect: {
+          points: [],
+          rollup: {
+            phase: "settled",
+            intensityBucket: "low",
+            updatedAt: now,
+          },
+        },
+      },
+    });
+
+    const weakShapeEnvelope = {
+      assistant_text: "Thanks, noted.",
+      meta: {
+        shape: {
+          arc: "support",
+          active: [],
+          parked: [],
+          decisions: [],
+          next: [],
+        },
+      },
+    };
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope-attempt-0": JSON.stringify(weakShapeEnvelope),
+        "x-sol-test-output-envelope-attempt-1": JSON.stringify(weakShapeEnvelope),
+      },
+      payload: {
+        threadId: "t-preserve-empty-shape",
+        message: "ok",
+        traceConfig: { level: "debug" },
+        thread_context_mode: "auto",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.threadMemento.decisions).toContain("Stay near Kyoto Station");
+  });
 });

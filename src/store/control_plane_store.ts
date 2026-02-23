@@ -216,6 +216,7 @@ export type TraceEventPhase =
   | "policy_engine"
   | "compose_request"
   | "model_call"
+  | "memento_quality"
   | "output_gates"
   | "render"
   | "breakpoint"

@@ -467,6 +467,98 @@ function parseShape(raw: unknown): OutputEnvelopeShape | null {
   return parsed.success ? parsed.data : null;
 }
 
+type MementoQualityIssue = "missing_shape" | "missing_affect_signal" | "shape_decisions_empty";
+type MementoShapeSource = "model" | "previous" | "fallback";
+type MementoQualityResolution = "none" | "retry" | "fallback";
+
+type MementoQualitySummary = {
+  shapePresent: boolean;
+  shapeDecisionsCount: number;
+  shapeDecisionsEmpty: boolean;
+  affectSignalPresent: boolean;
+  affectSignalLabel: string | null;
+  affectSignalIntensity: number | null;
+  affectSignalConfidence: string | null;
+  issues: MementoQualityIssue[];
+};
+
+function hasDecisionOrLockIntent(message: string): boolean {
+  const text = message.toLowerCase();
+  return /(?:\bdecid(?:e|ed|ing|ion)\b|\block\b|\bchoose\b|\bshould i\b)/.test(text);
+}
+
+function normalizeDecisionText(value: string): string {
+  return value
+    .replace(/\s+/g, " ")
+    .replace(/^[\s\-•:]+/, "")
+    .replace(/[.?!\s]+$/, "")
+    .trim();
+}
+
+function extractFallbackDecisionFromAssistant(assistantText: string): string | null {
+  const byLabel = assistantText.match(/(?:^|\n)\s*recommendation:\s*(.+?)(?:\n|$)/i);
+  if (byLabel?.[1]) {
+    const normalized = normalizeDecisionText(byLabel[1]);
+    return normalized || null;
+  }
+
+  const byDecision = assistantText.match(/(?:^|\n)\s*(?:decision|choose)\s*:\s*(.+?)(?:\n|$)/i);
+  if (byDecision?.[1]) {
+    const normalized = normalizeDecisionText(byDecision[1]);
+    return normalized || null;
+  }
+
+  return null;
+}
+
+function evaluateMementoQuality(envelope: OutputEnvelope): MementoQualitySummary {
+  const shapePresent = envelope.meta?.shape !== undefined;
+  const parsedShape = parseShape(envelope.meta?.shape);
+  const shapeDecisionsCount = parsedShape?.decisions.length ?? 0;
+  const shapeDecisionsEmpty = shapeDecisionsCount === 0;
+
+  const affectSignalPresent = envelope.meta?.affect_signal !== undefined;
+  const normalizedAffect = normalizeAffectSignal(envelope.meta?.affect_signal);
+  const rawAffect = envelope.meta?.affect_signal as Record<string, any> | undefined;
+
+  const issues: MementoQualityIssue[] = [];
+  if (!shapePresent) issues.push("missing_shape");
+  if (!affectSignalPresent || !normalizedAffect) issues.push("missing_affect_signal");
+  if (shapeDecisionsEmpty) issues.push("shape_decisions_empty");
+
+  return {
+    shapePresent,
+    shapeDecisionsCount,
+    shapeDecisionsEmpty,
+    affectSignalPresent,
+    affectSignalLabel:
+      normalizedAffect?.label
+      ?? (typeof rawAffect?.label === "string" ? rawAffect.label : null),
+    affectSignalIntensity:
+      normalizedAffect?.intensity
+      ?? (Number.isFinite(Number(rawAffect?.intensity)) ? Number(rawAffect?.intensity) : null),
+    affectSignalConfidence:
+      normalizedAffect?.confidence
+      ?? (typeof rawAffect?.confidence === "string" ? rawAffect.confidence : null),
+    issues,
+  };
+}
+
+function buildMementoRepairCorrection(args: { issues: MementoQualityIssue[]; decisionIntent: boolean }): string {
+  const lines = [
+    "Memento-quality correction:",
+    "- Return ONLY valid OutputEnvelope JSON.",
+    "- Include meta.shape with arc/active/parked/decisions/next (best-effort, non-empty arrays when known).",
+    "- Include meta.affect_signal for the current user turn.",
+  ];
+  if (args.decisionIntent) {
+    lines.push("- User requested a decision/lock action: ensure meta.shape.decisions and meta.shape.next are non-empty best-effort.");
+  }
+  lines.push(`- Prior issues: ${args.issues.join(", ") || "none"}.`);
+  lines.push("- Do not omit required memento context fields in this retry.");
+  return lines.join("\n");
+}
+
 const DEFAULT_THREAD_MEMENTO_SHAPE: OutputEnvelopeShape = {
   arc: "support",
   active: [],
@@ -500,12 +592,13 @@ async function updateThreadMementoLatestFromEnvelope(args: {
   latest: ThreadMementoLatestInternal | null;
   affectSignal: NormalizedAffectSignal | null;
   moodSignal: MoodSignal | null;
+  shapeSource: MementoShapeSource;
 }> {
   const affectSignal = normalizeAffectSignal(args.envelope.meta?.affect_signal);
   const moodSignal = toMoodSignal(affectSignal);
 
   if (args.threadContextMode === "off") {
-    return { latest: null, affectSignal, moodSignal };
+    return { latest: null, affectSignal, moodSignal, shapeSource: "previous" };
   }
 
   const nowIso = new Date().toISOString();
@@ -526,7 +619,7 @@ async function updateThreadMementoLatestFromEnvelope(args: {
     decision: args.breakpointDecision,
   });
 
-  const nextShape = shape && !freezeSummary
+  const modelShape = shape && !freezeSummary
     ? {
         arc: shape.arc,
         active: [...shape.active],
@@ -534,7 +627,36 @@ async function updateThreadMementoLatestFromEnvelope(args: {
         decisions: [...shape.decisions],
         next: [...shape.next],
       }
-    : bootstrapThreadMementoShape(previous);
+    : null;
+
+  let nextShape = modelShape ?? bootstrapThreadMementoShape(previous);
+  let shapeSource: MementoShapeSource = modelShape ? "model" : "previous";
+
+  if (modelShape && modelShape.decisions.length === 0 && (previous?.decisions.length ?? 0) > 0) {
+    nextShape = {
+      ...nextShape,
+      decisions: [...previous!.decisions],
+    };
+    shapeSource = "previous";
+  }
+
+  if (modelShape && modelShape.next.length === 0 && (previous?.next.length ?? 0) > 0) {
+    nextShape = {
+      ...nextShape,
+      next: [...previous!.next],
+    };
+  }
+
+  if (hasDecisionOrLockIntent(args.packet.message) && nextShape.decisions.length === 0) {
+    const fallbackDecision = extractFallbackDecisionFromAssistant(args.envelope.assistant_text);
+    if (fallbackDecision && !nextShape.decisions.includes(fallbackDecision)) {
+      nextShape = {
+        ...nextShape,
+        decisions: [...nextShape.decisions, fallbackDecision].slice(-5),
+      };
+      shapeSource = "fallback";
+    }
+  }
 
   let nextAffect = baseAffect;
   if (affectSignal) {
@@ -575,7 +697,7 @@ async function updateThreadMementoLatestFromEnvelope(args: {
     markThreadMementoLatestPersisted(next);
   }
 
-  return { latest: next, affectSignal, moodSignal };
+  return { latest: next, affectSignal, moodSignal, shapeSource };
 }
 
 type EnforcementFailureMetadata = {
@@ -588,6 +710,13 @@ type EnforcementFailureMetadata = {
 function getForcedTestProviderOutput(req: any, attempt: 0 | 1): string | undefined {
   if (process.env.NODE_ENV !== "test") return undefined;
   const headers = req?.headers ?? {};
+
+  const keyedEnvelope = attempt === 0
+    ? headers["x-sol-test-output-envelope-attempt-0"]
+    : headers["x-sol-test-output-envelope-attempt-1"];
+  const keyedEnvelopeRaw = String(keyedEnvelope ?? "").trim();
+  if (keyedEnvelopeRaw) return keyedEnvelopeRaw;
+
   const envelopeRaw = String(headers["x-sol-test-output-envelope"] ?? "").trim();
   if (envelopeRaw) return envelopeRaw;
 
@@ -604,8 +733,16 @@ function getForcedTestProviderOutput(req: any, attempt: 0 | 1): string | undefin
 function isDeterministicTestRetryEnabled(req: any): boolean {
   if (process.env.NODE_ENV !== "test") return false;
   const headers = req?.headers ?? {};
-  const attempt0 = String(headers["x-sol-test-output-attempt-0"] ?? "").trim();
-  const attempt1 = String(headers["x-sol-test-output-attempt-1"] ?? "").trim();
+  const attempt0 = String(
+    headers["x-sol-test-output-attempt-0"]
+    ?? headers["x-sol-test-output-envelope-attempt-0"]
+    ?? ""
+  ).trim();
+  const attempt1 = String(
+    headers["x-sol-test-output-attempt-1"]
+    ?? headers["x-sol-test-output-envelope-attempt-1"]
+    ?? ""
+  ).trim();
   return Boolean(attempt0 && attempt1);
 }
 
@@ -1662,6 +1799,179 @@ export async function runOrchestrationPipeline(args: {
     return { rawText, mementoDraft: meta.mementoDraft };
   };
 
+  const shouldAttemptMementoQualityRepair = (quality: MementoQualitySummary): boolean => {
+    if (threadContextMode !== "auto") return false;
+    if (quality.issues.includes("missing_shape")) return true;
+    if (quality.issues.includes("missing_affect_signal")) return true;
+    if (hasDecisionOrLockIntent(packet.message) && quality.shapeDecisionsEmpty) return true;
+    return false;
+  };
+
+  const maybeRepairMementoOutput = async (args: {
+    assistant: string;
+    envelope: OutputEnvelope;
+    promptPack: PromptPack;
+    forcedRawText?: string;
+    logger?: {
+      debug: (obj: any, msg?: string) => void;
+      info?: (obj: any, msg?: string) => void;
+      warn?: (obj: any, msg?: string) => void;
+      error?: (obj: any, msg?: string) => void;
+    };
+  }): Promise<{
+    assistant: string;
+    envelope: OutputEnvelope;
+    qualityBefore: MementoQualitySummary;
+    qualityAfter: MementoQualitySummary;
+    repairResolution: "none" | "retry";
+  }> => {
+    const qualityBefore = evaluateMementoQuality(args.envelope);
+    let assistantCandidate = args.assistant;
+    let envelopeCandidate = args.envelope;
+    let repairResolution: "none" | "retry" = "none";
+
+    if (!shouldAttemptMementoQualityRepair(qualityBefore)) {
+      return {
+        assistant: assistantCandidate,
+        envelope: envelopeCandidate,
+        qualityBefore,
+        qualityAfter: qualityBefore,
+        repairResolution,
+      };
+    }
+
+    const correctionText = buildMementoRepairCorrection({
+      issues: qualityBefore.issues,
+      decisionIntent: hasDecisionOrLockIntent(packet.message),
+    });
+    const repairPromptPack = withCorrectionSection(args.promptPack, correctionText);
+    const repairAttempt = await runModelAttempt({
+      attempt: 1,
+      promptPack: repairPromptPack,
+      modeLabel: modeDecision.modeLabel,
+      evidencePack,
+      forcedRawText: args.forcedRawText,
+      logger: args.logger,
+    });
+
+    const repairEnvelope = await parseOutputEnvelope({
+      rawText: repairAttempt.rawText,
+      attempt: 1,
+    });
+
+    if (repairEnvelope.ok) {
+      const repairLibrarian = await runLibrarianGate({
+        envelope: repairEnvelope.envelope,
+        attempt: 1,
+        evidencePack,
+      });
+
+      const repairEvidence = await runEvidenceOutputGates({
+        envelope: repairLibrarian,
+        attempt: 1,
+        evidencePack,
+        transmissionId: transmission.id,
+      });
+
+      if (repairEvidence.ok) {
+        const repairAssistant = repairEvidence.envelope.assistant_text;
+        const repairLint = postOutputLinter({
+          modeDecision,
+          content: repairAssistant,
+          driverBlocks: repairPromptPack.driverBlocks,
+          enforcementMode: postOutputLinterMode,
+        });
+
+        if (repairLint.ok) {
+          assistantCandidate = repairAssistant;
+          envelopeCandidate = normalizeOutputEnvelopeForResponse(repairEvidence.envelope);
+          repairResolution = "retry";
+        } else {
+          args.logger?.warn?.(
+            {
+              evt: "memento_quality.repair_lint_failed",
+              violationsCount: collectPostLinterViolations(repairLint).length,
+            },
+            "memento_quality.repair_lint_failed"
+          );
+        }
+      } else {
+        args.logger?.warn?.(
+          { evt: "memento_quality.repair_evidence_failed", code: repairEvidence.code },
+          "memento_quality.repair_evidence_failed"
+        );
+      }
+    } else {
+      args.logger?.warn?.(
+        { evt: "memento_quality.repair_output_invalid", reason: repairEnvelope.reason },
+        "memento_quality.repair_output_invalid"
+      );
+    }
+
+    return {
+      assistant: assistantCandidate,
+      envelope: envelopeCandidate,
+      qualityBefore,
+      qualityAfter: evaluateMementoQuality(envelopeCandidate),
+      repairResolution,
+    };
+  };
+
+  const appendMementoQualityTrace = async (args: {
+    qualityBefore: MementoQualitySummary;
+    qualityAfter: MementoQualitySummary;
+    shapeSource: MementoShapeSource;
+    resolvedBy: MementoQualityResolution;
+    effectiveDecisionsCount: number;
+    logger?: {
+      debug?: (obj: any, msg?: string) => void;
+    };
+  }) => {
+    if (traceLevel === "debug") {
+      args.logger?.debug?.({
+        evt: "memento_quality.summary",
+        shape_present: args.qualityAfter.shapePresent,
+        shape_decisions_count: args.qualityAfter.shapeDecisionsCount,
+        shape_decisions_empty: args.qualityAfter.shapeDecisionsEmpty,
+        affect_signal_present: args.qualityAfter.affectSignalPresent,
+        affect_signal_label: args.qualityAfter.affectSignalLabel,
+        affect_signal_intensity: args.qualityAfter.affectSignalIntensity,
+        affect_signal_confidence: args.qualityAfter.affectSignalConfidence,
+        shape_source: args.shapeSource,
+        resolved_by: args.resolvedBy,
+        request_memento_source: requestThreadMemento ? "request_context.thread_memento" : "stored_latest",
+        effective_decisions_count: args.effectiveDecisionsCount,
+        issues_before: args.qualityBefore.issues,
+        issues_after: args.qualityAfter.issues,
+      }, "memento_quality.summary");
+    }
+    if (traceLevel !== "debug") return;
+    await appendTrace({
+      traceRunId: traceRun.id,
+      transmissionId: transmission.id,
+      actor: "solserver",
+      phase: "memento_quality",
+      status: "completed",
+      summary: "Thread memento quality",
+      metadata: {
+        kind: "memento_quality",
+        shape_present: args.qualityAfter.shapePresent,
+        shape_decisions_count: args.qualityAfter.shapeDecisionsCount,
+        shape_decisions_empty: args.qualityAfter.shapeDecisionsEmpty,
+        affect_signal_present: args.qualityAfter.affectSignalPresent,
+        affect_signal_label: args.qualityAfter.affectSignalLabel,
+        affect_signal_intensity: args.qualityAfter.affectSignalIntensity,
+        affect_signal_confidence: args.qualityAfter.affectSignalConfidence,
+        shape_source: args.shapeSource,
+        resolved_by: args.resolvedBy,
+        request_memento_source: requestThreadMemento ? "request_context.thread_memento" : "stored_latest",
+        issues_before: args.qualityBefore.issues,
+        issues_after: args.qualityAfter.issues,
+        effective_decisions_count: args.effectiveDecisionsCount,
+      },
+    });
+  };
+
   // Route-scoped logger for control-plane tracing (keeps logs searchable).
   const log = baseLog.child({
     plane: "chat",
@@ -2687,27 +2997,46 @@ export async function runOrchestrationPipeline(args: {
           }
 
           if (lint0.ok) {
-            await updateThreadMementoLatestFromEnvelope({
-              packet,
+            const repairedMementoOutput = await maybeRepairMementoOutput({
+              assistant: assistant0,
               envelope: envelope0Normalized,
+              promptPack,
+              forcedRawText: attempt1Output,
+              logger: bgLog,
+            });
+            let mementoQualityResolution: MementoQualityResolution = repairedMementoOutput.repairResolution;
+            const mementoUpdate = await updateThreadMementoLatestFromEnvelope({
+              packet,
+              envelope: repairedMementoOutput.envelope,
               transmission,
               store,
               threadContextMode,
               requestThreadMemento,
               breakpointDecision,
             });
+            if (mementoUpdate.shapeSource === "fallback") {
+              mementoQualityResolution = "fallback";
+            }
+            await appendMementoQualityTrace({
+              qualityBefore: repairedMementoOutput.qualityBefore,
+              qualityAfter: repairedMementoOutput.qualityAfter,
+              shapeSource: mementoUpdate.shapeSource,
+              resolvedBy: mementoQualityResolution,
+              effectiveDecisionsCount: mementoUpdate.latest?.decisions.length ?? 0,
+              logger: bgLog,
+            });
 
             await store.appendDeliveryAttempt({
               transmissionId,
               provider: llmProvider,
               status: "succeeded",
-              outputChars: assistant0.length,
+              outputChars: repairedMementoOutput.assistant.length,
             });
 
             await store.recordUsage({
               transmissionId,
               inputChars: packet.message.length,
-              outputChars: assistant0.length,
+              outputChars: repairedMementoOutput.assistant.length,
             });
 
             await store.updateTransmissionStatus({
@@ -2715,7 +3044,7 @@ export async function runOrchestrationPipeline(args: {
               status: "completed",
             });
 
-            await store.setChatResult({ transmissionId, assistant: assistant0 });
+            await store.setChatResult({ transmissionId, assistant: repairedMementoOutput.assistant });
 
             emitAssistantFinalReady();
 
@@ -2724,7 +3053,10 @@ export async function runOrchestrationPipeline(args: {
               statusCode: 200,
               attemptsUsed: contractRetryUsed ? 2 : 1,
             }, "chat.async.completed");
-            bgLog.info({ status: "completed", outputChars: assistant0.length }, "delivery.completed_async");
+            bgLog.info(
+              { status: "completed", outputChars: repairedMementoOutput.assistant.length },
+              "delivery.completed_async"
+            );
             return;
           }
 
@@ -2966,27 +3298,46 @@ export async function runOrchestrationPipeline(args: {
           }
 
           if (lint1.ok) {
-            await updateThreadMementoLatestFromEnvelope({
-              packet,
+            const repairedMementoOutput = await maybeRepairMementoOutput({
+              assistant: assistant1,
               envelope: envelope1Normalized,
+              promptPack: promptPack1,
+              forcedRawText: attempt1Output,
+              logger: bgLog,
+            });
+            let mementoQualityResolution: MementoQualityResolution = repairedMementoOutput.repairResolution;
+            const mementoUpdate = await updateThreadMementoLatestFromEnvelope({
+              packet,
+              envelope: repairedMementoOutput.envelope,
               transmission,
               store,
               threadContextMode,
               requestThreadMemento,
               breakpointDecision,
             });
+            if (mementoUpdate.shapeSource === "fallback") {
+              mementoQualityResolution = "fallback";
+            }
+            await appendMementoQualityTrace({
+              qualityBefore: repairedMementoOutput.qualityBefore,
+              qualityAfter: repairedMementoOutput.qualityAfter,
+              shapeSource: mementoUpdate.shapeSource,
+              resolvedBy: mementoQualityResolution,
+              effectiveDecisionsCount: mementoUpdate.latest?.decisions.length ?? 0,
+              logger: bgLog,
+            });
 
             await store.appendDeliveryAttempt({
               transmissionId,
               provider: llmProvider,
               status: "succeeded",
-              outputChars: assistant1.length,
+              outputChars: repairedMementoOutput.assistant.length,
             });
 
             await store.recordUsage({
               transmissionId,
               inputChars: packet.message.length,
-              outputChars: assistant1.length,
+              outputChars: repairedMementoOutput.assistant.length,
             });
 
             await store.updateTransmissionStatus({
@@ -2994,12 +3345,15 @@ export async function runOrchestrationPipeline(args: {
               status: "completed",
             });
 
-            await store.setChatResult({ transmissionId, assistant: assistant1 });
+            await store.setChatResult({ transmissionId, assistant: repairedMementoOutput.assistant });
 
             emitAssistantFinalReady();
 
             bgLog.info({ evt: "chat.async.completed", statusCode: 200, attemptsUsed: 2 }, "chat.async.completed");
-            bgLog.info({ status: "completed", outputChars: assistant1.length }, "delivery.completed_async");
+            bgLog.info(
+              { status: "completed", outputChars: repairedMementoOutput.assistant.length },
+              "delivery.completed_async"
+            );
             return;
           }
 
@@ -3730,6 +4084,20 @@ export async function runOrchestrationPipeline(args: {
 
   modelTotalMs = Number(process.hrtime.bigint() - modelStartNs) / 1e6;
 
+  const repairedMementoOutput = await maybeRepairMementoOutput({
+    assistant,
+    envelope: outputEnvelope!,
+    promptPack,
+    forcedRawText: attempt1Output,
+    logger: log,
+  });
+  assistant = repairedMementoOutput.assistant;
+  outputEnvelope = repairedMementoOutput.envelope;
+
+  let mementoQualityResolution: MementoQualityResolution = repairedMementoOutput.repairResolution;
+  const mementoQualityBefore = repairedMementoOutput.qualityBefore;
+  const mementoQualityAfter = repairedMementoOutput.qualityAfter;
+
   const mementoUpdate = await updateThreadMementoLatestFromEnvelope({
     packet,
     envelope: outputEnvelope,
@@ -3740,6 +4108,17 @@ export async function runOrchestrationPipeline(args: {
     breakpointDecision,
   });
   threadMemento = mementoUpdate.latest ? sanitizeThreadMementoLatest(mementoUpdate.latest) : null;
+  if (mementoUpdate.shapeSource === "fallback") {
+    mementoQualityResolution = "fallback";
+  }
+  await appendMementoQualityTrace({
+    qualityBefore: mementoQualityBefore,
+    qualityAfter: mementoQualityAfter,
+    shapeSource: mementoUpdate.shapeSource,
+    resolvedBy: mementoQualityResolution,
+    effectiveDecisionsCount: mementoUpdate.latest?.decisions.length ?? 0,
+    logger: log,
+  });
 
   const avoidPeakOverwhelm = resolveAvoidPeakOverwhelm(packet);
   const messageIdForAffect = resolvePacketMessageId(packet, transmission);
