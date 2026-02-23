@@ -217,6 +217,96 @@ describe("ThreadMementoLatest", () => {
     expect(body.threadMemento.arc).not.toBe("Stored Arc");
   });
 
+  it("ignores request thread_memento when threadId mismatches", async () => {
+    const now = new Date().toISOString();
+    await store.upsertThreadMementoLatest({
+      memento: {
+        mementoId: "stored-t-mismatch",
+        threadId: "t-mismatch",
+        createdTs: now,
+        updatedAt: now,
+        version: "memento-v0.1",
+        arc: "Stored Arc",
+        active: ["Stored Active"],
+        parked: [],
+        decisions: [],
+        next: ["Stored Next"],
+        affect: {
+          points: [],
+          rollup: {
+            phase: "settled",
+            intensityBucket: "low",
+            updatedAt: now,
+          },
+        },
+      },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": JSON.stringify({ assistant_text: ASSISTANT_TEXT }),
+      },
+      payload: {
+        threadId: "t-mismatch",
+        message: "Prefer stored memento when request threadId mismatches.",
+        context: {
+          thread_memento: makeRequestThreadMementoV02({
+            threadId: "t-other",
+            arc: "Request Arc",
+          }),
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.threadMemento.arc).toBe("Stored Arc");
+  });
+
+  it("maps sentinel affect points to server in request memento", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat",
+      headers: {
+        "x-sol-test-output-envelope": JSON.stringify({ assistant_text: ASSISTANT_TEXT }),
+      },
+      payload: {
+        threadId: "t-sentinel",
+        message: "Use request memento affect mapping.",
+        context: {
+          thread_memento: {
+            ...makeRequestThreadMementoV02({
+              threadId: "t-sentinel",
+              arc: "Request Arc",
+            }),
+            affect: {
+              points: [
+                {
+                  endMessageId: "msg-sentinel",
+                  label: "surprise",
+                  intensity: 0.4,
+                  confidence: "high",
+                  source: "sentinel",
+                },
+              ],
+              rollup: {
+                phase: "settled",
+                intensityBucket: "med",
+                updatedAt: new Date().toISOString(),
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.threadMemento.affect.points[0].source).toBe("server");
+  });
+
   it("freezes summary at peak unless breakpoint decision is MUST", async () => {
     const responseSkip = await app.inject({
       method: "POST",
@@ -414,6 +504,41 @@ describe("ThreadMementoLatest", () => {
       threadContextMode: "off",
     });
     expect(offItems.some((item) => item.kind === "memento")).toBe(false);
+  });
+
+  it("uses requestThreadMemento in retrieval when provided", async () => {
+    const now = new Date().toISOString();
+    const requestMemento = {
+      mementoId: "req-retrieval",
+      threadId: "t-retrieval-req",
+      createdTs: now,
+      updatedAt: now,
+      version: "memento-v0.1" as const,
+      arc: "Request Arc",
+      active: ["Active"],
+      parked: [],
+      decisions: [],
+      next: ["Next"],
+      affect: {
+        points: [],
+        rollup: {
+          phase: "settled" as const,
+          intensityBucket: "low" as const,
+          updatedAt: now,
+        },
+      },
+    };
+
+    const items = await retrieveContext({
+      threadId: "t-retrieval-req",
+      packetType: "chat",
+      message: "next",
+      threadContextMode: "auto",
+      requestThreadMemento: requestMemento,
+    });
+
+    const memento = items.find((item) => item.kind === "memento");
+    expect(memento?.id).toBe("req-retrieval");
   });
 
   it("does not persist latest on every turn", async () => {
